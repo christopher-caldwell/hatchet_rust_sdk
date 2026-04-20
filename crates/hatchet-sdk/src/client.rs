@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::transport::Transport;
+use crate::worker::WorkerBuilder;
 
 #[derive(Debug, Clone)]
 pub struct Client<T: Transport> {
@@ -45,14 +46,33 @@ impl<T: Transport> Client<T> {
             output: PhantomData,
         }
     }
+
+    #[must_use]
+    pub fn worker(&self, name: impl Into<String>) -> WorkerBuilder<T>
+    where
+        T: 'static,
+    {
+        WorkerBuilder::new(name.into(), Arc::clone(&self.transport))
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WorkflowHandle<T: Transport, I, O> {
     workflow_name: String,
     transport: Arc<T>,
     input: PhantomData<fn(I)>,
     output: PhantomData<fn() -> O>,
+}
+
+impl<T: Transport, I, O> Clone for WorkflowHandle<T, I, O> {
+    fn clone(&self) -> Self {
+        Self {
+            workflow_name: self.workflow_name.clone(),
+            transport: Arc::clone(&self.transport),
+            input: PhantomData,
+            output: PhantomData,
+        }
+    }
 }
 
 impl<T: Transport, I, O> WorkflowHandle<T, I, O>

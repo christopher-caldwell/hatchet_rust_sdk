@@ -10,4 +10,6 @@ pub enum Error {
     Transport(String),
     #[error("durable runtime error: {0}")]
     Durable(String),
+    #[error("worker runtime error: {0}")]
+    Worker(String),
 }
