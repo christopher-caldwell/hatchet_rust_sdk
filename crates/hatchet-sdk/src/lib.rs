@@ -1,3 +1,15 @@
+//! Minimal Rust-first Hatchet SDK surface for personal use.
+//!
+//! This crate is intentionally scoped around:
+//! - typed workflow declaration and run APIs
+//! - child workflow execution from task context
+//! - durable task context primitives
+//! - in-process worker runtime and registration
+//! - feature-oriented clients (`runs`, `workflows`, `events`, etc.)
+//! - optional proc-macro sugar (`#[workflow]`, `#[task]`, `#[durable_task]`)
+//!
+//! For runnable end-to-end usage, see the examples workspace binaries.
+
 mod client;
 mod clients;
 mod context;

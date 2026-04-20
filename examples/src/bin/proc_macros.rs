@@ -62,9 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     handle.shutdown().await?;
 
-    println!(
-        "feature_set_7_proc_macros workflow={WORKFLOW_NAME} rendered={rendered} durable={approved}"
-    );
+    println!("proc_macros workflow={WORKFLOW_NAME} rendered={rendered} durable={approved}");
 
     Ok(())
 }
