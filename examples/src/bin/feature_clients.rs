@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let workflow = client.workflow::<CustomerInput, String>("billing.charge_customer");
     let run_ref = workflow
-        .run(
+        .run_no_wait(
             CustomerInput {
                 customer_id: "cust-44".to_owned(),
             },
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .put("billing.charge_customer", 50)
         .await;
 
-    let run_status = client.runs().get_status(&run_ref.run_id).await?;
+    let run_status = client.runs().get_status(run_ref.run_id()).await?;
     let all_runs = client.runs().list().await;
     let workflows = client.workflows().list().await;
     let schedules = client.schedules().list().await;

@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hatchet_core::{RunOpts, WorkflowRunId, WorkflowRunRef};
+use hatchet_core::{RunOpts, WorkflowRunId};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::error::{Error, Result};
+use crate::run_ref::{RunControl, WorkflowRunRef};
 use crate::transport::Transport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +113,6 @@ pub(crate) struct FeatureState {
     workers: HashMap<String, WorkerInfo>,
     rate_limits: HashMap<String, u32>,
     events: Vec<EventRecord>,
-    logs: Vec<LogRecord>,
     filters: HashMap<String, FilterDefinition>,
     webhooks: HashMap<String, WebhookDefinition>,
 }
@@ -188,13 +188,17 @@ impl<T: Transport> RunsClient<T> {
     }
 
     #[must_use]
-    pub fn run_ref<O>(&self, run_id: WorkflowRunId) -> WorkflowRunRef<O> {
-        WorkflowRunRef::new(run_id)
+    pub fn run_ref<O>(
+        &self,
+        run_id: WorkflowRunId,
+        client: Arc<dyn RunControl>,
+    ) -> WorkflowRunRef<O> {
+        WorkflowRunRef::new(run_id, client)
     }
 
-    pub async fn subscribe_to_stream(&self, _run_id: &WorkflowRunId) -> Result<Vec<Value>> {
+    pub async fn subscribe_to_stream(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>> {
         let _state = self.state.read().await;
-        Ok(Vec::new())
+        Ok(self._transport.stream_run(run_id).await?)
     }
 
     pub async fn branch_durable_task(
@@ -565,8 +569,8 @@ impl<T: Transport> LogsClient<T> {
     }
 
     pub async fn list(&self) -> Vec<LogRecord> {
-        let state = self.state.read().await;
-        state.logs.clone()
+        let _state = self.state.read().await;
+        self._transport.list_logs().await
     }
 }
 
@@ -680,6 +684,23 @@ impl<T: Transport> CelClient<T> {
             expression,
             accepted,
             details,
+        }
+    }
+}
+
+/// Client for tenant-level operations.
+///
+/// Placeholder for transport-backed tenant operations (API key management,
+/// tenant settings, etc.) that exist in the TS SDK's `features/tenant.ts`.
+#[derive(Debug, Clone)]
+pub struct TenantClient<T: Transport> {
+    _transport: Arc<T>,
+}
+
+impl<T: Transport> TenantClient<T> {
+    pub(crate) fn new(transport: Arc<T>) -> Self {
+        Self {
+            _transport: transport,
         }
     }
 }

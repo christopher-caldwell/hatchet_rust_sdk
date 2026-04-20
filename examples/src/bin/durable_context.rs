@@ -25,6 +25,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             task_name: "await_payment_event".to_owned(),
             workflow_run_id: WorkflowRunId("durable-parent-run-1".to_owned()),
             task_run_id: "durable-task-run-1".to_owned(),
+                workflow_id: None,
+                workflow_version_id: None,
         },
         Arc::clone(&transport),
         2,
@@ -90,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         durable.invocation_count(),
         now.duration_since(SystemTime::UNIX_EPOCH).is_ok(),
         event.is_some(),
-        spawned.run_id,
+        spawned.run_id(),
         spawned_many.len(),
         submitted.len()
     );

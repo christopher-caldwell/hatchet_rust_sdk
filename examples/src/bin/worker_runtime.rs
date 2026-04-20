@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .await?;
                     Ok(RenderEmailOutput {
                         preview: format!("hello {}", input.recipient),
-                        child_run_id: child_run.run_id.0,
+                        child_run_id: child_run.run_id().0.clone(),
                     })
                 }
             },
@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(DurableOutput {
                         status: "wait-complete".to_owned(),
                         invocation_count: ctx.invocation_count(),
-                        child_run_id: child_run.run_id.0,
+                        child_run_id: child_run.run_id().0.clone(),
                     })
                 }
             },
@@ -110,6 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 task_name: "render".to_owned(),
                 workflow_run_id: WorkflowRunId("worker-parent-run-1".to_owned()),
                 task_run_id: "worker-task-run-1".to_owned(),
+                workflow_id: None,
+                workflow_version_id: None,
             },
         )
         .await?;
@@ -125,6 +127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 task_name: "await_payment".to_owned(),
                 workflow_run_id: WorkflowRunId("worker-parent-run-2".to_owned()),
                 task_run_id: "worker-task-run-2".to_owned(),
+                workflow_id: None,
+                workflow_version_id: None,
             },
             3,
         )

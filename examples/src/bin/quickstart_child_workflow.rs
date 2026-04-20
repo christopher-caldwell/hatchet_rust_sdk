@@ -36,14 +36,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         RunOpts::default(),
                     )
                     .await?;
-                Ok(format!("spawned child run {}", child.run_id.0))
+                Ok(format!("spawned child run {}", child.run_id().0))
             }
         })
         .build();
 
     let handle = worker.start()?;
     let parent_run = parent_workflow
-        .run(
+        .run_no_wait(
             ParentInput {
                 order_id: "ord-1001".to_owned(),
             },
@@ -60,8 +60,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ContextIds {
                 workflow_name: "orders.parent".to_owned(),
                 task_name: "orders.run".to_owned(),
-                workflow_run_id: parent_run.run_id.clone(),
+                workflow_run_id: parent_run.run_id().clone(),
                 task_run_id: "task-run-orders-run".to_owned(),
+                workflow_id: None,
+                workflow_version_id: None,
             },
         )
         .await?;
@@ -74,7 +76,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .count();
     println!(
         "quickstart_child_workflow parent_run={} child_runs={} output={}",
-        parent_run.run_id.0, child_count, output
+        parent_run.run_id().0,
+        child_count,
+        output
     );
 
     Ok(())

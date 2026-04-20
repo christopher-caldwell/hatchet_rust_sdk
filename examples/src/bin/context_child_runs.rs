@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .start()?;
 
     let parent_run = parent_workflow
-        .run(
+        .run_no_wait(
             ParentInput {
                 customer_ids: vec![
                     "cust-1".to_owned(),
@@ -80,8 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ContextIds {
                 workflow_name: "billing.monthly_batch".to_owned(),
                 task_name: "billing.dispatch_children".to_owned(),
-                workflow_run_id: parent_run.run_id.clone(),
+                workflow_run_id: parent_run.run_id().clone(),
                 task_run_id: "dispatch-task-run-1".to_owned(),
+                workflow_id: None,
+                workflow_version_id: None,
             },
         )
         .await?;
@@ -91,14 +93,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let linked_to_parent = submitted
         .iter()
         .filter(|run| {
-            run.opts.metadata.contains_key("parent_workflow_run_id")
-                && run.opts.metadata.contains_key("parent_task_run_id")
+            run.opts.parent_workflow_run_id.is_some() && run.opts.parent_task_run_id.is_some()
         })
         .count();
 
     println!(
         "parent_run={} dispatched_children={} linked_to_parent={} total_submitted={}",
-        parent_run.run_id,
+        parent_run.run_id(),
         dispatch_result.child_count,
         linked_to_parent,
         submitted.len(),

@@ -10,7 +10,7 @@ mod email_workflow {
     use super::{DurableContext, InMemoryContext, InMemoryDurableContext, durable_task, task};
 
     #[task]
-    pub async fn render<T: hatchet_sdk::Transport>(
+    pub async fn render<T: hatchet_sdk::Transport + 'static>(
         input: String,
         _ctx: InMemoryContext<T>,
     ) -> hatchet_sdk::Result<String> {
@@ -18,7 +18,7 @@ mod email_workflow {
     }
 
     #[durable_task]
-    pub async fn await_approval<T: hatchet_sdk::Transport>(
+    pub async fn await_approval<T: hatchet_sdk::Transport + 'static>(
         input: String,
         ctx: InMemoryDurableContext<T>,
     ) -> hatchet_sdk::Result<String> {
@@ -32,6 +32,8 @@ fn ids(task_name: &str) -> ContextIds {
         task_name: task_name.to_owned(),
         workflow_run_id: WorkflowRunId("run-macro".to_owned()),
         task_run_id: format!("task-{task_name}"),
+        workflow_id: None,
+        workflow_version_id: None,
     }
 }
 

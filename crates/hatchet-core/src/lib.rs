@@ -1,3 +1,3 @@
 pub mod run;
 
-pub use run::{Priority, RunOpts, WorkflowRunId, WorkflowRunRef};
+pub use run::{Priority, RunOpts, WorkflowRunId};

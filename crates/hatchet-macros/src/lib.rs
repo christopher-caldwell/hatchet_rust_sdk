@@ -134,7 +134,7 @@ fn expand_task_like(attr: TokenStream, item: TokenStream, durable: bool) -> Toke
             client: &::hatchet_sdk::Client<T>,
         ) -> #return_type
         where
-            T: ::hatchet_sdk::Transport,
+            T: ::hatchet_sdk::Transport + 'static,
         {
             #handle_body
         }

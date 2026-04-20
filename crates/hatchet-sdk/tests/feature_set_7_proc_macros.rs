@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use hatchet_sdk::{
-    Client, ContextIds, DurableContext, InMemoryContext, InMemoryDurableContext, InMemoryTransport,
-    WorkflowRunId, durable_task, task, workflow,
+    Client, Context, ContextIds, DurableContext, InMemoryContext, InMemoryDurableContext,
+    InMemoryTransport, WorkflowRunId, durable_task, task, workflow,
 };
 
 #[workflow(name = "macro.workflow")]
 mod macro_workflow {
-    use super::{DurableContext, InMemoryContext, InMemoryDurableContext, durable_task, task};
+    use super::{
+        Context, DurableContext, InMemoryContext, InMemoryDurableContext, durable_task, task,
+    };
 
     #[task]
     pub async fn render<T: hatchet_sdk::Transport>(
@@ -24,6 +26,14 @@ mod macro_workflow {
     ) -> hatchet_sdk::Result<u32> {
         Ok(input + ctx.invocation_count())
     }
+
+    #[task]
+    pub async fn render_with_impl_context(
+        input: u32,
+        ctx: impl Context,
+    ) -> hatchet_sdk::Result<u32> {
+        Ok(input + if ctx.workflow_name().is_empty() { 0 } else { 1 })
+    }
 }
 
 fn ids(task_name: &str) -> ContextIds {
@@ -32,6 +42,8 @@ fn ids(task_name: &str) -> ContextIds {
         task_name: task_name.to_owned(),
         workflow_run_id: WorkflowRunId("macro-run-1".to_owned()),
         task_run_id: format!("task-run-{task_name}"),
+        workflow_id: None,
+        workflow_version_id: None,
     }
 }
 
@@ -64,6 +76,16 @@ async fn validates_proc_macro_task_and_registration_sugar() {
         .await
         .expect("durable task should run");
     assert_eq!(durable, 22);
+
+    let impl_ctx = handle
+        .run_task(
+            &macro_workflow::render_with_impl_context_task_handle(&client),
+            9_u32,
+            ids("render_with_impl_context"),
+        )
+        .await
+        .expect("impl-context task should run");
+    assert_eq!(impl_ctx, 10);
 
     assert_eq!(WORKFLOW_NAME, "macro.workflow");
     handle.shutdown().await.expect("shutdown should succeed");

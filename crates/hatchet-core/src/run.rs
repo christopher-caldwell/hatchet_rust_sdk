@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,12 +13,16 @@ pub enum Priority {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunOpts {
-    pub metadata: HashMap<String, Value>,
+    pub additional_metadata: HashMap<String, String>,
     pub priority: Option<Priority>,
     pub sticky: Option<String>,
-    pub key: Option<String>,
+    pub child_key: Option<String>,
     pub desired_worker_labels: HashMap<String, String>,
+    pub parent_workflow_run_id: Option<String>,
+    pub parent_task_run_id: Option<String>,
+    pub child_index: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,21 +32,5 @@ pub struct WorkflowRunId(pub String);
 impl Display for WorkflowRunId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct WorkflowRunRef<O> {
-    pub run_id: WorkflowRunId,
-    output: PhantomData<fn() -> O>,
-}
-
-impl<O> WorkflowRunRef<O> {
-    #[must_use]
-    pub fn new(run_id: WorkflowRunId) -> Self {
-        Self {
-            run_id,
-            output: PhantomData,
-        }
     }
 }

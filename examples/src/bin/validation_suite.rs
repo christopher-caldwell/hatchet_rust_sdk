@@ -30,6 +30,8 @@ fn checkout_context(task_name: &str, run_id: &WorkflowRunId, task_run_id: &str) 
         task_name: task_name.to_owned(),
         workflow_run_id: run_id.clone(),
         task_run_id: task_run_id.to_owned(),
+        workflow_id: None,
+        workflow_version_id: None,
     }
 }
 
@@ -76,6 +78,8 @@ async fn wait_for_payment_signal(transport: Arc<InMemoryTransport>) -> hatchet_s
             task_name: "commerce.checkout.await_signal".to_owned(),
             workflow_run_id: WorkflowRunId("signal-run-1".to_owned()),
             task_run_id: "signal-task-1".to_owned(),
+            workflow_id: None,
+            workflow_version_id: None,
         },
         transport,
         1,
@@ -110,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         subtotal_cents: 12_000,
     };
     let checkout_run = checkout_workflow
-        .run(order.clone(), RunOpts::default())
+        .run_no_wait(order.clone(), RunOpts::default())
         .await?;
 
     let total = worker
@@ -119,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             order.clone(),
             checkout_context(
                 "commerce.checkout.calculate_total",
-                &checkout_run.run_id,
+                checkout_run.run_id(),
                 "task-calc-total-1",
             ),
         )
@@ -131,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             order,
             checkout_context(
                 "commerce.checkout.reconcile",
-                &checkout_run.run_id,
+                checkout_run.run_id(),
                 "task-reconcile-1",
             ),
             2,
@@ -140,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     worker.shutdown().await?;
 
     let queue_metrics = client.metrics().get_queue_metrics().await;
-    let run_status = client.runs().get_status(&checkout_run.run_id).await?;
+    let run_status = client.runs().get_status(checkout_run.run_id()).await?;
     let submitted = transport.submitted_runs().await;
     let ledger_child_runs = submitted
         .iter()
@@ -149,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "checkout_run={} status={:?} total_cents={} reconcile_status={} ledger_child_runs={} queue_total={}",
-        checkout_run.run_id,
+        checkout_run.run_id(),
         run_status,
         total.total_cents,
         reconciled.status,
