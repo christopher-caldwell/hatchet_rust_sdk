@@ -1,8 +1,11 @@
 [package]
 name = "example"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
-hatchet-sdk = { path = ".." }
+hatchet-sdk = { path = "../crates/hatchet-sdk" }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }

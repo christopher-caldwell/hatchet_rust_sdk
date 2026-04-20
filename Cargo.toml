@@ -1,6 +1,13 @@
-[package]
-name = "hatchet_rust_sdk"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/hatchet-core", "crates/hatchet-sdk", "examples"]
+resolver = "3"
 
-[dependencies]
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+publish = false
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
