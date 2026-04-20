@@ -64,6 +64,10 @@ where
         &self.workflow_name
     }
 
+    pub(crate) fn workflow_name_owned(&self) -> String {
+        self.workflow_name.clone()
+    }
+
     /// Submits one workflow run and returns a typed run reference.
     ///
     /// # Errors
