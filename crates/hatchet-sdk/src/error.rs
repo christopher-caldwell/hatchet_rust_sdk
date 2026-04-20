@@ -8,4 +8,6 @@ pub enum Error {
     InputSerialization(String),
     #[error("transport error: {0}")]
     Transport(String),
+    #[error("durable runtime error: {0}")]
+    Durable(String),
 }
