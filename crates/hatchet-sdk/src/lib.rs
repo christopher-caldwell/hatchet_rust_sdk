@@ -17,5 +17,6 @@ pub use context::{Context, ContextIds, InMemoryContext};
 pub use durable::{DurableContext, DurableEvent, InMemoryDurableContext};
 pub use error::{Error, Result};
 pub use hatchet_core::{Priority, RunOpts, WorkflowRunId, WorkflowRunRef};
+pub use hatchet_macros::{durable_task, task, workflow};
 pub use transport::{InMemoryTransport, SubmittedRun, Transport};
 pub use worker::{Worker, WorkerBuilder, WorkerHandle};

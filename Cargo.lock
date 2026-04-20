@@ -32,11 +32,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatchet-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "hatchet-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "hatchet-core",
+ "hatchet-macros",
  "serde",
  "serde_json",
  "thiserror",
