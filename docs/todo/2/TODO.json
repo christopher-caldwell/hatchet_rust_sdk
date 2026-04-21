@@ -1,0 +1,55 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-04-21",
+  "project": "Hatchet Rust SDK — Complete TS Parity",
+  "summary": "P0-P5 complete. P6 (integration tests) in progress — framework ready, REST auth blocker identified.",
+  "completion_status": {
+    "P0_transport_worker_correctness": "done",
+    "P1_durable_runtime_parity": "done",
+    "P2_api_parity": "done",
+    "P3_feature_clients_parity": "done",
+    "P4_worker_runtime_quality": "done",
+    "P5_reliability_error_semantics": "done",
+    "P6_integration_tests": "in_progress"
+  },
+  "current_blocker": {
+    "issue": "REST API returns 403 Forbidden on /workers, /workflows endpoints",
+    "affects": "integration_feature_clients_rest, integration_run_cancel tests",
+    "evidence": "curl -H 'Authorization: Bearer $TOKEN' http://192.168.1.162:8888/api/v1/stable/tenants/{id}/workers → 403; workflow-runs endpoint returns 200 OK",
+    "hypothesis": "Token missing /workers, /workflows permissions or endpoint path mismatch",
+    "resolution": "Verify token perms in Hatchet UI; check actual API schema"
+  },
+  "recent_work": [
+    {
+      "phase": "P3.2-P3.4, P5",
+      "done": "RunFilter, list_filtered(), REST-backed replay/create methods, metrics clients, config.server_url extraction"
+    },
+    {
+      "phase": "P6.1",
+      "done": "Integration test framework: 5 tests (basic, dag, cancel, rest_clients, logs), multi-threaded harness, load_env() helper"
+    },
+    {
+      "phase": "Config fix",
+      "done": "Separated server_url (HTTP API) from host_port (gRPC); REST now targets 8888 not 7077"
+    }
+  ],
+  "files_changed": [
+    "crates/hatchet-sdk/src/config.rs — added server_url",
+    "crates/hatchet-sdk/src/grpc_transport.rs — use server_url for REST",
+    "crates/hatchet-sdk/src/clients.rs — RunFilter, REST-backed methods",
+    "crates/hatchet-sdk/src/rest_client.rs — new endpoints",
+    "crates/hatchet-sdk/tests/integration.rs — 5 tests, multi_thread",
+    "TODO.parity.json — P3.2-P3.4, P5.1-P5.2 marked done"
+  ],
+  "next_steps": [
+    "1. Debug REST 403: verify token perms, check API schema for /workers path",
+    "2. Once auth fixed: run integration test suite",
+    "3. Add parity contract tests (P6.2) if integration passes",
+    "4. Mark P6.1, P6.2 done in TODO.parity.json"
+  ],
+  "test_commands": {
+    "integration": "cargo test -p hatchet-sdk --features integration --test integration -- --nocapture",
+    "unit": "cargo test --lib -p hatchet-sdk",
+    "build": "cargo build --workspace"
+  }
+}

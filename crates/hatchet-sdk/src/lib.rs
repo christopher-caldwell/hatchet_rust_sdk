@@ -15,6 +15,7 @@ mod clients;
 mod context;
 mod durable;
 mod error;
+mod rest_client;
 mod run_ref;
 mod task;
 mod transport;
@@ -37,8 +38,8 @@ pub mod retry;
 pub use client::{Client, DurableTaskHandle, TaskHandle, WorkflowHandle};
 pub use clients::{
     CelClient, CelDebugResult, Cron, CronsClient, EventRecord, EventsClient, FilterDefinition,
-    FiltersClient, LogRecord, LogsClient, MetricsClient, QueueMetrics, RateLimitsClient, RunRecord,
-    RunStatus, RunsClient, Schedule, SchedulesClient, TenantClient, WebhookDefinition,
+    FiltersClient, LogRecord, LogsClient, MetricsClient, QueueMetrics, RateLimitsClient, RunFilter,
+    RunRecord, RunStatus, RunsClient, Schedule, SchedulesClient, TenantClient, WebhookDefinition,
     WebhooksClient, WorkerInfo, WorkersClient, WorkflowDefinition, WorkflowMetrics,
     WorkflowsClient,
 };
@@ -52,7 +53,10 @@ pub use durable::{
     render_conditions, task_conditions_to_pb,
 };
 pub use error::{Error, Result};
-pub use hatchet_core::{Priority, RunOpts, WorkflowRunId};
+pub use hatchet_core::{
+    DesiredWorkerLabel, DesiredWorkerLabelConfig, Priority, RunOpts,
+    WorkerLabelComparator as RunWorkerLabelComparator, WorkflowRunId,
+};
 pub use hatchet_macros::{durable_task, task, workflow};
 pub use run_ref::{RunControl, WorkflowRunRef};
 pub use task::{

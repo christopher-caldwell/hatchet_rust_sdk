@@ -1,0 +1,75 @@
+use hatchet_sdk::{
+    Client, ContextExt, InMemoryContext, InMemoryTransport, Result, TaskConfig, WorkflowDeclaration,
+};
+use std::sync::Arc;
+
+/// This example demonstrates how to build a Directed Acyclic Graph (DAG) workflow,
+/// where some tasks run concurrently and a final task runs after they complete.
+#[tokio::main]
+async fn main() -> Result<()> {
+    let transport = Arc::new(InMemoryTransport::new());
+    let client = Client::new(transport);
+
+    // 1. Declare Tasks
+    let prepare_task = client.task::<serde_json::Value, String>("prepare");
+    let fetch_a_task = client.task::<serde_json::Value, String>("fetch-a");
+    let fetch_b_task = client.task::<serde_json::Value, String>("fetch-b");
+    let combine_task = client.task::<serde_json::Value, String>("combine");
+
+    // 2. Register Tasks to a Worker
+    let worker = client
+        .worker("dag-worker")
+        .register_task(&prepare_task, |_, _ctx: InMemoryContext<_>| async move {
+            println!("Preparing resources...");
+            Ok("prepared".to_string())
+        })
+        .register_task(&fetch_a_task, |_, _ctx: InMemoryContext<_>| async move {
+            println!("Fetching resource A...");
+            Ok("data_a".to_string())
+        })
+        .register_task(&fetch_b_task, |_, _ctx: InMemoryContext<_>| async move {
+            println!("Fetching resource B...");
+            Ok("data_b".to_string())
+        })
+        // Context exposes methods like `.parent_output()` to get outputs of dependents
+        .register_task(&combine_task, |_, ctx: InMemoryContext<_>| async move {
+            let res_a: String = ctx.parent_output().await?.unwrap_or_default();
+            println!("Combining results...");
+            Ok(format!(
+                "Combined result: data A is {}, data B was successful too",
+                res_a
+            ))
+        })
+        .build();
+
+    let _handle = worker.start()?;
+
+    // 3. Declare the Workflow DAG Structure
+    // Both fetch_a and fetch_b wait for 'prepare'
+    // 'combine' waits for both fetch_a and fetch_b
+    let decl: WorkflowDeclaration<serde_json::Value, String> =
+        WorkflowDeclaration::new("dag-workflow")
+            .step(&prepare_task, TaskConfig::default())
+            // step_after links the task to its parent(s)
+            .step_after(&fetch_a_task, &[&prepare_task], TaskConfig::default())
+            .step_after(&fetch_b_task, &[&prepare_task], TaskConfig::default())
+            // Combine runs only after both fetches succeed
+            .step_after(
+                &combine_task,
+                &[&fetch_a_task, &fetch_b_task],
+                TaskConfig::default(),
+            );
+
+    let _ = client.register_workflow(decl).await;
+
+    // 4. Run the Workflow
+    println!("Starting DAG workflow...");
+    let result = client
+        .workflow::<serde_json::Value, String>("dag-workflow")
+        .run(serde_json::json!({}), hatchet_sdk::RunOpts::default())
+        .await?;
+
+    println!("DAG Workflow Output: {}", result);
+
+    Ok(())
+}

@@ -1,0 +1,862 @@
+{
+  "version": "1.0.0",
+  "generated_from": "TODO.md",
+  "generated_at_note": "Update manually when TODO.md changes.",
+  "project": "hatchet_rust_sdk",
+  "objective": "Functional parity with Hatchet TypeScript SDK v1 while preserving Rust-native design.",
+  "target_outcome": [
+    "Declare workflows/tasks/durable tasks with equivalent semantics.",
+    "Run/schedule/cron/bulk-run workflows with equivalent run options.",
+    "Run workers against real Hatchet engine, including cancellation and durable flows.",
+    "Use context and durable context methods with real backend behavior.",
+    "Use feature clients (runs/workflows/workers/etc.) against real API.",
+    "Keep Rust-first design (typed APIs, Result errors, trait-based transport, no JS runtime patterns)."
+  ],
+  "ground_rules": [
+    "Keep InMemoryTransport and existing tests working.",
+    "Add parity through additive gRPC/REST-backed paths.",
+    "Preserve Rust API ergonomics while adding TS-equivalent capability.",
+    "Do not remove existing public items unless replaced compatibly."
+  ],
+  "current_gaps_confirmed": [
+    "gRPC workflow registration drops rate limits/worker labels/concurrency/slot requests.",
+    "GrpcTransport stream_run/list_logs are stubs.",
+    "Worker action loop ignores cancel actions.",
+    "Context refresh_timeout/release_slot are no-ops.",
+    "Durable listener is not integrated into runtime durable path.",
+    "Durable eviction path is not integrated end-to-end.",
+    "Feature clients are mostly in-memory, not REST-backed.",
+    "Workflow handle lacks run_many + schedule/delay/cron helpers.",
+    "Run options do not support full desired worker label fidelity.",
+    "Health server is not integrated with worker lifecycle."
+  ],
+  "mapping_index": {
+    "client_surface": {
+      "ts_files": [
+        "sources/hatchet-main/sdks/typescript/src/v1/client/client.ts"
+      ],
+      "ts_functions": [
+        "runNoWait",
+        "run",
+        "runManyNoWait",
+        "runRef",
+        "worker(name, options)",
+        "feature getters"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/client.rs",
+        "crates/hatchet-sdk/src/clients.rs",
+        "crates/hatchet-sdk/src/worker.rs"
+      ]
+    },
+    "workflow_declaration_and_task_options": {
+      "ts_files": [
+        "sources/hatchet-main/sdks/typescript/src/v1/declaration.ts",
+        "sources/hatchet-main/sdks/typescript/src/v1/task.ts"
+      ],
+      "ts_functions": [
+        "waitFor",
+        "cancelIf",
+        "skipIf",
+        "slotRequests",
+        "concurrency arrays",
+        "onFailure",
+        "onSuccess",
+        "inputValidator",
+        "defaultFilters"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/workflow.rs",
+        "crates/hatchet-sdk/src/task.rs",
+        "crates/hatchet-sdk/src/transport.rs",
+        "crates/hatchet-sdk/src/grpc_transport.rs"
+      ]
+    },
+    "context_and_durable_context": {
+      "ts_files": [
+        "sources/hatchet-main/sdks/typescript/src/v1/client/worker/context.ts"
+      ],
+      "ts_functions": [
+        "cancel",
+        "refreshTimeout",
+        "releaseSlot",
+        "putStream",
+        "waitFor",
+        "waitForEvent",
+        "sleepFor",
+        "sleepUntil",
+        "now",
+        "memo",
+        "spawnChild",
+        "spawnChildren"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/context.rs",
+        "crates/hatchet-sdk/src/durable.rs",
+        "crates/hatchet-sdk/src/durable_listener.rs",
+        "crates/hatchet-sdk/src/eviction.rs"
+      ]
+    },
+    "worker_runtime": {
+      "ts_files": [
+        "sources/hatchet-main/sdks/typescript/src/v1/client/worker/worker.ts",
+        "sources/hatchet-main/sdks/typescript/src/v1/client/worker/worker-internal.ts"
+      ],
+      "ts_functions": [
+        "register/listen loop",
+        "cancel supervision",
+        "health server lifecycle",
+        "eviction integration"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/worker.rs",
+        "crates/hatchet-sdk/src/grpc_transport.rs",
+        "crates/hatchet-sdk/src/health.rs"
+      ]
+    },
+    "feature_clients": {
+      "ts_files": [
+        "sources/hatchet-main/sdks/typescript/src/v1/client/features/*.ts"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/clients.rs"
+      ]
+    }
+  },
+  "tasks": [
+    {
+      "id": "P0.1",
+      "phase": "P0",
+      "title": "Complete gRPC workflow registration payload parity",
+      "status": "done",
+      "priority": "blocking",
+      "depends_on": [],
+      "ts_mapping": [
+        "worker-internal.ts registration payload for putWorkflow"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/grpc_transport.rs",
+        "crates/hatchet-sdk/src/transport.rs",
+        "crates/hatchet-sdk/src/task.rs",
+        "crates/hatchet-sdk/src/workflow.rs"
+      ],
+      "steps": [
+        "Fill rendered_to_proto_task mappings for rate_limits, worker_labels, concurrency, slot_requests, backoff_factor, backoff_max_seconds.",
+        "Ensure WorkflowRegistration::from_declaration carries all required fields.",
+        "Add tests asserting these proto fields are populated and not defaulted away."
+      ],
+      "acceptance_criteria": [
+        "No TODO placeholders remain in task proto conversion.",
+        "Regression tests fail if any mapped field is dropped."
+      ]
+    },
+    {
+      "id": "P0.2",
+      "phase": "P0",
+      "title": "Add real run stream and log retrieval paths",
+      "status": "done",
+      "priority": "blocking",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "util/workflow-run-ref.ts listener-backed stream/result",
+        "features/logs.ts log retrieval"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/grpc_transport.rs",
+        "crates/hatchet-sdk/src/clients.rs"
+      ],
+      "steps": [
+        "Implement GrpcTransport::stream_run() from real source (listener or REST).",
+        "Implement GrpcTransport::list_logs() with real backend call.",
+        "Ensure LogsClient::list() returns real records in grpc mode."
+      ],
+      "acceptance_criteria": [
+        "WorkflowRunRef::stream() returns non-empty events for streamed tasks.",
+        "logs().list() returns engine logs for real runs."
+      ]
+    },
+    {
+      "id": "P0.3",
+      "phase": "P0",
+      "title": "Handle cancel actions in worker action loop",
+      "status": "done",
+      "priority": "blocking",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "worker-internal.ts::handleCancelStepRun"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/grpc_transport.rs",
+        "crates/hatchet-sdk/src/worker.rs",
+        "crates/hatchet-sdk/src/context.rs"
+      ],
+      "steps": [
+        "Handle cancel action type in handle_assigned_action.",
+        "Track running task contexts by task-run id and trigger cancellation token on cancel.",
+        "Ensure completion reporting after cancellation is correct (cancelled/failed, no false success)."
+      ],
+      "acceptance_criteria": [
+        "Engine-issued cancel stops long-running task code path.",
+        "Cancellation regression test verifies no unintended completion event after cancel."
+      ]
+    },
+    {
+      "id": "P0.4",
+      "phase": "P0",
+      "title": "Implement refresh_timeout and release_slot end-to-end",
+      "status": "done",
+      "priority": "blocking",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "context.ts::refreshTimeout()",
+        "context.ts::releaseSlot()"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/transport.rs",
+        "crates/hatchet-sdk/src/context.rs",
+        "crates/hatchet-sdk/src/grpc_transport.rs"
+      ],
+      "steps": [
+        "Extend Transport trait with refresh_timeout(task_run_id, increment) and release_slot(task_run_id).",
+        "Replace context no-op methods with transport calls.",
+        "Keep explicit no-op fallback in InMemoryTransport.",
+        "Implement dispatcher RPC calls in GrpcTransport."
+      ],
+      "acceptance_criteria": [
+        "Context methods affect real worker scheduling behavior in grpc mode.",
+        "In-memory tests remain green."
+      ]
+    },
+    {
+      "id": "P0.5",
+      "phase": "P0",
+      "title": "Correct worker action identity mapping",
+      "status": "done",
+      "priority": "blocking",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "worker-internal.ts action/task identifier handling"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/grpc_transport.rs",
+        "crates/hatchet-sdk/src/worker.rs"
+      ],
+      "steps": [
+        "Validate action_id/task_name/registry-key usage in dispatcher handling.",
+        "Fix lookup to use the exact registered action key expected by engine.",
+        "Add regression test for action-id mismatch."
+      ],
+      "acceptance_criteria": [
+        "Worker runs simple and namespaced task actions without key mismatch."
+      ]
+    },
+    {
+      "id": "P1.1",
+      "phase": "P1",
+      "title": "Integrate DurableListenerClient into runtime durable context",
+      "status": "done",
+      "priority": "blocking",
+      "depends_on": [
+        "P0.1",
+        "P0.3"
+      ],
+      "ts_mapping": [
+        "context.ts DurableContext methods",
+        "durable-listener-client.ts stream protocol"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/durable.rs",
+        "crates/hatchet-sdk/src/durable_listener.rs",
+        "crates/hatchet-sdk/src/worker.rs",
+        "crates/hatchet-sdk/src/grpc_transport.rs"
+      ],
+      "steps": [
+        "Introduce engine-backed durable context type separate from in-memory context.",
+        "Route durable worker execution to engine-backed context in grpc mode.",
+        "Implement durable operations using request/ack/callback stream flow."
+      ],
+      "acceptance_criteria": [
+        "Durable wait_for and spawn_children survive worker restart semantics via engine."
+      ]
+    },
+    {
+      "id": "P1.2",
+      "phase": "P1",
+      "title": "Add durable listener reconnection and callback durability",
+      "status": "done",
+      "priority": "high",
+      "depends_on": [
+        "P1.1"
+      ],
+      "ts_mapping": [
+        "durable-listener-client.ts reconnect/deferred behavior"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/durable_listener.rs"
+      ],
+      "steps": [
+        "Implement reconnect with backoff on stream close/error.",
+        "Rehydrate pending ack/callback waiters across reconnect boundaries.",
+        "Add timeout/error semantics matching TS expectations."
+      ],
+      "acceptance_criteria": [
+        "Stream interruption does not orphan in-flight durable waits."
+      ]
+    },
+    {
+      "id": "P1.3",
+      "phase": "P1",
+      "title": "Wire serverEvict into eviction manager",
+      "status": "done",
+      "priority": "high",
+      "depends_on": [
+        "P1.1"
+      ],
+      "ts_mapping": [
+        "worker-internal.ts + eviction manager integration"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/durable_listener.rs",
+        "crates/hatchet-sdk/src/eviction.rs",
+        "crates/hatchet-sdk/src/worker.rs",
+        "crates/hatchet-sdk/src/durable.rs"
+      ],
+      "steps": [
+        "Forward server eviction notices from durable listener to eviction manager.",
+        "Track active vs waiting durable states and apply correct eviction behavior.",
+        "Emit local cancellation and engine acknowledgment/reporting as needed."
+      ],
+      "acceptance_criteria": [
+        "Eviction paths are deterministic and test-covered."
+      ]
+    },
+    {
+      "id": "P1.4",
+      "phase": "P1",
+      "title": "Implement parent condition engine-backed durable resolution",
+      "status": "done",
+      "priority": "high",
+      "depends_on": [
+        "P1.1"
+      ],
+      "ts_mapping": [
+        "Durable waitFor parent condition behavior"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/durable.rs"
+      ],
+      "steps": [
+        "Replace current parent-condition unsupported runtime path with engine-backed wait flow.",
+        "Ensure parent condition expressions and readable-data-key behavior align with renderer."
+      ],
+      "acceptance_criteria": [
+        "Durable parent conditions execute without runtime errors in grpc mode."
+      ]
+    },
+    {
+      "id": "P2.1",
+      "phase": "P2",
+      "title": "Expand RunOpts worker-label fidelity",
+      "status": "done",
+      "priority": "high",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "declaration.ts::RunOpts.desiredWorkerLabels",
+        "admin.ts::convertDesiredWorkerLabels"
+      ],
+      "rust_files": [
+        "crates/hatchet-core/src/run.rs",
+        "crates/hatchet-sdk/src/grpc_transport.rs"
+      ],
+      "steps": [
+        "Upgrade RunOpts desired_worker_labels from flat map to rich config (value/required/weight/comparator).",
+        "Preserve backward compatibility for old serialized format where possible.",
+        "Map fields through trigger RPC conversion."
+      ],
+      "acceptance_criteria": [
+        "Run trigger supports full desired label routing semantics."
+      ]
+    },
+    {
+      "id": "P2.2",
+      "phase": "P2",
+      "title": "Add workflow handle parity helpers",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P3.1"
+      ],
+      "ts_mapping": [
+        "BaseWorkflowDeclaration.runManyNoWait",
+        "BaseWorkflowDeclaration.runMany",
+        "BaseWorkflowDeclaration.schedule",
+        "BaseWorkflowDeclaration.delay",
+        "BaseWorkflowDeclaration.cron"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/client.rs",
+        "crates/hatchet-sdk/src/clients.rs"
+      ],
+      "steps": [
+        "Add WorkflowHandle::run_many(waiting variant).",
+        "Add schedule/delay/cron convenience APIs on workflow handle.",
+        "Keep existing feature-client methods and avoid duplication ambiguity."
+      ],
+      "acceptance_criteria": [
+        "Users can execute TS-style workflow helper flows from workflow handle API."
+      ]
+    },
+    {
+      "id": "P2.3",
+      "phase": "P2",
+      "title": "Support durable steps in workflow declaration",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P0.1",
+        "P1.1"
+      ],
+      "ts_mapping": [
+        "WorkflowDeclaration.durableTask and mixed _tasks/_durableTasks"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/workflow.rs",
+        "crates/hatchet-sdk/src/transport.rs",
+        "crates/hatchet-sdk/src/client.rs"
+      ],
+      "steps": [
+        "Add APIs to place DurableTaskHandle steps in workflow DAG.",
+        "Carry durable marker into registration and execution paths.",
+        "Ensure registration sets is_durable for durable steps."
+      ],
+      "acceptance_criteria": [
+        "Mixed durable/non-durable DAG declaration and execution works."
+      ]
+    },
+    {
+      "id": "P2.4",
+      "phase": "P2",
+      "title": "Add workflow-level input schema parity",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "CreateBaseWorkflowOpts.inputValidator -> JSON schema registration"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/workflow.rs",
+        "crates/hatchet-sdk/src/grpc_transport.rs"
+      ],
+      "steps": [
+        "Add optional workflow input schema field on declaration.",
+        "Serialize and send schema as input_json_schema during registration."
+      ],
+      "acceptance_criteria": [
+        "Engine receives workflow input schema in grpc mode."
+      ]
+    },
+    {
+      "id": "P2.5",
+      "phase": "P2",
+      "title": "Implement lifecycle hook registration parity (on_failure/on_success)",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P0.1",
+        "P2.3"
+      ],
+      "ts_mapping": [
+        "worker-internal.ts onFailureTask creation",
+        "worker-internal.ts synthetic on-success task with leaf parents"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/workflow.rs",
+        "crates/hatchet-sdk/src/grpc_transport.rs",
+        "crates/hatchet-sdk/src/transport.rs"
+      ],
+      "steps": [
+        "Map on_failure into CreateWorkflowVersionRequest.on_failure_task.",
+        "Implement on_success via synthetic terminal step with all DAG leaves as parents.",
+        "Apply task defaults and serialization parity."
+      ],
+      "acceptance_criteria": [
+        "Failure and success handlers execute in engine, not only stored in declaration."
+      ]
+    },
+    {
+      "id": "P3.1",
+      "phase": "P3",
+      "title": "Introduce real REST-backed feature client mode",
+      "status": "done",
+      "priority": "high",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "All src/v1/client/features/*.ts use REST client"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/clients.rs",
+        "crates/hatchet-sdk/src/client.rs"
+      ],
+      "steps": [
+        "Add backend enum per feature client (InMemory vs Rest).",
+        "Build shared authenticated REST client path.",
+        "Retain in-memory mode for tests and local deterministic behavior."
+      ],
+      "acceptance_criteria": [
+        "Feature client operations reflect live engine state in grpc/rest mode."
+      ]
+    },
+    {
+      "id": "P3.2",
+      "phase": "P3",
+      "title": "Improve runs client parity",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P3.1"
+      ],
+      "ts_mapping": [
+        "features/runs.ts filter list/cancel/replay + durable helpers + stream utility"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/clients.rs"
+      ],
+      "steps": [
+        "Add filter-based run operations in addition to direct-id methods.",
+        "Align restore/branch/get_task_external_id semantics with TS.",
+        "Align streaming helper behavior."
+      ],
+      "acceptance_criteria": [
+        "Runs client supports TS-equivalent operational workflows."
+      ]
+    },
+    {
+      "id": "P3.3",
+      "phase": "P3",
+      "title": "Implement workers feature parity for pause lifecycle",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P3.1"
+      ],
+      "ts_mapping": [
+        "features/workers.ts get/list/isPaused/pause/unpause"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/clients.rs",
+        "crates/hatchet-sdk/src/worker.rs"
+      ],
+      "steps": [
+        "Add workers feature methods for paused status and state changes via API.",
+        "Keep local WorkerHandle pause/unpause APIs and document local vs remote behavior."
+      ],
+      "acceptance_criteria": [
+        "client.workers() supports TS-equivalent pause lifecycle operations."
+      ]
+    },
+    {
+      "id": "P3.4",
+      "phase": "P3",
+      "title": "Close parity for logs/schedules/crons/metrics/filters/webhooks",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P3.1"
+      ],
+      "ts_mapping": [
+        "features/logs.ts",
+        "features/schedules.ts",
+        "features/crons.ts",
+        "features/metrics.ts",
+        "features/filters.ts",
+        "features/webhooks.ts"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/clients.rs"
+      ],
+      "steps": [
+        "Audit each Rust feature client method against TS semantics and arguments.",
+        "Fill missing methods and behavior mismatches.",
+        "Add parity tests per feature client."
+      ],
+      "acceptance_criteria": [
+        "Method-level parity matrix is complete and test-backed."
+      ]
+    },
+    {
+      "id": "P4.1",
+      "phase": "P4",
+      "title": "Integrate health server into worker lifecycle",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "worker-internal.ts health server start/stop/state"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/worker.rs",
+        "crates/hatchet-sdk/src/health.rs"
+      ],
+      "steps": [
+        "Add optional health server startup in WorkerBuilder/Worker start path.",
+        "Update health state on worker lifecycle transitions.",
+        "Stop health server during shutdown."
+      ],
+      "acceptance_criteria": [
+        "Health endpoint reflects live worker state for running worker."
+      ]
+    },
+    {
+      "id": "P4.2",
+      "phase": "P4",
+      "title": "Add wait_until_ready worker readiness helper",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "worker.ts::waitUntilReady()"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/worker.rs"
+      ],
+      "steps": [
+        "Add readiness API waiting for successful registration/listen startup.",
+        "Use timeout with typed error result."
+      ],
+      "acceptance_criteria": [
+        "Callers can block until readiness without ad-hoc sleeps."
+      ]
+    },
+    {
+      "id": "P4.3",
+      "phase": "P4",
+      "title": "Add cancellation supervision and diagnostics",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P0.3"
+      ],
+      "ts_mapping": [
+        "worker-internal.ts cancellation warning/grace diagnostics"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/worker.rs"
+      ],
+      "steps": [
+        "Add cancellation grace monitoring for non-cooperative task code.",
+        "Emit structured warnings/errors when tasks ignore cancellation."
+      ],
+      "acceptance_criteria": [
+        "Cancellation failure modes are observable and test-covered."
+      ]
+    },
+    {
+      "id": "P5.1",
+      "phase": "P5",
+      "title": "Apply retry policy to all transient gRPC calls",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "util/retrier.ts usage across admin/worker/listeners"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/retry.rs",
+        "crates/hatchet-sdk/src/grpc_transport.rs",
+        "crates/hatchet-sdk/src/durable_listener.rs"
+      ],
+      "steps": [
+        "Ensure all safe transient network calls use retry policy.",
+        "Define explicit non-retryable status set.",
+        "Expose jitter and max-elapsed controls."
+      ],
+      "acceptance_criteria": [
+        "Retry behavior is consistent and configurable."
+      ]
+    },
+    {
+      "id": "P5.2",
+      "phase": "P5",
+      "title": "Standardize error mapping and context",
+      "status": "done",
+      "priority": "medium",
+      "depends_on": [
+        "P0.1"
+      ],
+      "ts_mapping": [
+        "TS domain errors (HatchetError/cancellation/dedupe)"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/src/error.rs"
+      ],
+      "steps": [
+        "Normalize transport/domain errors with rich context.",
+        "Add error variants for durable callback timeout, listener disconnect, unsupported operation mode."
+      ],
+      "acceptance_criteria": [
+        "Production errors are actionable and unambiguous."
+      ]
+    },
+    {
+      "id": "P6.1",
+      "phase": "P6",
+      "title": "Create real engine integration suite",
+      "status": "pending",
+      "priority": "high",
+      "depends_on": [
+        "P0.1",
+        "P0.2",
+        "P0.3",
+        "P0.4",
+        "P1.1",
+        "P3.1"
+      ],
+      "ts_mapping": [
+        "End-to-end operational behavior equivalent to TS runtime flows"
+      ],
+      "rust_files": [
+        "crates/hatchet-sdk/tests/*",
+        "integration harness files (to be added)"
+      ],
+      "steps": [
+        "Add dockerized test harness for Hatchet engine.",
+        "Add integration tests for register/run/output, child runs, cancellation, durable wait/memo/spawn, stream/log retrieval, feature client REST operations."
+      ],
+      "acceptance_criteria": [
+        "cargo test --workspace --features integration passes locally and in CI."
+      ]
+    },
+    {
+      "id": "P6.2",
+      "phase": "P6",
+      "title": "Add parity contract tests keyed by TS function rows",
+      "status": "pending",
+      "priority": "medium",
+      "depends_on": [
+        "P6.1"
+      ],
+      "ts_mapping": [
+        "All mapped TS surfaces in this document"
+      ],
+      "rust_files": [
+        "parity contract test files (to be added)"
+      ],
+      "steps": [
+        "Add parity matrix test file keyed by TS function names.",
+        "Require at least one test per parity row.",
+        "Fail CI if row unimplemented or ignored without issue reference."
+      ],
+      "acceptance_criteria": [
+        "Parity status is machine-checkable."
+      ]
+    }
+  ],
+  "api_and_data_model_changes_required": [
+    "Upgrade RunOpts.desired_worker_labels type in hatchet-core.",
+    "Expand Transport trait for timeout/slot control and required lifecycle hooks.",
+    "Add workflow declaration support for durable DAG steps.",
+    "Add optional workflow input schema field.",
+    "Add worker readiness and health APIs."
+  ],
+  "milestones": [
+    {
+      "id": "A",
+      "name": "Production non-durable baseline",
+      "includes": [
+        "P0.1",
+        "P0.2",
+        "P0.3",
+        "P0.4",
+        "P0.5",
+        "P2.1",
+        "P4.1",
+        "P6.1"
+      ],
+      "notes": [
+        "For P6.1, non-durable subset only."
+      ],
+      "exit_criteria": [
+        "Non-durable workflows run reliably on real engine.",
+        "Cancellation and stream/log behavior are real, not stubs."
+      ]
+    },
+    {
+      "id": "B",
+      "name": "Durable production baseline",
+      "includes": [
+        "P1.1",
+        "P1.2",
+        "P1.3",
+        "P1.4",
+        "P4.3",
+        "P6.1"
+      ],
+      "notes": [
+        "For P6.1, durable subset."
+      ],
+      "exit_criteria": [
+        "Durable operations are engine-backed and restart-safe."
+      ]
+    },
+    {
+      "id": "C",
+      "name": "Full feature/client parity",
+      "includes": [
+        "P2.2",
+        "P2.3",
+        "P2.4",
+        "P2.5",
+        "P3.1",
+        "P3.2",
+        "P3.3",
+        "P3.4",
+        "P5.1",
+        "P5.2",
+        "P6.2"
+      ],
+      "exit_criteria": [
+        "SDK capabilities are functionally equivalent to TS v1 for supported surfaces."
+      ]
+    }
+  ],
+  "execution_contract_for_agent": {
+    "ordered_execution": true,
+    "status_field": "tasks[].status",
+    "allowed_status_values": [
+      "pending",
+      "in_progress",
+      "blocked",
+      "done"
+    ],
+    "required_per_completed_task": [
+      "update task status to done",
+      "add tests proving behavior",
+      "run full test suite"
+    ],
+    "non_negotiables": [
+      "Do not skip failing tests.",
+      "Preserve in-memory mode.",
+      "Keep implementation Rust-idiomatic and type-safe."
+    ]
+  }
+}

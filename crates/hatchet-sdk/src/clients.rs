@@ -110,7 +110,7 @@ pub(crate) struct FeatureState {
     workflows: HashMap<String, WorkflowDefinition>,
     schedules: HashMap<String, Schedule>,
     crons: HashMap<String, Cron>,
-    workers: HashMap<String, WorkerInfo>,
+    pub(crate) workers: HashMap<String, WorkerInfo>,
     rate_limits: HashMap<String, u32>,
     events: Vec<EventRecord>,
     filters: HashMap<String, FilterDefinition>,
@@ -118,6 +118,13 @@ pub(crate) struct FeatureState {
 }
 
 pub(crate) type SharedFeatureState = Arc<RwLock<FeatureState>>;
+
+/// Filter parameters for run listing.
+#[derive(Debug, Clone, Default)]
+pub struct RunFilter {
+    pub workflow_name: Option<String>,
+    pub status: Option<RunStatus>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RunsClient<T: Transport> {
@@ -134,6 +141,9 @@ impl<T: Transport> RunsClient<T> {
     }
 
     pub async fn get(&self, run_id: &WorkflowRunId) -> Result<RunRecord> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.get_run(&run_id.0).await;
+        }
         let state = self.state.read().await;
         state
             .runs
@@ -146,12 +156,47 @@ impl<T: Transport> RunsClient<T> {
         Ok(self.get(run_id).await?.status)
     }
 
-    pub async fn list(&self) -> Vec<RunRecord> {
+    pub async fn list(&self) -> Result<Vec<RunRecord>> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.list_runs().await;
+        }
         let state = self.state.read().await;
-        state.runs.values().cloned().collect()
+        Ok(state.runs.values().cloned().collect())
+    }
+
+    pub async fn list_filtered(&self, filter: RunFilter) -> Result<Vec<RunRecord>> {
+        if let Some(api) = self._transport.rest_api() {
+            let status_str = filter.status.map(|s| match s {
+                RunStatus::Queued => "PENDING",
+                RunStatus::Cancelled => "CANCELLED",
+                RunStatus::Completed => "COMPLETED",
+            });
+            return api
+                .list_runs_filtered(
+                    filter.workflow_name.as_deref(),
+                    status_str,
+                )
+                .await;
+        }
+        let state = self.state.read().await;
+        Ok(state
+            .runs
+            .values()
+            .filter(|r| {
+                filter
+                    .workflow_name
+                    .as_deref()
+                    .is_none_or(|n| r.workflow_name == n)
+                    && filter.status.is_none_or(|s| r.status == s)
+            })
+            .cloned()
+            .collect())
     }
 
     pub async fn cancel(&self, run_id: &WorkflowRunId) -> Result<()> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.cancel_run(&run_id.0).await;
+        }
         let mut state = self.state.write().await;
         let run = state
             .runs
@@ -162,6 +207,10 @@ impl<T: Transport> RunsClient<T> {
     }
 
     pub async fn replay(&self, run_id: &WorkflowRunId) -> Result<WorkflowRunId> {
+        if let Some(api) = self._transport.rest_api() {
+            let new_id = api.replay_run(&run_id.0).await?;
+            return Ok(WorkflowRunId(new_id));
+        }
         let mut state = self.state.write().await;
         let original = state
             .runs
@@ -198,7 +247,7 @@ impl<T: Transport> RunsClient<T> {
 
     pub async fn subscribe_to_stream(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>> {
         let _state = self.state.read().await;
-        Ok(self._transport.stream_run(run_id).await?)
+        self._transport.stream_run(run_id).await
     }
 
     pub async fn branch_durable_task(
@@ -209,8 +258,13 @@ impl<T: Transport> RunsClient<T> {
         self.replay(run_id).await
     }
 
-    pub async fn restore_task(&self, run_id: &WorkflowRunId, _task_name: &str) -> Result<()> {
+    pub async fn restore_task(&self, run_id: &WorkflowRunId, task_name: &str) -> Result<()> {
+        if let Some(api) = self._transport.rest_api() {
+            api.replay_run(&run_id.0).await?;
+            return Ok(());
+        }
         let mut state = self.state.write().await;
+        let _task_name = task_name;
         let run = state
             .runs
             .get_mut(&run_id.0)
@@ -248,6 +302,9 @@ impl<T: Transport> WorkflowsClient<T> {
     }
 
     pub async fn get(&self, name: &str) -> Result<WorkflowDefinition> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.get_workflow(name).await;
+        }
         let state = self.state.read().await;
         state
             .workflows
@@ -256,9 +313,12 @@ impl<T: Transport> WorkflowsClient<T> {
             .ok_or_else(|| Error::Worker(format!("workflow not found: {name}")))
     }
 
-    pub async fn list(&self) -> Vec<WorkflowDefinition> {
+    pub async fn list(&self) -> Result<Vec<WorkflowDefinition>> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.list_workflows().await;
+        }
         let state = self.state.read().await;
-        state.workflows.values().cloned().collect()
+        Ok(state.workflows.values().cloned().collect())
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
@@ -301,15 +361,35 @@ impl<T: Transport> SchedulesClient<T> {
         }
     }
 
-    pub async fn create(&self, schedule: Schedule) -> Schedule {
+    pub async fn create(
+        &self,
+        workflow_name: &str,
+        schedule_name: &str,
+        trigger_at: &str,
+        input: serde_json::Value,
+    ) -> Result<Schedule> {
+        if let Some(api) = self._transport.rest_api() {
+            return api
+                .create_schedule(workflow_name, schedule_name, trigger_at, &input)
+                .await;
+        }
+        let schedule = Schedule {
+            name: schedule_name.to_owned(),
+            workflow_name: workflow_name.to_owned(),
+            expression: trigger_at.to_owned(),
+            input,
+        };
         let mut state = self.state.write().await;
         state
             .schedules
             .insert(schedule.name.clone(), schedule.clone());
-        schedule
+        Ok(schedule)
     }
 
     pub async fn get(&self, name: &str) -> Result<Schedule> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.get_schedule(name).await;
+        }
         let state = self.state.read().await;
         state
             .schedules
@@ -318,9 +398,12 @@ impl<T: Transport> SchedulesClient<T> {
             .ok_or_else(|| Error::Worker(format!("schedule not found: {name}")))
     }
 
-    pub async fn list(&self) -> Vec<Schedule> {
+    pub async fn list(&self) -> Result<Vec<Schedule>> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.list_schedules().await;
+        }
         let state = self.state.read().await;
-        state.schedules.values().cloned().collect()
+        Ok(state.schedules.values().cloned().collect())
     }
 
     pub async fn update(&self, schedule: Schedule) -> Result<Schedule> {
@@ -338,6 +421,9 @@ impl<T: Transport> SchedulesClient<T> {
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.delete_schedule(name).await;
+        }
         let mut state = self.state.write().await;
         if state.schedules.remove(name).is_none() {
             return Err(Error::Worker(format!("schedule not found: {name}")));
@@ -375,13 +461,30 @@ impl<T: Transport> CronsClient<T> {
         }
     }
 
-    pub async fn create(&self, cron: Cron) -> Cron {
+    pub async fn create(
+        &self,
+        workflow_name: &str,
+        cron_name: &str,
+        expression: &str,
+        input: serde_json::Value,
+    ) -> Result<Cron> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.create_cron(workflow_name, cron_name, expression, &input).await;
+        }
+        let cron = Cron {
+            name: cron_name.to_owned(),
+            workflow_name: workflow_name.to_owned(),
+            expression: expression.to_owned(),
+        };
         let mut state = self.state.write().await;
         state.crons.insert(cron.name.clone(), cron.clone());
-        cron
+        Ok(cron)
     }
 
     pub async fn get(&self, name: &str) -> Result<Cron> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.get_cron(name).await;
+        }
         let state = self.state.read().await;
         state
             .crons
@@ -390,12 +493,18 @@ impl<T: Transport> CronsClient<T> {
             .ok_or_else(|| Error::Worker(format!("cron not found: {name}")))
     }
 
-    pub async fn list(&self) -> Vec<Cron> {
+    pub async fn list(&self) -> Result<Vec<Cron>> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.list_crons().await;
+        }
         let state = self.state.read().await;
-        state.crons.values().cloned().collect()
+        Ok(state.crons.values().cloned().collect())
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.delete_cron(name).await;
+        }
         let mut state = self.state.write().await;
         if state.crons.remove(name).is_none() {
             return Err(Error::Worker(format!("cron not found: {name}")));
@@ -418,12 +527,18 @@ impl<T: Transport> WorkersClient<T> {
         }
     }
 
-    pub async fn list(&self) -> Vec<WorkerInfo> {
+    pub async fn list(&self) -> Result<Vec<WorkerInfo>> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.list_workers().await;
+        }
         let state = self.state.read().await;
-        state.workers.values().cloned().collect()
+        Ok(state.workers.values().cloned().collect())
     }
 
     pub async fn get(&self, name: &str) -> Result<WorkerInfo> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.get_worker(name).await;
+        }
         let state = self.state.read().await;
         state
             .workers
@@ -436,6 +551,30 @@ impl<T: Transport> WorkersClient<T> {
         let mut state = self.state.write().await;
         state.workers.insert(worker.name.clone(), worker.clone());
         worker
+    }
+
+    pub async fn is_paused(&self, name: &str) -> Result<bool> {
+        Ok(self.get(name).await?.paused)
+    }
+
+    pub async fn pause(&self, name: &str) -> Result<WorkerInfo> {
+        if let Some(api) = self._transport.rest_api() {
+            api.pause_worker(name).await?;
+            return api.get_worker(name).await;
+        }
+        let mut worker = self.get(name).await?;
+        worker.paused = true;
+        Ok(self.update(worker).await)
+    }
+
+    pub async fn unpause(&self, name: &str) -> Result<WorkerInfo> {
+        if let Some(api) = self._transport.rest_api() {
+            api.unpause_worker(name).await?;
+            return api.get_worker(name).await;
+        }
+        let mut worker = self.get(name).await?;
+        worker.paused = false;
+        Ok(self.update(worker).await)
     }
 }
 
@@ -453,7 +592,16 @@ impl<T: Transport> MetricsClient<T> {
         }
     }
 
-    pub async fn get_workflow_metrics(&self, workflow_name: &str) -> WorkflowMetrics {
+    pub async fn get_workflow_metrics(&self, workflow_name: &str) -> Result<WorkflowMetrics> {
+        if let Some(api) = self._transport.rest_api() {
+            let m = api.get_workflow_metrics(workflow_name).await?;
+            return Ok(WorkflowMetrics {
+                workflow_name: workflow_name.to_owned(),
+                total_runs: m.total_runs.unwrap_or(0) as usize,
+                queued_runs: m.queued_runs.unwrap_or(0) as usize,
+                cancelled_runs: 0,
+            });
+        }
         let state = self.state.read().await;
         let runs = state
             .runs
@@ -471,15 +619,22 @@ impl<T: Transport> MetricsClient<T> {
                 cancelled_runs += 1;
             }
         }
-        WorkflowMetrics {
+        Ok(WorkflowMetrics {
             workflow_name: workflow_name.to_owned(),
             total_runs,
             queued_runs,
             cancelled_runs,
-        }
+        })
     }
 
-    pub async fn get_queue_metrics(&self) -> QueueMetrics {
+    pub async fn get_queue_metrics(&self) -> Result<QueueMetrics> {
+        if let Some(api) = self._transport.rest_api() {
+            let m = api.get_queue_metrics().await?;
+            return Ok(QueueMetrics {
+                total_runs: m.total_runs.unwrap_or(0) as usize,
+                queued_runs: m.queued_runs.unwrap_or(0) as usize,
+            });
+        }
         let state = self.state.read().await;
         let total_runs = state.runs.len();
         let queued_runs = state
@@ -487,10 +642,10 @@ impl<T: Transport> MetricsClient<T> {
             .values()
             .filter(|run| run.status == RunStatus::Queued)
             .count();
-        QueueMetrics {
+        Ok(QueueMetrics {
             total_runs,
             queued_runs,
-        }
+        })
     }
 }
 
@@ -508,9 +663,9 @@ impl<T: Transport> RateLimitsClient<T> {
         }
     }
 
-    pub async fn list(&self) -> HashMap<String, u32> {
+    pub async fn list(&self) -> Result<HashMap<String, u32>> {
         let state = self.state.read().await;
-        state.rate_limits.clone()
+        Ok(state.rate_limits.clone())
     }
 
     pub async fn put(&self, key: impl Into<String>, limit: u32) {
@@ -548,9 +703,9 @@ impl<T: Transport> EventsClient<T> {
         state.events.extend(events);
     }
 
-    pub async fn list(&self) -> Vec<EventRecord> {
+    pub async fn list(&self) -> Result<Vec<EventRecord>> {
         let state = self.state.read().await;
-        state.events.clone()
+        Ok(state.events.clone())
     }
 }
 
@@ -568,9 +723,9 @@ impl<T: Transport> LogsClient<T> {
         }
     }
 
-    pub async fn list(&self) -> Vec<LogRecord> {
+    pub async fn list(&self, task_run_id: &str) -> Result<Vec<LogRecord>> {
         let _state = self.state.read().await;
-        self._transport.list_logs().await
+        self._transport.list_logs(task_run_id).await
     }
 }
 
@@ -588,10 +743,24 @@ impl<T: Transport> FiltersClient<T> {
         }
     }
 
-    pub async fn create(&self, filter: FilterDefinition) -> FilterDefinition {
+    pub async fn create(
+        &self,
+        workflow_name: &str,
+        filter_name: &str,
+        expression: &str,
+    ) -> Result<FilterDefinition> {
+        if let Some(api) = self._transport.rest_api() {
+            return api
+                .create_filter(workflow_name, filter_name, expression)
+                .await;
+        }
+        let filter = FilterDefinition {
+            name: filter_name.to_owned(),
+            expression: expression.to_owned(),
+        };
         let mut state = self.state.write().await;
         state.filters.insert(filter.name.clone(), filter.clone());
-        filter
+        Ok(filter)
     }
 
     pub async fn get(&self, name: &str) -> Result<FilterDefinition> {
@@ -603,9 +772,12 @@ impl<T: Transport> FiltersClient<T> {
             .ok_or_else(|| Error::Worker(format!("filter not found: {name}")))
     }
 
-    pub async fn list(&self) -> Vec<FilterDefinition> {
+    pub async fn list(&self) -> Result<Vec<FilterDefinition>> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.list_filters().await;
+        }
         let state = self.state.read().await;
-        state.filters.values().cloned().collect()
+        Ok(state.filters.values().cloned().collect())
     }
 
     pub async fn update(&self, filter: FilterDefinition) -> Result<FilterDefinition> {
@@ -618,6 +790,9 @@ impl<T: Transport> FiltersClient<T> {
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.delete_filter(name).await;
+        }
         let mut state = self.state.write().await;
         if state.filters.remove(name).is_none() {
             return Err(Error::Worker(format!("filter not found: {name}")));
@@ -640,18 +815,32 @@ impl<T: Transport> WebhooksClient<T> {
         }
     }
 
-    pub async fn create(&self, webhook: WebhookDefinition) -> WebhookDefinition {
+    pub async fn create(&self, name: &str, url: &str) -> Result<WebhookDefinition> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.create_webhook(name, url).await;
+        }
+        let webhook = WebhookDefinition {
+            name: name.to_owned(),
+            url: url.to_owned(),
+            enabled: true,
+        };
         let mut state = self.state.write().await;
         state.webhooks.insert(webhook.name.clone(), webhook.clone());
-        webhook
+        Ok(webhook)
     }
 
-    pub async fn list(&self) -> Vec<WebhookDefinition> {
+    pub async fn list(&self) -> Result<Vec<WebhookDefinition>> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.list_webhooks().await;
+        }
         let state = self.state.read().await;
-        state.webhooks.values().cloned().collect()
+        Ok(state.webhooks.values().cloned().collect())
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.delete_webhook(name).await;
+        }
         let mut state = self.state.write().await;
         if state.webhooks.remove(name).is_none() {
             return Err(Error::Worker(format!("webhook not found: {name}")));

@@ -14,6 +14,12 @@ pub enum Error {
     Durable(String),
     #[error("worker runtime error: {0}")]
     Worker(String),
+    #[error("durable callback timed out: {0}")]
+    DurableCallbackTimeout(String),
+    #[error("durable listener disconnected: {0}")]
+    DurableListenerDisconnected(String),
+    #[error("unsupported operation in current mode: {0}")]
+    UnsupportedOperation(String),
     #[error("input validation failed: {0:?}")]
     InputValidation(Vec<String>),
     #[error("non-retryable error: {0}")]
@@ -40,6 +46,7 @@ impl Error {
                 | Self::InputValidation(_)
                 | Self::DedupeViolation(_)
                 | Self::Config(_)
+                | Self::UnsupportedOperation(_)
         )
     }
 }

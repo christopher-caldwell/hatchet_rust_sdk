@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ fn task_conditions_to_pb_assigns_correct_actions() {
         task_name: "step-one".to_owned(),
         config: TaskConfig::default(),
         parents: Vec::new(),
+        is_durable: false,
         wait_for: vec![Condition::sleep_for(Duration::from_secs(5)).into()],
         cancel_if: vec![Condition::event("cancel-event").build().into()],
         skip_if: vec![Condition::parent("parent-step").build().into()],
@@ -57,6 +59,7 @@ fn task_conditions_to_pb_applies_namespace_to_event_keys() {
         task_name: "step-one".to_owned(),
         config: TaskConfig::default(),
         parents: Vec::new(),
+        is_durable: false,
         wait_for: vec![Condition::event("user:created").build().into()],
         cancel_if: vec![Condition::event("order:cancelled").build().into()],
         skip_if: Vec::new(),
@@ -81,6 +84,7 @@ fn task_conditions_to_pb_empty_conditions_backward_compatible() {
         task_name: "step-one".to_owned(),
         config: TaskConfig::default(),
         parents: Vec::new(),
+        is_durable: false,
         wait_for: Vec::new(),
         cancel_if: Vec::new(),
         skip_if: Vec::new(),
@@ -355,6 +359,175 @@ async fn worker_pause_unpause_labels() {
     handle.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn worker_wait_until_ready_and_health_server() {
+    let transport = Arc::new(InMemoryTransport::new());
+    let client = Client::new(transport);
+    let task = client.task::<serde_json::Value, serde_json::Value>("noop");
+    let port = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener.local_addr().unwrap().port(),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("ephemeral port bind should succeed: {error}"),
+    };
+
+    let start_result = client
+        .worker("healthy-worker")
+        .health_port(port)
+        .register_task(&task, |_input, _ctx| async { Ok(serde_json::json!(null)) })
+        .build()
+        .start();
+
+    let handle = match start_result {
+        Ok(handle) => handle,
+        Err(hatchet_sdk::Error::Worker(message)) if message.contains("Operation not permitted") => {
+            return;
+        }
+        Err(error) => panic!("worker start should succeed: {error}"),
+    };
+
+    handle
+        .wait_until_ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let response = reqwest::get(format!("http://127.0.0.1:{port}/health"))
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    assert_eq!(response["worker_name"], "healthy-worker");
+    assert_eq!(response["healthy"], true);
+
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn workflow_handle_helpers_cover_run_many_and_scheduling() {
+    let transport = Arc::new(InMemoryTransport::new());
+    let client = Client::new(Arc::clone(&transport));
+    let workflow = client.workflow::<u32, u32>("helper.workflow");
+
+    client
+        .worker("helper-worker")
+        .register_task(&client.task::<u32, u32>("helper.workflow"), |input, _ctx| async move {
+            Ok(input + 1)
+        })
+        .build()
+        .start()
+        .unwrap()
+        .wait_until_ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let outputs = workflow.run_many([1_u32, 2_u32], RunOpts::default()).await.unwrap();
+    assert_eq!(outputs, vec![2, 3]);
+
+    let schedule = workflow
+        .schedule("daily", "0 0 * * *", 7_u32)
+        .await
+        .unwrap();
+    assert_eq!(schedule.workflow_name, "helper.workflow");
+
+    let delay = workflow
+        .delay("later", Duration::from_secs(30), 9_u32)
+        .await
+        .unwrap();
+    assert_eq!(delay.expression, "in 30000ms");
+
+    let cron = workflow.cron("nightly", "0 2 * * *").await.unwrap();
+    assert_eq!(cron.workflow_name, "helper.workflow");
+}
+
+#[tokio::test]
+async fn durable_steps_register_and_execute_in_workflow_graph() {
+    let transport = Arc::new(InMemoryTransport::new());
+    let client = Client::new(Arc::clone(&transport));
+    let durable = client.durable_task::<u32, u32>("durable.step");
+
+    client
+        .worker("durable-worker")
+        .register_durable_task(&durable, |input, _ctx| async move { Ok(input + 10) })
+        .build()
+        .start()
+        .unwrap()
+        .wait_until_ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let declaration = WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("durable-wf")
+        .durable_step(&durable, TaskConfig::default());
+    client.register_workflow(declaration).await;
+
+    let registrations = transport.workflow_registrations().await;
+    assert!(registrations[0].tasks[0].is_durable);
+
+    let output = client
+        .workflow::<u32, u32>("durable-wf")
+        .run(5, RunOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(output, 15);
+}
+
+#[tokio::test]
+async fn on_success_hook_is_materialized_as_terminal_step() {
+    let transport = Arc::new(InMemoryTransport::new());
+    let client = Client::new(Arc::clone(&transport));
+    let leaf = client.task::<u32, u32>("leaf");
+    let on_success = client.task::<u32, u32>("hook.success");
+
+    client
+        .worker("hook-worker")
+        .register_task(&leaf, |input, _ctx| async move { Ok(input + 1) })
+        .register_task(&on_success, |input, _ctx| async move { Ok(input * 2) })
+        .build()
+        .start()
+        .unwrap()
+        .wait_until_ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let declaration = WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("hook-wf")
+        .step(&leaf, TaskConfig::default())
+        .on_success_task(&on_success);
+    client.register_workflow(declaration).await;
+
+    let registrations = transport.workflow_registrations().await;
+    assert_eq!(registrations[0].tasks.len(), 2);
+    assert_eq!(registrations[0].tasks[1].action, "default:hook.success");
+    assert_eq!(registrations[0].tasks[1].parents, vec!["leaf"]);
+
+    let output = client
+        .workflow::<u32, u32>("hook-wf")
+        .run(3, RunOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(output, 6);
+}
+
+#[tokio::test]
+async fn workers_client_pause_lifecycle_helpers() {
+    let transport = Arc::new(InMemoryTransport::new());
+    let client = Client::new(transport);
+
+    client
+        .workers()
+        .update(WorkerInfo {
+            name: "worker-a".to_owned(),
+            paused: false,
+            labels: Default::default(),
+        })
+        .await;
+
+    assert!(!client.workers().is_paused("worker-a").await.unwrap());
+    client.workers().pause("worker-a").await.unwrap();
+    assert!(client.workers().is_paused("worker-a").await.unwrap());
+    client.workers().unpause("worker-a").await.unwrap();
+    assert!(!client.workers().is_paused("worker-a").await.unwrap());
+}
+
 // =============================================================================
 // Phase 7: Display Implementations
 // =============================================================================
@@ -404,6 +577,7 @@ fn rendered_conditions_is_empty() {
         task_name: "s".to_owned(),
         config: TaskConfig::default(),
         parents: Vec::new(),
+        is_durable: false,
         wait_for: vec![Condition::sleep_for(Duration::from_secs(1)).into()],
         cancel_if: Vec::new(),
         skip_if: Vec::new(),
@@ -418,6 +592,7 @@ fn rendered_conditions_extend_merges() {
         task_name: "a".to_owned(),
         config: TaskConfig::default(),
         parents: Vec::new(),
+        is_durable: false,
         wait_for: vec![Condition::sleep_for(Duration::from_secs(1)).into()],
         cancel_if: Vec::new(),
         skip_if: Vec::new(),
@@ -426,6 +601,7 @@ fn rendered_conditions_extend_merges() {
         task_name: "b".to_owned(),
         config: TaskConfig::default(),
         parents: Vec::new(),
+        is_durable: false,
         wait_for: Vec::new(),
         cancel_if: vec![Condition::event("cancel").build().into()],
         skip_if: Vec::new(),
@@ -449,6 +625,7 @@ fn rendered_conditions_serializable() {
         task_name: "s".to_owned(),
         config: TaskConfig::default(),
         parents: Vec::new(),
+        is_durable: false,
         wait_for: vec![Condition::sleep_for(Duration::from_secs(5)).into()],
         cancel_if: vec![Condition::event("abort").build().into()],
         skip_if: vec![Condition::parent("parent-step").build().into()],

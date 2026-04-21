@@ -21,6 +21,7 @@ tonic = { version = "0.12", features = ["tls", "tls-roots"], optional = true }
 prost = { version = "0.13", optional = true }
 prost-types = { version = "0.13", optional = true }
 base64 = { version = "0.22", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }
@@ -31,5 +32,5 @@ base64 = "0.22"
 
 [features]
 default = ["grpc"]
-grpc = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:base64", "dep:tonic-build"]
+grpc = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:base64", "dep:tonic-build", "dep:reqwest"]
 integration = []

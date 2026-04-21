@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use hatchet_core::{RunOpts, WorkflowRunId};
@@ -10,8 +11,8 @@ use tokio::sync::RwLock;
 
 use crate::clients::{
     CelClient, CronsClient, EventsClient, FeatureState, FiltersClient, LogsClient, MetricsClient,
-    RateLimitsClient, RunsClient, SchedulesClient, TenantClient, WebhooksClient, WorkersClient,
-    WorkflowsClient, record_run,
+    Cron, RateLimitsClient, RunsClient, Schedule, SchedulesClient, TenantClient, WebhooksClient,
+    WorkersClient, WorkflowsClient, record_run,
 };
 use crate::error::{Error, Result};
 use crate::run_ref::{RunControl, WorkflowRunRef};
@@ -142,7 +143,7 @@ impl<T: Transport + 'static> Client<T> {
     where
         T: 'static,
     {
-        WorkerBuilder::new(name.into(), Arc::clone(&self.transport))
+        WorkerBuilder::new(name.into(), Arc::clone(&self.transport), Arc::clone(&self.state))
     }
 
     #[must_use]
@@ -224,18 +225,17 @@ impl<T: Transport + 'static> Client<T> {
                 .collect();
         }
         let serialized = serde_json::to_value(&declaration).unwrap_or(Value::Null);
+        let materialized = serde_json::from_value::<WorkflowDeclaration<Value, Value>>(serialized.clone())
+            .map(WorkflowDeclaration::materialized)
+            .unwrap_or_else(|_| WorkflowDeclaration::<Value, Value>::new(&declaration.name));
         let _ = self
             .workflows
-            .put(&declaration.name, serialized.clone())
+            .put(&declaration.name, serde_json::to_value(&materialized).unwrap_or(Value::Null))
             .await;
-        if let Ok(runtime_definition) =
-            serde_json::from_value::<WorkflowDeclaration<Value, Value>>(serialized)
-        {
-            let _ = self
-                .transport
-                .register_workflow_definition(runtime_definition)
-                .await;
-        }
+        let _ = self
+            .transport
+            .register_workflow_definition(materialized)
+            .await;
         declaration
     }
 
@@ -401,6 +401,65 @@ where
             .into_iter()
             .map(|run_id| WorkflowRunRef::new(run_id, Arc::clone(&self.run_control)))
             .collect())
+    }
+
+    /// Submits many workflow runs and waits for each typed output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if submission or any output retrieval fails.
+    pub async fn run_many(
+        &self,
+        inputs: impl IntoIterator<Item = I>,
+        opts: RunOpts,
+    ) -> Result<Vec<O>> {
+        let runs = self.run_many_no_wait(inputs, opts).await?;
+        let mut outputs = Vec::with_capacity(runs.len());
+        for run in runs {
+            outputs.push(run.output().await?);
+        }
+        Ok(outputs)
+    }
+
+    /// Creates a schedule bound to this workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when input serialization fails.
+    pub async fn schedule(
+        &self,
+        name: impl Into<String>,
+        expression: impl Into<String>,
+        input: I,
+    ) -> Result<Schedule> {
+        let input = serde_json::to_value(input).map_err(|error| {
+            Error::InputSerialization(format!("workflow {} schedule: {error}", self.workflow_name))
+        })?;
+
+        let name = name.into();
+        let expression = expression.into();
+        SchedulesClient::new(Arc::clone(&self.transport), Arc::clone(&self.state))
+            .create(&self.workflow_name, &name, &expression, input)
+            .await
+    }
+
+    /// Creates a delayed schedule bound to this workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when input serialization fails.
+    pub async fn delay(&self, name: impl Into<String>, delay: Duration, input: I) -> Result<Schedule> {
+        self.schedule(name, format!("in {}ms", delay.as_millis()), input)
+            .await
+    }
+
+    /// Creates a cron trigger bound to this workflow.
+    pub async fn cron(&self, name: impl Into<String>, expression: impl Into<String>) -> Result<Cron> {
+        let name = name.into();
+        let expression = expression.into();
+        CronsClient::new(Arc::clone(&self.transport), Arc::clone(&self.state))
+            .create(&self.workflow_name, &name, &expression, serde_json::Value::Null)
+            .await
     }
 }
 

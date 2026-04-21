@@ -12,7 +12,9 @@ use tokio::time::{sleep, timeout};
 
 use crate::client::WorkflowHandle;
 use crate::context::{Context, ContextExt, ContextIds, InMemoryContext};
+use crate::durable_listener::DurableListenerClient;
 use crate::error::{Error, Result};
+use crate::proto::v1;
 use crate::run_ref::WorkflowRunRef;
 use crate::transport::Transport;
 use crate::workflow::WorkflowStep;
@@ -612,6 +614,7 @@ pub struct InMemoryDurableContext<T: Transport> {
     event_log: StdMutex<Vec<ObservedDurableEvent>>,
     memo_store: Mutex<std::collections::HashMap<String, Value>>,
     memoized_now: Mutex<Option<SystemTime>>,
+    durable_listener: Option<Arc<DurableListenerClient>>,
 }
 
 impl<T: Transport> InMemoryDurableContext<T> {
@@ -625,7 +628,14 @@ impl<T: Transport> InMemoryDurableContext<T> {
             event_log: StdMutex::new(Vec::new()),
             memo_store: Mutex::new(std::collections::HashMap::new()),
             memoized_now: Mutex::new(None),
+            durable_listener: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_durable_listener(mut self, listener: Arc<DurableListenerClient>) -> Self {
+        self.durable_listener = Some(listener);
+        self
     }
 
     #[must_use]
@@ -891,6 +901,113 @@ impl<T: Transport> InMemoryDurableContext<T> {
             Condition::Parent(_) => None,
         })
     }
+
+    async fn wait_for_engine(
+        &self,
+        listener: &DurableListenerClient,
+        conditions: Conditions,
+    ) -> Result<ConditionOutput> {
+        let (raw_conditions, is_or) = match &conditions {
+            Conditions::Single(c) => (vec![c.clone()], false),
+            Conditions::Or(cs) => (cs.clone(), true),
+        };
+
+        let or_group_id = if is_or { next_or_group_id() } else { String::new() };
+
+        let mut sleep_conds = Vec::new();
+        let mut event_conds = Vec::new();
+        let mut has_parent = false;
+
+        for condition in raw_conditions.iter() {
+            match condition {
+                Condition::SleepFor(sleep) => {
+                    let mut base = base_match_condition(condition);
+                    if is_or {
+                        base.or_group_id = or_group_id.clone();
+                    }
+                    sleep_conds.push(v1::SleepMatchCondition {
+                        base: Some(condition_base_to_proto(&base)),
+                        sleep_for: duration_to_engine_string(sleep.duration),
+                    });
+                }
+                Condition::SleepUntil(sleep) => {
+                    let mut base = base_match_condition(condition);
+                    if is_or {
+                        base.or_group_id = or_group_id.clone();
+                    }
+                    sleep_conds.push(v1::SleepMatchCondition {
+                        base: Some(condition_base_to_proto(&base)),
+                        sleep_for: system_time_to_iso_string(&sleep.at),
+                    });
+                }
+                Condition::Event(event) => {
+                    let mut base = base_match_condition(condition);
+                    if is_or {
+                        base.or_group_id = or_group_id.clone();
+                    }
+                    let consider_events_since = event.lookback_window.map(|window| {
+                        let since = SystemTime::now()
+                            .checked_sub(window)
+                            .unwrap_or(SystemTime::UNIX_EPOCH);
+                        let dur = since
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        prost_types::Timestamp {
+                            seconds: dur.as_secs() as i64,
+                            nanos: dur.subsec_nanos() as i32,
+                        }
+                    });
+                    event_conds.push(v1::UserEventMatchCondition {
+                        base: Some(condition_base_to_proto(&base)),
+                        user_event_key: event.event_key.clone(),
+                        event_scope: event.scope.clone(),
+                        consider_events_since,
+                    });
+                }
+                Condition::Parent(_) => {
+                    has_parent = true;
+                }
+            }
+        }
+
+        // Parent conditions are handled at scheduling time by the engine (via task registration
+        // conditions). By the time user code calls wait_for(parent(...)), the parent has already
+        // completed. Immediately return the first parent condition as satisfied.
+        if has_parent && sleep_conds.is_empty() && event_conds.is_empty() {
+            let (idx, condition) = raw_conditions
+                .iter()
+                .enumerate()
+                .find(|(_, c)| matches!(c, Condition::Parent(_)))
+                .unwrap_or((0, &raw_conditions[0]));
+            return Ok(condition_output(idx, condition, None));
+        }
+
+        let proto_conditions = v1::DurableEventListenerConditions {
+            sleep_conditions: sleep_conds,
+            user_event_conditions: event_conds,
+        };
+
+        let task_id = self.base.task_run_id();
+        let inv = self.invocation_count as i32;
+        let ack = listener.send_wait_for(task_id, inv, proto_conditions).await?;
+        let result = listener
+            .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
+            .await?;
+
+        let payload = if result.payload.is_empty() {
+            None
+        } else {
+            serde_json::from_slice::<Value>(&result.payload)
+                .ok()
+        };
+
+        let (matched_index, matched_condition) = match &conditions {
+            Conditions::Single(c) => (0, c),
+            Conditions::Or(cs) => (0, &cs[0]),
+        };
+
+        Ok(condition_output(matched_index, matched_condition, payload))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1059,7 +1176,7 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
     }
 
     fn supports_eviction(&self) -> bool {
-        false
+        self.durable_listener.is_some()
     }
 
     async fn now(&self) -> SystemTime {
@@ -1073,10 +1190,52 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
     }
 
     async fn sleep_for(&self, duration: Duration) {
+        if let Some(listener) = &self.durable_listener {
+            let task_id = self.base.task_run_id();
+            let inv = self.invocation_count as i32;
+            let conditions = condition_to_durable_listener_proto(&Condition::SleepFor(
+                SleepCondition {
+                    duration,
+                    metadata: ConditionMetadata::default(),
+                },
+            ));
+            match listener.send_wait_for(task_id, inv, conditions).await {
+                Ok(ack) => {
+                    let _ = listener
+                        .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
+                        .await;
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("durable sleep_for engine call failed, falling back: {error}");
+                }
+            }
+        }
         sleep(duration).await;
     }
 
     async fn sleep_until(&self, at: SystemTime) {
+        if let Some(listener) = &self.durable_listener {
+            let task_id = self.base.task_run_id();
+            let inv = self.invocation_count as i32;
+            let conditions = condition_to_durable_listener_proto(&Condition::SleepUntil(
+                SleepUntilCondition {
+                    at,
+                    metadata: ConditionMetadata::default(),
+                },
+            ));
+            match listener.send_wait_for(task_id, inv, conditions).await {
+                Ok(ack) => {
+                    let _ = listener
+                        .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
+                        .await;
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("durable sleep_until engine call failed, falling back: {error}");
+                }
+            }
+        }
         if let Ok(duration) = at.duration_since(SystemTime::now()) {
             sleep(duration).await;
         }
@@ -1087,6 +1246,41 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
         event_key: &str,
         timeout_after: Duration,
     ) -> Result<Option<Value>> {
+        if let Some(listener) = &self.durable_listener {
+            let task_id = self.base.task_run_id();
+            let inv = self.invocation_count as i32;
+            let conditions = condition_to_durable_listener_proto(&Condition::Event(EventCondition {
+                event_key: event_key.to_owned(),
+                expression: None,
+                scope: None,
+                lookback_window: None,
+                metadata: ConditionMetadata::default(),
+            }));
+            match listener.send_wait_for(task_id, inv, conditions).await {
+                Ok(ack) => {
+                    match tokio::time::timeout(
+                        timeout_after,
+                        listener.wait_for_callback(task_id, inv, ack.branch_id, ack.node_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(result)) => {
+                            return serde_json::from_slice(&result.payload)
+                                .map(Some)
+                                .map_err(|e| Error::Durable(format!("payload decode: {e}")));
+                        }
+                        Ok(Err(error)) => {
+                            return Err(error);
+                        }
+                        Err(_) => return Ok(None),
+                    }
+                }
+                Err(error) => {
+                    eprintln!("durable wait_for_event engine call failed, falling back: {error}");
+                }
+            }
+        }
+
         let mut receiver = self.event_tx.subscribe();
         let expected_key = event_key.to_owned();
 
@@ -1124,6 +1318,9 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
     }
 
     async fn wait_for(&self, conditions: Conditions) -> Result<ConditionOutput> {
+        if let Some(listener) = &self.durable_listener {
+            return self.wait_for_engine(listener, conditions).await;
+        }
         match conditions {
             Conditions::Single(condition) => Ok(condition_output(
                 0,
@@ -1135,6 +1332,33 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
     }
 
     async fn memo(&self, key: &str, value: Value) -> Result<Value> {
+        if let Some(listener) = &self.durable_listener {
+            let task_id = self.base.task_run_id();
+            let inv = self.invocation_count as i32;
+            let key_bytes = key.as_bytes().to_vec();
+            let payload_bytes = serde_json::to_vec(&value)
+                .map_err(|e| Error::Durable(format!("memo serialize: {e}")))?;
+            let ack = listener
+                .send_memo(task_id, inv, key_bytes.clone(), Some(payload_bytes.clone()))
+                .await?;
+            if ack.already_existed {
+                if let Some(cached) = ack.cached_payload {
+                    return serde_json::from_slice::<Value>(&cached)
+                        .map_err(|e| Error::Durable(format!("memo cached decode: {e}")));
+                }
+                return Ok(value);
+            }
+            let entry_ref = v1::DurableEventLogEntryRef {
+                durable_task_external_id: task_id.to_owned(),
+                invocation_count: inv,
+                branch_id: ack.branch_id,
+                node_id: ack.node_id,
+            };
+            listener
+                .send_complete_memo(entry_ref, payload_bytes, key_bytes)
+                .await?;
+            return Ok(value);
+        }
         let mut memo_store = self.memo_store.lock().await;
         Ok(memo_store.entry(key.to_owned()).or_insert(value).clone())
     }
@@ -1357,6 +1581,132 @@ fn condition_readable_data_key(condition: &Condition) -> Option<String> {
         Condition::SleepFor(sleep) => sleep.metadata.readable_data_key.clone(),
         Condition::SleepUntil(sleep) => sleep.metadata.readable_data_key.clone(),
     }
+}
+
+fn condition_to_durable_listener_proto(condition: &Condition) -> v1::DurableEventListenerConditions {
+    let base = base_match_condition(condition);
+    let proto_base = condition_base_to_proto(&base);
+    match condition {
+        Condition::SleepFor(sleep) => v1::DurableEventListenerConditions {
+            sleep_conditions: vec![v1::SleepMatchCondition {
+                base: Some(proto_base),
+                sleep_for: duration_to_engine_string(sleep.duration),
+            }],
+            user_event_conditions: vec![],
+        },
+        Condition::SleepUntil(sleep) => v1::DurableEventListenerConditions {
+            sleep_conditions: vec![v1::SleepMatchCondition {
+                base: Some(proto_base),
+                sleep_for: system_time_to_iso_string(&sleep.at),
+            }],
+            user_event_conditions: vec![],
+        },
+        Condition::Event(event) => v1::DurableEventListenerConditions {
+            sleep_conditions: vec![],
+            user_event_conditions: vec![v1::UserEventMatchCondition {
+                base: Some(proto_base),
+                user_event_key: event.event_key.clone(),
+                event_scope: event.scope.clone(),
+                consider_events_since: event.lookback_window.map(|window| {
+                    let since = SystemTime::now()
+                        .checked_sub(window)
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let dur = since
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    prost_types::Timestamp {
+                        seconds: dur.as_secs() as i64,
+                        nanos: dur.subsec_nanos() as i32,
+                    }
+                }),
+            }],
+        },
+        Condition::Parent(_) => v1::DurableEventListenerConditions {
+            sleep_conditions: vec![],
+            user_event_conditions: vec![],
+        },
+    }
+}
+
+fn condition_base_to_proto(base: &BaseMatchCondition) -> v1::BaseMatchCondition {
+    v1::BaseMatchCondition {
+        readable_data_key: base.readable_data_key.clone(),
+        action: match base.action {
+            ConditionAction::Create => v1::Action::Create as i32,
+            ConditionAction::Queue => v1::Action::Queue as i32,
+            ConditionAction::Cancel => v1::Action::Cancel as i32,
+            ConditionAction::Skip => v1::Action::Skip as i32,
+        },
+        or_group_id: base.or_group_id.clone(),
+        expression: base.expression.clone(),
+    }
+}
+
+fn duration_to_engine_string(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    if total_secs == 0 {
+        return "0s".to_owned();
+    }
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    let mut result = String::new();
+    if hours > 0 {
+        result.push_str(&format!("{hours}h"));
+    }
+    if mins > 0 {
+        result.push_str(&format!("{mins}m"));
+    }
+    if secs > 0 || result.is_empty() {
+        result.push_str(&format!("{secs}s"));
+    }
+    result
+}
+
+fn system_time_to_iso_string(time: &SystemTime) -> String {
+    let dur = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let nanos = dur.subsec_nanos();
+    let days_since_epoch = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}Z",
+        millis = nanos / 1_000_000,
+    )
+}
+
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let mut remaining = days;
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap_year(year);
+    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0usize;
+    for &md in &month_days {
+        if remaining < md {
+            break;
+        }
+        remaining -= md;
+        month += 1;
+    }
+    (year, (month + 1) as u64, remaining + 1)
+}
+
+fn is_leap_year(year: u64) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 #[async_trait]

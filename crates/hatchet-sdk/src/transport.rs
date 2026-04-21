@@ -11,7 +11,10 @@ use tokio::sync::{Mutex, RwLock, oneshot};
 use crate::clients::LogRecord;
 use crate::context::LogLevel;
 use crate::durable::{RenderedConditions, task_conditions_to_pb};
+use crate::durable_listener::DurableListenerClient;
 use crate::error::{Error, Result};
+use crate::rest_client::RestApiClient;
+use crate::task::{ConcurrencyConfig, DesiredLabelConfig, RateLimit, SlotType};
 use crate::worker::WorkerDispatcher;
 use crate::workflow::{WorkflowDeclaration, WorkflowStep};
 use tokio_util::sync::CancellationToken;
@@ -28,6 +31,12 @@ pub struct TaskRegistration {
     pub schedule_timeout: Option<u64>,
     pub parents: Vec<String>,
     pub retries: Option<u32>,
+    pub rate_limits: Vec<RateLimit>,
+    pub worker_labels: Vec<(String, DesiredLabelConfig)>,
+    pub backoff_factor: Option<f64>,
+    pub backoff_max_seconds: Option<u64>,
+    pub concurrency: Option<ConcurrencyConfig>,
+    pub slot_requests: HashMap<SlotType, u32>,
     pub conditions: RenderedConditions,
     pub is_durable: bool,
 }
@@ -54,13 +63,23 @@ impl WorkflowRegistration {
             .iter()
             .map(|step| TaskRegistration {
                 readable_id: step.task_name.clone(),
-                action: format!("{}:{}", declaration.name, step.task_name),
+                action: format!("default:{}", step.task_name),
                 timeout: step.config.execution_timeout,
                 schedule_timeout: step.config.schedule_timeout,
                 parents: step.parents.clone(),
                 retries: step.config.retries,
+                rate_limits: step.config.rate_limits.clone(),
+                worker_labels: step.config.desired_worker_labels.clone(),
+                backoff_factor: step.config.backoff.as_ref().map(|backoff| backoff.factor),
+                backoff_max_seconds: step
+                    .config
+                    .backoff
+                    .as_ref()
+                    .map(|backoff| backoff.max_seconds),
+                concurrency: step.config.concurrency.clone(),
+                slot_requests: step.config.slot_requests.clone(),
                 conditions: task_conditions_to_pb(step, namespace),
-                is_durable: false,
+                is_durable: step.is_durable,
             })
             .collect();
         Self {
@@ -124,7 +143,19 @@ pub trait Transport: Send + Sync {
 
     async fn append_run_log(&self, run_id: &WorkflowRunId, level: LogLevel, message: String);
 
-    async fn list_logs(&self) -> Vec<LogRecord>;
+    async fn refresh_timeout(&self, task_run_id: &str, increment: &str) -> Result<()>;
+
+    async fn release_slot(&self, task_run_id: &str) -> Result<()>;
+
+    async fn list_logs(&self, task_run_id: &str) -> Result<Vec<LogRecord>>;
+
+    fn durable_listener(&self) -> Option<Arc<DurableListenerClient>> {
+        None
+    }
+
+    fn rest_api(&self) -> Option<Arc<RestApiClient>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -275,7 +306,29 @@ impl InMemoryTransport {
         input: Value,
         run_id: WorkflowRunId,
     ) -> Result<Value> {
-        if let Some(dispatcher) = self
+        let ids = crate::context::ContextIds {
+            workflow_name: workflow_name.to_owned(),
+            task_name: step.task_name.clone(),
+            workflow_run_id: run_id,
+            task_run_id: format!("{workflow_name}-{}", step.task_name),
+            workflow_id: None,
+            workflow_version_id: None,
+        };
+
+        if step.is_durable {
+            if let Some(dispatcher) = self
+                .durable_task_dispatchers
+                .read()
+                .await
+                .get(&step.task_name)
+                .and_then(|dispatchers| dispatchers.first())
+                .cloned()
+            {
+                return dispatcher
+                    .run_durable_task_json(&step.task_name, input, ids, 1)
+                    .await;
+            }
+        } else if let Some(dispatcher) = self
             .task_dispatchers
             .read()
             .await
@@ -283,49 +336,12 @@ impl InMemoryTransport {
             .and_then(|dispatchers| dispatchers.first())
             .cloned()
         {
-            return dispatcher
-                .run_task_json(
-                    &step.task_name,
-                    input,
-                    crate::context::ContextIds {
-                        workflow_name: workflow_name.to_owned(),
-                        task_name: step.task_name.clone(),
-                        workflow_run_id: run_id,
-                        task_run_id: format!("{workflow_name}-{}", step.task_name),
-                        workflow_id: None,
-                        workflow_version_id: None,
-                    },
-                )
-                .await;
-        }
-
-        if let Some(dispatcher) = self
-            .durable_task_dispatchers
-            .read()
-            .await
-            .get(&step.task_name)
-            .and_then(|dispatchers| dispatchers.first())
-            .cloned()
-        {
-            return dispatcher
-                .run_durable_task_json(
-                    &step.task_name,
-                    input,
-                    crate::context::ContextIds {
-                        workflow_name: workflow_name.to_owned(),
-                        task_name: step.task_name.clone(),
-                        workflow_run_id: run_id,
-                        task_run_id: format!("{workflow_name}-{}", step.task_name),
-                        workflow_id: None,
-                        workflow_version_id: None,
-                    },
-                    1,
-                )
-                .await;
+            return dispatcher.run_task_json(&step.task_name, input, ids).await;
         }
 
         Err(Error::Worker(format!(
-            "no worker registered for workflow step '{}'",
+            "no {}worker registered for workflow step '{}'",
+            if step.is_durable { "durable " } else { "" },
             step.task_name
         )))
     }
@@ -492,13 +508,21 @@ impl Transport for InMemoryTransport {
             });
     }
 
-    async fn list_logs(&self) -> Vec<LogRecord> {
-        self.logs
+    async fn refresh_timeout(&self, _task_run_id: &str, _increment: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn release_slot(&self, _task_run_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_logs(&self, _task_run_id: &str) -> Result<Vec<LogRecord>> {
+        Ok(self.logs
             .lock()
             .await
             .values()
             .flat_map(|records| records.clone())
-            .collect()
+            .collect())
     }
 }
 

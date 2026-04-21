@@ -29,6 +29,16 @@ pub enum SlotType {
     Durable,
 }
 
+impl SlotType {
+    #[must_use]
+    pub(crate) fn as_engine_key(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Durable => "durable",
+        }
+    }
+}
+
 impl TaskConfig {
     #[must_use]
     pub fn builder() -> TaskConfigBuilder {
@@ -328,11 +338,10 @@ fn validate_schema(schema: &Value, input: &Value, path: &str, errors: &mut Vec<S
         }
     }
 
-    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
-        if !enum_values.iter().any(|candidate| candidate == input) {
+    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
+        && !enum_values.iter().any(|candidate| candidate == input) {
             errors.push(format!("{path}: value is not in enum"));
         }
-    }
 
     if let Some(object) = input.as_object() {
         if let Some(required) = schema.get("required").and_then(Value::as_array) {

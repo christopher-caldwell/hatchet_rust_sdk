@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use hatchet_sdk::{
     Client, ConcurrencyConfig, Condition, ConditionAction, Conditions, Context, ContextExt,
-    ContextIds, Cron, DurableContext, DurableContextExt, EventRecord, FilterDefinition,
+    ContextIds, DurableContext, DurableContextExt, EventRecord,
     InMemoryContext, InMemoryDurableContext, InMemoryTransport, LabelValue, RunOpts, RunStatus,
-    Schedule, StepConditions, TaskConfig, WebhookDefinition, WorkerInfo, WorkflowDeclaration,
+    Schedule, StepConditions, TaskConfig, WorkerInfo, WorkflowDeclaration,
     WorkflowRunId, conditions_to_rendered, or, render_conditions,
 };
 use serde::{Deserialize, Serialize};
@@ -59,7 +59,7 @@ async fn validates_declaration_and_run_submission() {
     assert_eq!(submitted[0].workflow_name, "email.workflow");
     assert_eq!(submitted[0].input, json!({ "value": 7 }));
 
-    let run_records = client.runs().list().await;
+    let run_records = client.runs().list().await.unwrap();
     assert_eq!(run_records.len(), 4);
 }
 
@@ -377,25 +377,14 @@ async fn validates_feature_client_operations() {
         Some(1)
     );
 
-    let schedule = Schedule {
-        name: "daily".to_owned(),
-        workflow_name: "feature.workflow".to_owned(),
-        expression: "0 0 * * *".to_owned(),
-        input: json!({ "kind": "daily" }),
-    };
-    let created_schedule = client.schedules().create(schedule.clone()).await;
+    let created_schedule = client.schedules().create("feature.workflow", "daily", "0 0 * * *", json!({ "kind": "daily" })).await.unwrap();
     assert_eq!(created_schedule.name, "daily");
     assert_eq!(
         client.schedules().get("daily").await.ok().map(|s| s.name),
         Some("daily".to_owned())
     );
 
-    let cron = Cron {
-        name: "nightly".to_owned(),
-        workflow_name: "feature.workflow".to_owned(),
-        expression: "0 2 * * *".to_owned(),
-    };
-    let created_cron = client.crons().create(cron).await;
+    let created_cron = client.crons().create("feature.workflow", "nightly", "0 2 * * *", json!({})).await.unwrap();
     assert_eq!(created_cron.name, "nightly");
 
     let worker_info = WorkerInfo {
@@ -409,7 +398,7 @@ async fn validates_feature_client_operations() {
 
     client.rate_limits().put("default", 10).await;
     assert_eq!(
-        client.rate_limits().list().await.get("default").copied(),
+        client.rate_limits().list().await.unwrap().get("default").copied(),
         Some(10)
     );
 
@@ -420,21 +409,12 @@ async fn validates_feature_client_operations() {
             payload: json!({ "id": "ord-1" }),
         })
         .await;
-    assert_eq!(client.events().list().await.len(), 1);
+    assert_eq!(client.events().list().await.unwrap().len(), 1);
 
-    let filter = FilterDefinition {
-        name: "high-priority".to_owned(),
-        expression: "payload.priority == 'high'".to_owned(),
-    };
-    let created_filter = client.filters().create(filter).await;
+    let created_filter = client.filters().create("feature.workflow", "high-priority", "payload.priority == 'high'").await.unwrap();
     assert_eq!(created_filter.name, "high-priority");
 
-    let webhook = WebhookDefinition {
-        name: "ops".to_owned(),
-        url: "https://example.com/webhook".to_owned(),
-        enabled: true,
-    };
-    let created_webhook = client.webhooks().create(webhook).await;
+    let created_webhook = client.webhooks().create("ops", "https://example.com/webhook").await.unwrap();
     assert_eq!(created_webhook.name, "ops");
 
     let status_before = client.runs().get_status(&run_id).await;
@@ -450,7 +430,7 @@ async fn validates_feature_client_operations() {
         .expect("replay should succeed");
     assert!(replay.0.starts_with("run-"));
 
-    let queue_metrics = client.metrics().get_queue_metrics().await;
+    let queue_metrics = client.metrics().get_queue_metrics().await.unwrap();
     assert_eq!(queue_metrics.total_runs, 2);
     assert_eq!(queue_metrics.queued_runs, 1);
 

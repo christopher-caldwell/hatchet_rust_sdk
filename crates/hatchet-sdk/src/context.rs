@@ -525,11 +525,13 @@ impl<T: Transport> Context for InMemoryContext<T> {
     }
 
     async fn refresh_timeout(&self) -> Result<()> {
-        Ok(())
+        self.transport
+            .refresh_timeout(self.task_run_id(), "60s")
+            .await
     }
 
     async fn release_slot(&self) -> Result<()> {
-        Ok(())
+        self.transport.release_slot(self.task_run_id()).await
     }
 
     async fn put_stream(&self, payload: Value) -> Result<()> {

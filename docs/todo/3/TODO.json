@@ -1,0 +1,54 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-04-21",
+  "project": "Hatchet Rust SDK — Complete TS Parity",
+  "summary": "REST 403 resolved. REST client refactored to propagate errors. Worker registration failing on engine validation.",
+  "completion_status": {
+    "P0_transport_worker_correctness": "done",
+    "P1_durable_runtime_parity": "done",
+    "P2_api_parity": "done",
+    "P3_feature_clients_parity": "done",
+    "P4_worker_runtime_quality": "done",
+    "P5_reliability_error_semantics": "done",
+    "P6_integration_tests": "in_progress"
+  },
+  "current_blocker": {
+    "issue": "Worker registration fails with InvalidArgument: Action IDs must be in the format <integrationId>:<verb>",
+    "affects": "integration_basic_register_and_run, integration_dag_workflow, integration_log_retrieval",
+    "evidence": "gRPC register request failed: Status { code: InvalidArgument, message: 'Invalid action ID. Action IDs must be in the format <integrationId>:<verb>' }",
+    "hypothesis": "Engine validation is strict about the verb part (likely no dashes) or needs a specific integrationId.",
+    "resolution": "Update integration tests to use simple task names (e.g., 'echo' instead of 'integration-echo-task') and ensure 'default:' prefix is handled correctly."
+  },
+  "recent_work": [
+    {
+      "phase": "REST Path Fixes",
+      "done": "Resolved 403s by splitting paths into v1 and v1/stable. Corrected /worker (singular) and /workflows/cancel (POST body) paths."
+    },
+    {
+      "phase": "Error Handling Refactor",
+      "done": "Refactored clients.rs list/metrics methods to return Result. No longer swallowing 403/500 errors with unwrap_or_default()."
+    },
+    {
+      "phase": "Worker Debugging",
+      "done": "Added tracing logs to GrpcTransport. Discovered engine validation error during registration."
+    }
+  ],
+  "files_changed": [
+    "crates/hatchet-sdk/src/rest_client.rs — corrected paths and parameter handling",
+    "crates/hatchet-sdk/src/clients.rs — refactored to return Results",
+    "crates/hatchet-sdk/src/grpc_transport.rs — added tracing, fixed rest_base initialization",
+    "crates/hatchet-sdk/src/transport.rs — updated list_logs trait, prepended 'default:' to actions",
+    "crates/hatchet-sdk/tests/integration.rs — added timeouts and Result handling"
+  ],
+  "next_steps": [
+    "1. Fix task names in integration tests (remove dashes) to satisfy engine validation.",
+    "2. Remove debug eprintln! calls from grpc_transport.rs once integration passes.",
+    "3. Complete P6.2 parity contract tests.",
+    "4. Final verification of durable execution against real engine."
+  ],
+  "test_commands": {
+    "integration": "cargo test -p hatchet-sdk --features integration --test integration -- --nocapture",
+    "unit": "cargo test --lib -p hatchet-sdk",
+    "build": "cargo build --workspace"
+  }
+}

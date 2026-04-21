@@ -26,20 +26,17 @@ pub enum TlsConfig {
 
 /// Log level for the SDK's internal logging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum SdkLogLevel {
     Off,
     Error,
     Warn,
+    #[default]
     Info,
     Debug,
     Trace,
 }
 
-impl Default for SdkLogLevel {
-    fn default() -> Self {
-        Self::Info
-    }
-}
 
 /// Connection configuration for the Hatchet engine.
 ///
@@ -49,6 +46,9 @@ impl Default for SdkLogLevel {
 pub struct HatchetConfig {
     /// The gRPC server address, e.g. `localhost:7077`.
     pub host_port: String,
+    /// The HTTP server URL for REST API calls, e.g. `http://localhost:8888`.
+    /// Defaults to the same address as host_port if not set from JWT.
+    pub server_url: String,
     /// JWT bearer token for authentication.
     pub token: String,
     /// TLS configuration.
@@ -89,6 +89,13 @@ impl HatchetConfig {
 
         let jwt_claims = decode_jwt_claims(&token)?;
 
+        let server_url = env_var("HATCHET_CLIENT_SERVER_URL").unwrap_or_else(|_| {
+            jwt_claims
+                .server_url
+                .clone()
+                .unwrap_or_else(|| "http://localhost:8888".to_owned())
+        });
+
         let host_port = env_var("HATCHET_CLIENT_HOST_PORT").unwrap_or_else(|_| {
             jwt_claims
                 .grpc_broadcast_address
@@ -120,6 +127,7 @@ impl HatchetConfig {
 
         Ok(Self {
             host_port,
+            server_url,
             token,
             tls,
             namespace,
@@ -150,6 +158,7 @@ impl HatchetConfig {
 #[derive(Debug, Clone, Default)]
 pub struct HatchetConfigBuilder {
     host_port: Option<String>,
+    server_url: Option<String>,
     token: Option<String>,
     tls: Option<TlsConfig>,
     namespace: Option<String>,
@@ -161,6 +170,12 @@ impl HatchetConfigBuilder {
     #[must_use]
     pub fn host_port(mut self, host_port: impl Into<String>) -> Self {
         self.host_port = Some(host_port.into());
+        self
+    }
+
+    #[must_use]
+    pub fn server_url(mut self, server_url: impl Into<String>) -> Self {
+        self.server_url = Some(server_url.into());
         self
     }
 
@@ -220,8 +235,17 @@ impl HatchetConfigBuilder {
             .host_port
             .ok_or_else(|| Error::Transport("host_port is required".to_owned()))?;
 
+        let scheme = match self.tls.as_ref().unwrap_or(&TlsConfig::System) {
+            TlsConfig::Insecure => "http",
+            _ => "https",
+        };
+        let server_url = self
+            .server_url
+            .unwrap_or_else(|| format!("{scheme}://{host_port}"));
+
         Ok(HatchetConfig {
             host_port,
+            server_url,
             token,
             tls: self.tls.unwrap_or(TlsConfig::System),
             namespace: self.namespace,

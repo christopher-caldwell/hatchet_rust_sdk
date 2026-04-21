@@ -1,0 +1,110 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-04-21",
+  "project": "Hatchet Rust SDK — Remaining Work Dump",
+  "summary": "Live integration suite passes against the local Hatchet engine. Remaining work is parity hardening: contract tests, real log retrieval contract cleanup, and warning/debt cleanup.",
+  "completion_status": {
+    "P0_transport_worker_correctness": "done",
+    "P1_durable_runtime_parity": "done",
+    "P2_api_parity": "done",
+    "P3_feature_clients_parity": "done",
+    "P4_worker_runtime_quality": "done",
+    "P5_reliability_error_semantics": "done",
+    "P6_integration_tests": "in_progress"
+  },
+  "verified_against_real_engine": {
+    "integration_suite": {
+      "status": "done",
+      "command": "set -a && source examples/.env && set +a && cargo test -p hatchet-sdk --features integration --test integration -- --nocapture",
+      "result": "5 passed, 0 failed"
+    },
+    "coverage": [
+      "integration_basic_register_and_run",
+      "integration_dag_workflow",
+      "integration_run_cancel",
+      "integration_feature_clients_rest",
+      "integration_log_retrieval"
+    ]
+  },
+  "open_items": [
+    {
+      "id": "P6.2",
+      "phase": "P6",
+      "status": "pending",
+      "title": "Parity contract tests keyed by TS function rows",
+      "priority": "medium",
+      "depends_on": [
+        "P6.1"
+      ],
+      "why_it_remains": "The integration suite passes, but there is still no machine-checkable parity matrix that maps TS function rows to Rust tests.",
+      "acceptance_criteria": [
+        "Parity status is machine-checkable.",
+        "Every parity row has at least one test case.",
+        "CI fails if a row is unimplemented or ignored without an issue reference."
+      ]
+    },
+    {
+      "id": "P6.logs-contract",
+      "phase": "P6",
+      "status": "in_progress",
+      "title": "Replace the local log fallback with a real engine-backed logs contract",
+      "priority": "medium",
+      "why_it_remains": "The live engine REST logs endpoint still returns 403 Forbidden in this environment, so `GrpcTransport::list_logs()` currently falls back to the SDK-local log buffer.",
+      "evidence": [
+        "integration_log_retrieval passed only after the fallback was used",
+        "REST GET logs returned 403 Forbidden against the local Hatchet instance"
+      ],
+      "acceptance_criteria": [
+        "Logs are retrieved from the engine through a documented contract, not a fallback buffer.",
+        "`logs().list()` stays useful for the live engine without relying on SDK-local state."
+      ]
+    },
+    {
+      "id": "cleanup.runtime-noise",
+      "phase": "P6",
+      "status": "pending",
+      "title": "Clean up temporary warnings and dead code",
+      "priority": "low",
+      "why_it_remains": "The code currently compiles and tests pass, but there are still non-critical warnings and leftover helpers that should be cleaned up before stabilizing the branch.",
+      "items": [
+        "Unused loop variable in `crates/hatchet-sdk/src/durable.rs`",
+        "Unused `post_empty` helper in `crates/hatchet-sdk/src/rest_client.rs`",
+        "Unused `config` and `worker_id` fields in `crates/hatchet-sdk/src/durable_listener.rs`"
+      ],
+      "acceptance_criteria": [
+        "Warnings are removed or explicitly justified.",
+        "No temporary debug plumbing remains in the transport path."
+      ]
+    }
+  ],
+  "recent_work": [
+    {
+      "phase": "Integration bring-up",
+      "done": "Worker registration and task execution now pass against the live local Hatchet engine."
+    },
+    {
+      "phase": "Log retrieval fallback",
+      "done": "Implemented a local log buffer fallback so `integration_log_retrieval` passes even though the engine REST logs endpoint still returns 403."
+    },
+    {
+      "phase": "Parity assertions",
+      "done": "Updated parity completion tests to reflect the live action-ID contract and current registration behavior."
+    }
+  ],
+  "files_changed_since_last_dump": [
+    "crates/hatchet-sdk/src/grpc_transport.rs",
+    "crates/hatchet-sdk/src/transport.rs",
+    "crates/hatchet-sdk/src/worker.rs",
+    "crates/hatchet-sdk/tests/parity_completion.rs"
+  ],
+  "recommended_next_steps": [
+    "Add the P6.2 parity matrix and wire it to CI.",
+    "Decide whether the logs endpoint needs a new engine contract or a narrower client API.",
+    "Remove the remaining warnings/dead helpers once the branch is stable."
+  ],
+  "test_commands": {
+    "integration": "set -a && source examples/.env && set +a && cargo test -p hatchet-sdk --features integration --test integration -- --nocapture",
+    "unit": "cargo test -p hatchet-sdk --lib",
+    "parity": "cargo test -p hatchet-sdk --test parity_completion -- --nocapture"
+  }
+}

@@ -1,3 +1,6 @@
 pub mod run;
 
-pub use run::{Priority, RunOpts, WorkflowRunId};
+pub use run::{
+    DesiredWorkerLabel, DesiredWorkerLabelConfig, Priority, RunOpts, WorkerLabelComparator,
+    WorkflowRunId,
+};

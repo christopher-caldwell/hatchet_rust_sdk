@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::client::{DurableTaskHandle, TaskHandle};
 use crate::durable::Conditions;
@@ -19,8 +20,12 @@ pub struct WorkflowDeclaration<I, O> {
     pub steps: Vec<WorkflowStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_failure: Option<String>,
+    #[serde(default, skip)]
+    pub(crate) on_failure_is_durable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_success: Option<String>,
+    #[serde(default, skip)]
+    pub(crate) on_success_is_durable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,6 +34,8 @@ pub struct WorkflowDeclaration<I, O> {
     /// Mirrors the TS `{ expression: string }[]` on `WorkflowDeclaration`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_filters: Vec<DefaultFilterExpression>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Value>,
     io: PhantomData<fn(I) -> O>,
 }
 
@@ -52,6 +59,8 @@ pub struct WorkflowStep {
     pub task_name: String,
     pub config: TaskConfig,
     pub parents: Vec<String>,
+    #[serde(default)]
+    pub is_durable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_for: Vec<Conditions>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -61,6 +70,25 @@ pub struct WorkflowStep {
 }
 
 impl<I, O> WorkflowDeclaration<I, O> {
+    fn push_step(
+        &mut self,
+        task_name: String,
+        config: TaskConfig,
+        parents: Vec<String>,
+        step_config: StepConditions,
+        is_durable: bool,
+    ) {
+        self.steps.push(WorkflowStep {
+            task_name,
+            config,
+            parents,
+            is_durable,
+            wait_for: step_config.wait_for,
+            cancel_if: step_config.cancel_if,
+            skip_if: step_config.skip_if,
+        });
+    }
+
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -73,10 +101,13 @@ impl<I, O> WorkflowDeclaration<I, O> {
             sticky: None,
             steps: Vec::new(),
             on_failure: None,
+            on_failure_is_durable: false,
             on_success: None,
+            on_success_is_durable: false,
             description: None,
             version: None,
             default_filters: Vec::new(),
+            input_schema: None,
             io: PhantomData,
         }
     }
@@ -122,6 +153,7 @@ impl<I, O> WorkflowDeclaration<I, O> {
     #[must_use]
     pub fn on_failure_task<SI, SO>(mut self, task: &TaskHandle<SI, SO>) -> Self {
         self.on_failure = Some(task.task_name().to_owned());
+        self.on_failure_is_durable = false;
         self
     }
 
@@ -129,6 +161,7 @@ impl<I, O> WorkflowDeclaration<I, O> {
     #[must_use]
     pub fn on_failure_durable<SI, SO>(mut self, task: &DurableTaskHandle<SI, SO>) -> Self {
         self.on_failure = Some(task.task_name().to_owned());
+        self.on_failure_is_durable = true;
         self
     }
 
@@ -137,6 +170,7 @@ impl<I, O> WorkflowDeclaration<I, O> {
     #[must_use]
     pub fn on_success_task<SI, SO>(mut self, task: &TaskHandle<SI, SO>) -> Self {
         self.on_success = Some(task.task_name().to_owned());
+        self.on_success_is_durable = false;
         self
     }
 
@@ -144,6 +178,7 @@ impl<I, O> WorkflowDeclaration<I, O> {
     #[must_use]
     pub fn on_success_durable<SI, SO>(mut self, task: &DurableTaskHandle<SI, SO>) -> Self {
         self.on_success = Some(task.task_name().to_owned());
+        self.on_success_is_durable = true;
         self
     }
 
@@ -188,16 +223,22 @@ impl<I, O> WorkflowDeclaration<I, O> {
         self
     }
 
+    /// Sets an optional workflow-level input schema.
+    #[must_use]
+    pub fn input_schema(mut self, schema: Value) -> Self {
+        self.input_schema = Some(schema);
+        self
+    }
+
     #[must_use]
     pub fn step<SI, SO>(mut self, task: &TaskHandle<SI, SO>, config: TaskConfig) -> Self {
-        self.steps.push(WorkflowStep {
-            task_name: task.task_name().to_owned(),
+        self.push_step(
+            task.task_name().to_owned(),
             config,
-            parents: Vec::new(),
-            wait_for: Vec::new(),
-            cancel_if: Vec::new(),
-            skip_if: Vec::new(),
-        });
+            Vec::new(),
+            StepConditions::default(),
+            false,
+        );
         self
     }
 
@@ -208,17 +249,16 @@ impl<I, O> WorkflowDeclaration<I, O> {
         parents: &[&TaskHandle<PI, PO>],
         config: TaskConfig,
     ) -> Self {
-        self.steps.push(WorkflowStep {
-            task_name: task.task_name().to_owned(),
+        self.push_step(
+            task.task_name().to_owned(),
             config,
-            parents: parents
+            parents
                 .iter()
                 .map(|parent| parent.task_name().to_owned())
                 .collect(),
-            wait_for: Vec::new(),
-            cancel_if: Vec::new(),
-            skip_if: Vec::new(),
-        });
+            StepConditions::default(),
+            false,
+        );
         self
     }
 
@@ -229,14 +269,13 @@ impl<I, O> WorkflowDeclaration<I, O> {
         config: TaskConfig,
         step_config: StepConditions,
     ) -> Self {
-        self.steps.push(WorkflowStep {
-            task_name: task.task_name().to_owned(),
+        self.push_step(
+            task.task_name().to_owned(),
             config,
-            parents: Vec::new(),
-            wait_for: step_config.wait_for,
-            cancel_if: step_config.cancel_if,
-            skip_if: step_config.skip_if,
-        });
+            Vec::new(),
+            step_config,
+            false,
+        );
         self
     }
 
@@ -248,19 +287,109 @@ impl<I, O> WorkflowDeclaration<I, O> {
         config: TaskConfig,
         step_config: StepConditions,
     ) -> Self {
-        self.steps.push(WorkflowStep {
-            task_name: task.task_name().to_owned(),
+        self.push_step(
+            task.task_name().to_owned(),
             config,
-            parents: parents
+            parents
                 .iter()
                 .map(|parent| parent.task_name().to_owned())
                 .collect(),
-            wait_for: step_config.wait_for,
-            cancel_if: step_config.cancel_if,
-            skip_if: step_config.skip_if,
-        });
+            step_config,
+            false,
+        );
         self
     }
+
+    #[must_use]
+    pub fn durable_step<SI, SO>(
+        mut self,
+        task: &DurableTaskHandle<SI, SO>,
+        config: TaskConfig,
+    ) -> Self {
+        self.push_step(
+            task.task_name().to_owned(),
+            config,
+            Vec::new(),
+            StepConditions::default(),
+            true,
+        );
+        self
+    }
+
+    #[must_use]
+    pub fn durable_step_with<SI, SO>(
+        mut self,
+        task: &DurableTaskHandle<SI, SO>,
+        config: TaskConfig,
+        step_config: StepConditions,
+    ) -> Self {
+        self.push_step(
+            task.task_name().to_owned(),
+            config,
+            Vec::new(),
+            step_config,
+            true,
+        );
+        self
+    }
+
+    #[must_use]
+    pub fn step_after_names(
+        mut self,
+        task_name: impl Into<String>,
+        config: TaskConfig,
+        parents: impl IntoIterator<Item = impl Into<String>>,
+        is_durable: bool,
+        step_config: StepConditions,
+    ) -> Self {
+        self.push_step(
+            task_name.into(),
+            config,
+            parents.into_iter().map(Into::into).collect(),
+            step_config,
+            is_durable,
+        );
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn materialized(self) -> Self {
+        let mut materialized = self;
+        let Some(on_success) = materialized.on_success.clone() else {
+            return materialized;
+        };
+
+        let leaves = workflow_leaf_names(&materialized.steps);
+        if leaves.is_empty() {
+            return materialized;
+        }
+
+        materialized.steps.push(WorkflowStep {
+            task_name: on_success,
+            config: materialized.task_defaults.clone(),
+            parents: leaves,
+            is_durable: materialized.on_success_is_durable,
+            wait_for: Vec::new(),
+            cancel_if: Vec::new(),
+            skip_if: Vec::new(),
+        });
+
+        materialized
+    }
+}
+
+fn workflow_leaf_names(steps: &[WorkflowStep]) -> Vec<String> {
+    let mut non_leaves = std::collections::BTreeSet::new();
+    for step in steps {
+        for parent in &step.parents {
+            non_leaves.insert(parent.clone());
+        }
+    }
+
+    steps.iter()
+        .filter(|step| !non_leaves.contains(&step.task_name))
+        .map(|step| step.task_name.clone())
+        .collect()
 }
 
 /// Builder for attaching conditions to a workflow step.

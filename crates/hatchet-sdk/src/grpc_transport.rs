@@ -9,6 +9,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use hatchet_core::{RunOpts, WorkflowRunId};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock, oneshot};
 use tonic::metadata::MetadataValue;
@@ -21,6 +22,8 @@ use crate::context::LogLevel;
 use crate::durable::RenderedConditions;
 use crate::error::{Error, Result};
 use crate::proto;
+use crate::rest_client::RestApiClient;
+use crate::retry::{RetryConfig, retry};
 use crate::transport::{Transport, WorkerStartOpts, WorkflowRegistration};
 use crate::workflow::WorkflowDeclaration;
 
@@ -31,6 +34,7 @@ use crate::workflow::WorkflowDeclaration;
 #[derive(Clone)]
 pub struct GrpcTransport {
     config: HatchetConfig,
+    rest: reqwest::Client,
     admin: proto::v1::admin_service_client::AdminServiceClient<Channel>,
     legacy_workflows: proto::workflows::workflow_service_client::WorkflowServiceClient<Channel>,
     dispatcher: proto::dispatcher::dispatcher_client::DispatcherClient<Channel>,
@@ -43,6 +47,11 @@ pub struct GrpcTransport {
     pending: Arc<Mutex<HashMap<WorkflowRunId, oneshot::Sender<Result<Value>>>>>,
     receivers: Arc<Mutex<HashMap<WorkflowRunId, oneshot::Receiver<Result<Value>>>>>,
     completed: Arc<Mutex<HashMap<WorkflowRunId, Result<Value>>>>,
+    log_records: Arc<Mutex<Vec<LogRecord>>>,
+    running_cancellations: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    durable_listener: Arc<std::sync::RwLock<Option<Arc<crate::durable_listener::DurableListenerClient>>>>,
+    rest_api_client: Arc<RestApiClient>,
+    rest_base: String,
 }
 
 impl std::fmt::Debug for GrpcTransport {
@@ -116,7 +125,11 @@ impl GrpcTransport {
             .await
             .map_err(|error| Error::Transport(format!("gRPC connect failed: {error}")))?;
 
+        let rest_client = build_rest_client(&config)?;
+        let rest_base = format!("{}/api/v1", config.server_url.trim_end_matches('/'));
+        let rest_api_client = RestApiClient::new(rest_client.clone(), rest_base.clone(), config.tenant_id.clone());
         Ok(Self {
+            rest: rest_client,
             admin: proto::v1::admin_service_client::AdminServiceClient::new(channel.clone()),
             legacy_workflows: proto::workflows::workflow_service_client::WorkflowServiceClient::new(
                 channel.clone(),
@@ -131,6 +144,11 @@ impl GrpcTransport {
             pending: Arc::new(Mutex::new(HashMap::new())),
             receivers: Arc::new(Mutex::new(HashMap::new())),
             completed: Arc::new(Mutex::new(HashMap::new())),
+            log_records: Arc::new(Mutex::new(Vec::new())),
+            running_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            durable_listener: Arc::new(std::sync::RwLock::new(None)),
+            rest_api_client,
+            rest_base,
             config,
         })
     }
@@ -139,6 +157,13 @@ impl GrpcTransport {
     #[must_use]
     pub fn config(&self) -> &HatchetConfig {
         &self.config
+    }
+
+    /// Returns a cloned transport with a custom retry policy.
+    #[must_use]
+    pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
+        self.retry_config = retry_config;
+        self
     }
 
     /// Sets the worker ID (called after `dispatcher.register()`).
@@ -201,14 +226,14 @@ impl GrpcTransport {
 
         let request = self.authed_request(proto::dispatcher::WorkerRegisterRequest {
             worker_name: worker_name.to_owned(),
-            actions,
+            actions: actions.clone(),
             services: Vec::new(),
             slots: None,
             labels: worker_labels,
             webhook_id: None,
             runtime_info: Some(proto::dispatcher::RuntimeInfo {
                 sdk_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-                language: Some(proto::dispatcher::Sdks::Unknown.into()),
+                language: None,
                 language_version: None,
                 os: Some(std::env::consts::OS.to_owned()),
                 extra: Some("rust".to_owned()),
@@ -223,10 +248,10 @@ impl GrpcTransport {
                 let mut client = dispatcher.clone();
                 let authed = self.authed_request(req);
                 async move {
-                    client
+                    let res = client
                         .register(authed)
-                        .await
-                        .map(|response| response.into_inner())
+                        .await;
+                    res.map(|response| response.into_inner())
                         .map_err(grpc_error)
                 }
             },
@@ -249,15 +274,19 @@ impl GrpcTransport {
             .await
             .ok_or_else(|| Error::Transport("worker not registered".to_owned()))?;
 
-        let mut dispatcher = self.dispatcher.clone();
-        let request = self.authed_request(proto::dispatcher::HeartbeatRequest {
-            worker_id,
-            heartbeat_at: Some(prost_now()),
-        });
-
-        dispatcher.heartbeat(request).await.map_err(grpc_error)?;
-
-        Ok(())
+        let dispatcher = self.dispatcher.clone();
+        retry(
+            || {
+                let mut client = dispatcher.clone();
+                let authed = self.authed_request(proto::dispatcher::HeartbeatRequest {
+                    worker_id: worker_id.clone(),
+                    heartbeat_at: Some(prost_now()),
+                });
+                async move { client.heartbeat(authed).await.map(|_| ()).map_err(grpc_error) }
+            },
+            &self.retry_config,
+        )
+        .await
     }
 
     /// Sends a step action event (started, completed, failed) to the engine.
@@ -296,18 +325,21 @@ impl GrpcTransport {
     ///
     /// Returns an error if the gRPC call fails.
     pub async fn refresh_timeout(&self, task_run_external_id: &str, increment: &str) -> Result<()> {
-        let mut dispatcher = self.dispatcher.clone();
-        let request = self.authed_request(proto::dispatcher::RefreshTimeoutRequest {
-            task_run_external_id: task_run_external_id.to_owned(),
-            increment_timeout_by: increment.to_owned(),
-        });
-
-        dispatcher
-            .refresh_timeout(request)
-            .await
-            .map_err(grpc_error)?;
-
-        Ok(())
+        let dispatcher = self.dispatcher.clone();
+        retry(
+            || {
+                let mut client = dispatcher.clone();
+                let authed = self.authed_request(proto::dispatcher::RefreshTimeoutRequest {
+                    task_run_external_id: task_run_external_id.to_owned(),
+                    increment_timeout_by: increment.to_owned(),
+                });
+                async move {
+                    client.refresh_timeout(authed).await.map(|_| ()).map_err(grpc_error)
+                }
+            },
+            &self.retry_config,
+        )
+        .await
     }
 
     /// Calls `ReleaseSlot` on the dispatcher.
@@ -316,14 +348,18 @@ impl GrpcTransport {
     ///
     /// Returns an error if the gRPC call fails.
     pub async fn release_slot(&self, task_run_external_id: &str) -> Result<()> {
-        let mut dispatcher = self.dispatcher.clone();
-        let request = self.authed_request(proto::dispatcher::ReleaseSlotRequest {
-            task_run_external_id: task_run_external_id.to_owned(),
-        });
-
-        dispatcher.release_slot(request).await.map_err(grpc_error)?;
-
-        Ok(())
+        let dispatcher = self.dispatcher.clone();
+        retry(
+            || {
+                let mut client = dispatcher.clone();
+                let authed = self.authed_request(proto::dispatcher::ReleaseSlotRequest {
+                    task_run_external_id: task_run_external_id.to_owned(),
+                });
+                async move { client.release_slot(authed).await.map(|_| ()).map_err(grpc_error) }
+            },
+            &self.retry_config,
+        )
+        .await
     }
 
     /// Opens a server-streaming `Listen` call for receiving assigned actions.
@@ -341,7 +377,6 @@ impl GrpcTransport {
         });
 
         let response = dispatcher.listen_v2(request).await.map_err(grpc_error)?;
-
         Ok(response.into_inner())
     }
 
@@ -351,15 +386,26 @@ impl GrpcTransport {
     ///
     /// Returns an error if the gRPC call fails.
     pub async fn get_run_details(&self, run_id: &str) -> Result<proto::v1::GetRunDetailsResponse> {
-        let mut admin = self.admin.clone();
-        let request = self.authed_request(proto::v1::GetRunDetailsRequest {
-            external_id: run_id.to_owned(),
-        });
-
-        let response = admin.get_run_details(request).await.map_err(grpc_error)?;
-
-        Ok(response.into_inner())
+        let admin = self.admin.clone();
+        retry(
+            || {
+                let mut client = admin.clone();
+                let authed = self.authed_request(proto::v1::GetRunDetailsRequest {
+                    external_id: run_id.to_owned(),
+                });
+                async move {
+                    client
+                        .get_run_details(authed)
+                        .await
+                        .map(|response| response.into_inner())
+                        .map_err(grpc_error)
+                }
+            },
+            &self.retry_config,
+        )
+        .await
     }
+
 }
 
 #[async_trait]
@@ -382,18 +428,7 @@ impl Transport for GrpcTransport {
         let desired_worker_labels = opts
             .desired_worker_labels
             .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    proto::v1::DesiredWorkerLabels {
-                        str_value: Some(value.clone()),
-                        int_value: None,
-                        required: None,
-                        comparator: None,
-                        weight: None,
-                    },
-                )
-            })
+            .map(|(key, value)| (key.clone(), run_opt_label_to_proto(value)))
             .collect();
 
         let trigger = proto::v1::TriggerWorkflowRequest {
@@ -405,12 +440,11 @@ impl Transport for GrpcTransport {
             child_key: opts.child_key.clone(),
             additional_metadata,
             desired_worker_id: None,
-            priority: opts.priority.map(|p| priority_to_i32(p)),
+            priority: opts.priority.map(priority_to_i32),
             desired_worker_labels,
         };
 
-        let mut workflows = self.legacy_workflows.clone();
-        let request = self.authed_request(trigger.clone());
+        let workflows = self.legacy_workflows.clone();
 
         let response = retry(
             || {
@@ -454,18 +488,7 @@ impl Transport for GrpcTransport {
         let desired_worker_labels: HashMap<String, proto::v1::DesiredWorkerLabels> = opts
             .desired_worker_labels
             .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    proto::v1::DesiredWorkerLabels {
-                        str_value: Some(value.clone()),
-                        int_value: None,
-                        required: None,
-                        comparator: None,
-                        weight: None,
-                    },
-                )
-            })
+            .map(|(key, value)| (key.clone(), run_opt_label_to_proto(value)))
             .collect();
 
         let triggers: Vec<proto::v1::TriggerWorkflowRequest> = inputs
@@ -485,7 +508,7 @@ impl Transport for GrpcTransport {
                     child_key: opts.child_key.clone(),
                     additional_metadata: additional_metadata.clone(),
                     desired_worker_id: None,
-                    priority: opts.priority.map(|p| priority_to_i32(p)),
+                    priority: opts.priority.map(priority_to_i32),
                     desired_worker_labels: desired_worker_labels.clone(),
                 }
             })
@@ -495,7 +518,7 @@ impl Transport for GrpcTransport {
             workflows: triggers.clone(),
         };
 
-        let mut workflows = self.legacy_workflows.clone();
+        let workflows = self.legacy_workflows.clone();
         let response = retry(
             || {
                 let req = bulk_request.clone();
@@ -562,8 +585,12 @@ impl Transport for GrpcTransport {
     async fn start_worker_loop(&self, opts: WorkerStartOpts) -> Result<()> {
         // Find all actions
         let mut actions = Vec::new();
-        actions.extend(opts.task_dispatchers.keys().cloned());
-        actions.extend(opts.durable_task_dispatchers.keys().cloned());
+        for action in opts.task_dispatchers.keys() {
+            actions.push(worker_action_id(action));
+        }
+        for action in opts.durable_task_dispatchers.keys() {
+            actions.push(worker_action_id(action));
+        }
 
         let response = self
             .register_worker(
@@ -575,6 +602,23 @@ impl Transport for GrpcTransport {
             .await?;
 
         let worker_id = response.worker_id;
+
+        // Start the durable listener stream (if durable tasks are registered)
+        if !opts.durable_task_dispatchers.is_empty() {
+            match crate::durable_listener::DurableListenerClient::start(
+                self.config.clone(),
+                worker_id.clone(),
+            )
+            .await
+            {
+                Ok(listener) => {
+                    if let Ok(mut guard) = self.durable_listener.write() {
+                        *guard = Some(Arc::new(listener));
+                    }
+                }
+                Err(_error) => {}
+            }
+        }
 
         // 1. Start heartbeat loop
         let heartbeat_transport = self.clone();
@@ -594,7 +638,7 @@ impl Transport for GrpcTransport {
         });
 
         // 2. Open action stream
-        let mut stream = retry(
+        let mut stream: tonic::Streaming<proto::dispatcher::AssignedAction> = retry(
             || async { self.listen(&worker_id).await },
             &self.retry_config,
         )
@@ -613,10 +657,7 @@ impl Transport for GrpcTransport {
                             // In a full implementation, we should reconnect the listen stream.
                             break;
                         }
-                        Err(error) => {
-                            eprintln!("listen stream error: {error}");
-                            break;
-                        }
+                        Err(_error) => break,
                     }
                 }
                 _ = opts.cancel_token.cancelled() => {
@@ -641,6 +682,11 @@ impl Transport for GrpcTransport {
             .iter()
             .map(|task| rendered_to_proto_task(task, &registration))
             .collect();
+        let on_failure_task = definition.on_failure.as_ref().and_then(|failure_task_name| {
+            tasks.iter()
+                .find(|task| task.readable_id == *failure_task_name)
+                .cloned()
+        });
 
         let create_request = proto::v1::CreateWorkflowVersionRequest {
             name: registration.name.clone(),
@@ -651,12 +697,12 @@ impl Transport for GrpcTransport {
             tasks,
             concurrency: None,
             cron_input: None,
-            on_failure_task: None,
+            on_failure_task,
             sticky: definition.sticky.as_ref().map(|s| match s {
                 crate::workflow::StickyStrategy::Soft => proto::v1::StickyStrategy::Soft.into(),
                 crate::workflow::StickyStrategy::Hard => proto::v1::StickyStrategy::Hard.into(),
             }),
-            default_priority: definition.default_priority.map(|p| priority_to_i32(p)),
+            default_priority: definition.default_priority.map(priority_to_i32),
             concurrency_arr: definition.concurrency.as_ref().map_or(Vec::new(), |c| {
                 vec![proto::v1::Concurrency {
                     expression: c.expression.clone(),
@@ -689,7 +735,7 @@ impl Transport for GrpcTransport {
                         .map(|p| serde_json::to_vec(p).unwrap_or_default()),
                 })
                 .collect(),
-            input_json_schema: None,
+            input_json_schema: serialize_input_schema(definition.input_schema.as_ref()),
         };
 
         let admin = self.admin.clone();
@@ -729,10 +775,43 @@ impl Transport for GrpcTransport {
         let _ = events.put_stream_event(request).await;
     }
 
-    async fn stream_run(&self, _run_id: &WorkflowRunId) -> Result<Vec<Value>> {
-        // Stream events are typically polled via REST. For now, return empty.
-        // The real implementation would use the REST API.
-        Ok(Vec::new())
+    async fn stream_run(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>> {
+        let mut dispatcher = self.dispatcher.clone();
+        let request = self.authed_request(proto::dispatcher::SubscribeToWorkflowEventsRequest {
+            workflow_run_id: Some(run_id.0.clone()),
+            additional_meta_key: None,
+            additional_meta_value: None,
+        });
+
+        let mut stream = dispatcher
+            .subscribe_to_workflow_events(request)
+            .await
+            .map_err(grpc_error)?
+            .into_inner();
+
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), stream.message())
+                .await
+            {
+                Ok(Ok(Some(event))) => {
+                    events.push(workflow_event_payload_to_json(&event));
+                    if event.hangup {
+                        break;
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => return Err(grpc_error(error)),
+                Err(_) => {
+                    if !events.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(events)
     }
 
     async fn append_run_log(&self, run_id: &WorkflowRunId, level: LogLevel, message: String) {
@@ -743,6 +822,11 @@ impl Transport for GrpcTransport {
             LogLevel::Warn => "WARN",
             LogLevel::Error => "ERROR",
         };
+
+        self.log_records.lock().await.push(LogRecord {
+            level: level_str.to_owned(),
+            message: message.clone(),
+        });
 
         let mut events = self.events.clone();
         let request = self.authed_request(proto::events::PutLogRequest {
@@ -757,9 +841,68 @@ impl Transport for GrpcTransport {
         let _ = events.put_log(request).await;
     }
 
-    async fn list_logs(&self) -> Vec<LogRecord> {
-        // Logs are typically retrieved via REST API, not gRPC.
-        Vec::new()
+    async fn refresh_timeout(&self, task_run_id: &str, increment: &str) -> Result<()> {
+        GrpcTransport::refresh_timeout(self, task_run_id, increment).await
+    }
+
+    async fn release_slot(&self, task_run_id: &str) -> Result<()> {
+        GrpcTransport::release_slot(self, task_run_id).await
+    }
+
+    async fn list_logs(&self, task_run_id: &str) -> Result<Vec<LogRecord>> {
+        let candidate_urls = [
+            format!(
+                "{}/stable/tasks/{}/logs?limit=500",
+                self.rest_base, task_run_id
+            ),
+            format!(
+                "{}/tasks/{}/logs?limit=500",
+                self.rest_base, task_run_id
+            ),
+        ];
+
+        let mut last_error = None;
+        for url in candidate_urls {
+            let response = self
+                .rest
+                .get(&url)
+                // Use the authenticated client's implicit headers
+                .send()
+                .await
+                .map_err(|e| Error::Transport(format!("REST GET failed: {e}")))?;
+
+            if !response.status().is_success() {
+                last_error = Some(Error::Transport(format!(
+                    "REST GET logs: HTTP {}",
+                    response.status()
+                )));
+                continue;
+            }
+
+            let payload = response
+                .json::<V1LogLineList>()
+                .await
+                .map_err(|e| Error::Transport(format!("REST decode failed: {e}")))?;
+
+            return Ok(payload
+                .rows
+                .into_iter()
+                .map(|row| LogRecord {
+                    level: row.level.unwrap_or_else(|| "INFO".to_owned()),
+                    message: row.message,
+                })
+                .collect());
+        }
+
+        Err(last_error.unwrap_or_else(|| Error::Transport("REST GET logs failed".to_owned())))
+    }
+
+    fn durable_listener(&self) -> Option<Arc<crate::durable_listener::DurableListenerClient>> {
+        self.durable_listener.read().ok().and_then(|guard| guard.clone())
+    }
+
+    fn rest_api(&self) -> Option<Arc<RestApiClient>> {
+        Some(Arc::clone(&self.rest_api_client))
     }
 }
 
@@ -771,12 +914,22 @@ impl GrpcTransport {
         worker_id: &str,
         opts: &crate::transport::WorkerStartOpts,
     ) {
+        if action.action_type == proto::dispatcher::ActionType::CancelStepRun as i32 {
+            if let Some(token) = self
+                .running_cancellations
+                .lock()
+                .await
+                .remove(&action.task_run_external_id)
+            {
+                token.cancel();
+            }
+            return;
+        }
         if action.action_type != proto::dispatcher::ActionType::StartStepRun as i32 {
-            // Ignore cancel for now, we will wire up full cancellation next.
             return;
         }
 
-        let task_name = action.action_id.clone();
+        let task_name = resolve_action_task_name(&action, opts);
 
         let is_durable = opts.durable_task_dispatchers.contains_key(&task_name);
         let dispatcher = if is_durable {
@@ -790,14 +943,19 @@ impl GrpcTransport {
             let task_run_id = action.task_run_external_id.clone();
             let worker_id_clone = worker_id.to_owned();
             let transport = self.clone();
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            self.running_cancellations
+                .lock()
+                .await
+                .insert(task_run_id.clone(), cancel_token.clone());
 
             // Send STARTED
             let _ = transport
                 .send_step_action_event(proto::dispatcher::StepActionEvent {
                     worker_id: worker_id_clone.clone(),
-                    job_id: action.workflow_id.clone().unwrap_or_default(),
-                    job_run_id: action.workflow_version_id.clone().unwrap_or_default(),
-                    task_id: action.task_name.clone(),
+                    job_id: action.job_id.clone(),
+                    job_run_id: action.job_run_id.clone(),
+                    task_id: action.task_id.clone(),
                     task_run_external_id: task_run_id.clone(),
                     action_id: action.action_id.clone(),
                     event_timestamp: Some(prost_now()),
@@ -809,14 +967,12 @@ impl GrpcTransport {
                 .await;
 
             let ids = crate::context::ContextIds {
-                workflow_name: action.workflow_id.clone().unwrap_or_default(),
-                task_name: action.task_name.clone(),
-                workflow_run_id: WorkflowRunId(
-                    action.parent_workflow_run_id.clone().unwrap_or_default(),
-                ),
+                workflow_name: action.job_name.clone(),
+                task_name: task_name.clone(),
+                workflow_run_id: WorkflowRunId(action.workflow_run_id.clone()),
                 task_run_id: task_run_id.clone(),
-                workflow_id: None,
-                workflow_version_id: None,
+                workflow_id: action.workflow_id.clone(),
+                workflow_version_id: action.workflow_version_id.clone(),
             };
 
             let input = serde_json::from_str(&action.action_payload).unwrap_or(Value::Null);
@@ -825,34 +981,40 @@ impl GrpcTransport {
             tokio::spawn(async move {
                 let result = if is_durable {
                     dispatcher
-                        .run_durable_task_json(
+                        .run_durable_task_json_with_cancel(
                             &task_name,
                             input,
                             ids,
                             action.durable_task_invocation_count.unwrap_or(1) as u32,
+                            Some(cancel_token.clone()),
                         )
                         .await
                 } else {
-                    dispatcher.run_task_json(&task_name, input, ids).await
+                    dispatcher
+                        .run_task_json_with_cancel(
+                            &task_name,
+                            input,
+                            ids,
+                            Some(cancel_token.clone()),
+                        )
+                        .await
                 };
 
-                let (event_type, payload) = match result {
-                    Ok(val) => (
-                        proto::dispatcher::StepActionEventType::StepEventTypeCompleted,
-                        serde_json::to_string(&val).unwrap_or_default(),
-                    ),
-                    Err(error) => (
-                        proto::dispatcher::StepActionEventType::StepEventTypeFailed,
-                        error.to_string(),
-                    ),
-                };
+                let _ = transport
+                    .running_cancellations
+                    .lock()
+                    .await
+                    .remove(&task_run_id);
+
+                let (event_type, payload) =
+                    completion_event_from_result(result, cancel_token.is_cancelled());
 
                 let _ = transport
                     .send_step_action_event(proto::dispatcher::StepActionEvent {
                         worker_id: worker_id_clone,
-                        job_id: action.workflow_id.unwrap_or_default(),
-                        job_run_id: action.workflow_version_id.unwrap_or_default(),
-                        task_id: action.task_name,
+                        job_id: action.job_id,
+                        job_run_id: action.job_run_id,
+                        task_id: action.task_id,
                         task_run_external_id: task_run_id,
                         action_id: action.action_id,
                         event_timestamp: Some(prost_now()),
@@ -879,12 +1041,11 @@ impl GrpcTransport {
                     Ok(proto::v1::RunStatus::Completed) => {
                         // Collect task outputs — find the last task's output
                         let mut output = Value::Null;
-                        for (_key, task_detail) in &details.task_runs {
-                            if let Some(output_bytes) = &task_detail.output {
-                                if let Ok(parsed) = serde_json::from_slice(output_bytes) {
+                        for task_detail in details.task_runs.values() {
+                            if let Some(output_bytes) = &task_detail.output
+                                && let Ok(parsed) = serde_json::from_slice(output_bytes) {
                                     output = parsed;
                                 }
-                            }
                         }
                         return Ok(output);
                     }
@@ -912,6 +1073,95 @@ impl GrpcTransport {
     }
 }
 
+fn resolve_action_task_name(
+    action: &proto::dispatcher::AssignedAction,
+    opts: &crate::transport::WorkerStartOpts,
+) -> String {
+    if opts.task_dispatchers.contains_key(&action.action_id)
+        || opts
+            .durable_task_dispatchers
+            .contains_key(&action.action_id)
+    {
+        return action.action_id.clone();
+    }
+    action.task_name.clone()
+}
+
+fn worker_action_id(task_name: &str) -> String {
+    format!("default:{task_name}")
+}
+
+fn completion_event_from_result(
+    result: Result<Value>,
+    cancelled: bool,
+) -> (proto::dispatcher::StepActionEventType, String) {
+    if cancelled {
+        return (
+            proto::dispatcher::StepActionEventType::StepEventTypeFailed,
+            "task cancelled".to_owned(),
+        );
+    }
+
+    match result {
+        Ok(val) => (
+            proto::dispatcher::StepActionEventType::StepEventTypeCompleted,
+            serde_json::to_string(&val).unwrap_or_default(),
+        ),
+        Err(error) => (
+            proto::dispatcher::StepActionEventType::StepEventTypeFailed,
+            error.to_string(),
+        ),
+    }
+}
+
+fn run_opt_label_to_proto(
+    label: &hatchet_core::DesiredWorkerLabelConfig,
+) -> proto::v1::DesiredWorkerLabels {
+    match label {
+        hatchet_core::DesiredWorkerLabelConfig::Legacy(value) => proto::v1::DesiredWorkerLabels {
+            str_value: Some(value.clone()),
+            int_value: None,
+            required: None,
+            comparator: None,
+            weight: None,
+        },
+        hatchet_core::DesiredWorkerLabelConfig::Rich(config) => {
+            let comparator = config.comparator.map(|comparator| match comparator {
+                hatchet_core::WorkerLabelComparator::Equal => {
+                    proto::v1::WorkerLabelComparator::Equal
+                }
+                hatchet_core::WorkerLabelComparator::NotEqual => {
+                    proto::v1::WorkerLabelComparator::NotEqual
+                }
+                hatchet_core::WorkerLabelComparator::GreaterThan => {
+                    proto::v1::WorkerLabelComparator::GreaterThan
+                }
+                hatchet_core::WorkerLabelComparator::GreaterThanOrEqual => {
+                    proto::v1::WorkerLabelComparator::GreaterThanOrEqual
+                }
+                hatchet_core::WorkerLabelComparator::LessThan => {
+                    proto::v1::WorkerLabelComparator::LessThan
+                }
+                hatchet_core::WorkerLabelComparator::LessThanOrEqual => {
+                    proto::v1::WorkerLabelComparator::LessThanOrEqual
+                }
+            });
+
+            proto::v1::DesiredWorkerLabels {
+                str_value: Some(config.value.clone()),
+                int_value: None,
+                required: Some(config.required),
+                comparator: comparator.map(|value| value as i32),
+                weight: config.weight.map(u32_to_i32_saturating),
+            }
+        }
+    }
+}
+
+fn serialize_input_schema(schema: Option<&Value>) -> Option<Vec<u8>> {
+    schema.and_then(|value| serde_json::to_vec(value).ok())
+}
+
 // --- Conversion helpers ---
 
 fn grpc_error(status: Status) -> Error {
@@ -920,6 +1170,38 @@ fn grpc_error(status: Status) -> Error {
         status.message(),
         status.code()
     ))
+}
+
+fn build_rest_client(config: &HatchetConfig) -> Result<reqwest::Client> {
+    let mut headers = HeaderMap::new();
+    let auth = format!("Bearer {}", config.token);
+    let auth_value = HeaderValue::from_str(&auth)
+        .map_err(|error| Error::Transport(format!("invalid auth header: {error}")))?;
+    headers.insert(AUTHORIZATION, auth_value);
+
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .map_err(|error| Error::Transport(format!("failed to build REST client: {error}")))
+}
+
+fn workflow_event_payload_to_json(event: &proto::dispatcher::WorkflowEvent) -> Value {
+    serde_json::from_str::<Value>(&event.event_payload)
+        .unwrap_or_else(|_| serde_json::json!({ "event_payload": event.event_payload }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V1LogLine {
+    message: String,
+    #[serde(default)]
+    level: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct V1LogLineList {
+    #[serde(default)]
+    rows: Vec<V1LogLine>,
 }
 
 fn prost_now() -> prost_types::Timestamp {
@@ -956,12 +1238,21 @@ fn rendered_to_proto_task(
         }),
         inputs: String::new(),
         parents: task.parents.clone(),
-        retries: task.retries.map_or(0, |r| r as i32),
-        rate_limits: Vec::new(),       // TODO: wire rate limits
-        worker_labels: HashMap::new(), // TODO: wire desired worker labels
-        backoff_factor: None,
-        backoff_max_seconds: None,
-        concurrency: Vec::new(), // TODO: wire concurrency
+        retries: task.retries.map_or(0, u32_to_i32_saturating),
+        rate_limits: task.rate_limits.iter().map(rate_limit_to_proto).collect(),
+        worker_labels: task
+            .worker_labels
+            .iter()
+            .map(|(key, label)| (key.clone(), desired_worker_label_to_proto(label)))
+            .collect(),
+        backoff_factor: task.backoff_factor.map(|factor| factor as f32),
+        backoff_max_seconds: task.backoff_max_seconds.map(u64_to_i32_saturating),
+        concurrency: task
+            .concurrency
+            .as_ref()
+            .map_or_else(Vec::new, |concurrency| {
+                vec![concurrency_to_proto(concurrency)]
+            }),
         conditions: if conditions.parent_override_conditions.is_empty()
             && conditions.sleep_conditions.is_empty()
             && conditions.user_event_conditions.is_empty()
@@ -974,8 +1265,115 @@ fn rendered_to_proto_task(
             .schedule_timeout
             .map(|t| duration_to_string(std::time::Duration::from_secs(t))),
         is_durable: task.is_durable,
-        slot_requests: HashMap::new(),
+        slot_requests: task
+            .slot_requests
+            .iter()
+            .map(|(slot_type, units)| {
+                (
+                    slot_type.as_engine_key().to_owned(),
+                    u32_to_i32_saturating(*units),
+                )
+            })
+            .collect(),
     }
+}
+
+fn rate_limit_to_proto(rate_limit: &crate::task::RateLimit) -> proto::v1::CreateTaskRateLimit {
+    let (key, key_expr) = match &rate_limit.key {
+        crate::task::RateLimitKey::None => ("default".to_owned(), None),
+        crate::task::RateLimitKey::Static(key) => (key.clone(), None),
+        crate::task::RateLimitKey::Dynamic(expr) => ("dynamic".to_owned(), Some(expr.clone())),
+    };
+
+    let duration = match rate_limit.duration {
+        crate::task::RateLimitDuration::Second => proto::v1::RateLimitDuration::Second,
+        crate::task::RateLimitDuration::Minute => proto::v1::RateLimitDuration::Minute,
+        crate::task::RateLimitDuration::Hour => proto::v1::RateLimitDuration::Hour,
+        crate::task::RateLimitDuration::Day => proto::v1::RateLimitDuration::Day,
+        crate::task::RateLimitDuration::Week => proto::v1::RateLimitDuration::Week,
+    };
+
+    proto::v1::CreateTaskRateLimit {
+        key,
+        units: Some(u32_to_i32_saturating(rate_limit.units)),
+        key_expr,
+        units_expr: None,
+        limit_values_expr: Some(rate_limit.limit.to_string()),
+        duration: Some(duration as i32),
+    }
+}
+
+fn desired_worker_label_to_proto(
+    desired: &crate::task::DesiredLabelConfig,
+) -> proto::v1::DesiredWorkerLabels {
+    let (str_value, int_value) = match desired.value {
+        crate::task::LabelValue::String(ref value) => (Some(value.clone()), None),
+        crate::task::LabelValue::Int(value) => {
+            if let Ok(int_value) = i32::try_from(value) {
+                (None, Some(int_value))
+            } else {
+                (Some(value.to_string()), None)
+            }
+        }
+        crate::task::LabelValue::Bool(value) => (Some(value.to_string()), None),
+    };
+
+    let comparator = match desired.comparator {
+        crate::task::WorkerLabelComparator::Equal => proto::v1::WorkerLabelComparator::Equal,
+        crate::task::WorkerLabelComparator::NotEqual => proto::v1::WorkerLabelComparator::NotEqual,
+        crate::task::WorkerLabelComparator::GreaterThan => {
+            proto::v1::WorkerLabelComparator::GreaterThan
+        }
+        crate::task::WorkerLabelComparator::LessThan => proto::v1::WorkerLabelComparator::LessThan,
+        crate::task::WorkerLabelComparator::GreaterThanOrEqual => {
+            proto::v1::WorkerLabelComparator::GreaterThanOrEqual
+        }
+        crate::task::WorkerLabelComparator::LessThanOrEqual => {
+            proto::v1::WorkerLabelComparator::LessThanOrEqual
+        }
+    };
+
+    proto::v1::DesiredWorkerLabels {
+        str_value,
+        int_value,
+        required: Some(desired.required),
+        comparator: Some(comparator as i32),
+        weight: desired.weight.map(u32_to_i32_saturating),
+    }
+}
+
+fn concurrency_to_proto(concurrency: &crate::task::ConcurrencyConfig) -> proto::v1::Concurrency {
+    let limit_strategy = concurrency
+        .limit_strategy
+        .as_ref()
+        .map(|strategy| match strategy {
+            crate::task::ConcurrencyLimitStrategy::QueueNewRuns => {
+                proto::v1::ConcurrencyLimitStrategy::QueueNewest
+            }
+            crate::task::ConcurrencyLimitStrategy::CancelInProgress => {
+                proto::v1::ConcurrencyLimitStrategy::CancelInProgress
+            }
+            crate::task::ConcurrencyLimitStrategy::CancelOldest => {
+                proto::v1::ConcurrencyLimitStrategy::CancelNewest
+            }
+            crate::task::ConcurrencyLimitStrategy::GroupRoundRobin => {
+                proto::v1::ConcurrencyLimitStrategy::GroupRoundRobin
+            }
+        });
+
+    proto::v1::Concurrency {
+        expression: concurrency.expression.clone(),
+        max_runs: concurrency.max_runs.map(u32_to_i32_saturating),
+        limit_strategy: limit_strategy.map(|strategy| strategy as i32),
+    }
+}
+
+fn u32_to_i32_saturating(value: u32) -> i32 {
+    value.min(i32::MAX as u32) as i32
+}
+
+fn u64_to_i32_saturating(value: u64) -> i32 {
+    value.min(i32::MAX as u64) as i32
 }
 
 /// Converts `RenderedConditions` into the protobuf `TaskConditions`.
@@ -1114,4 +1512,281 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{
+        V1LogLineList, WorkflowRegistration, completion_event_from_result, rendered_to_proto_task,
+        resolve_action_task_name, run_opt_label_to_proto, serialize_input_schema,
+        worker_action_id, workflow_event_payload_to_json,
+    };
+    use crate::task::{
+        BackoffConfig, ConcurrencyConfig, ConcurrencyLimitStrategy, DesiredLabelConfig, LabelValue,
+        RateLimit, RateLimitDuration, SlotType, TaskConfig, WorkerLabelComparator,
+    };
+    use crate::workflow::WorkflowDeclaration;
+    use serde_json::Value;
+
+    #[test]
+    fn workflow_registration_from_declaration_carries_task_parity_fields() {
+        let task_config = TaskConfig::builder()
+            .retries(3)
+            .backoff(BackoffConfig {
+                factor: 2.25,
+                max_seconds: 77,
+            })
+            .rate_limit(RateLimit::new(2, 30, RateLimitDuration::Minute).with_static_key("api"))
+            .desired_label(
+                "region",
+                DesiredLabelConfig::new(LabelValue::String("us-east".to_owned()))
+                    .required(true)
+                    .weight(55)
+                    .comparator(WorkerLabelComparator::Equal),
+            )
+            .concurrency(
+                ConcurrencyConfig::new("input.customer_id")
+                    .max_runs(8)
+                    .limit_strategy(ConcurrencyLimitStrategy::GroupRoundRobin),
+            )
+            .slot_request(SlotType::Default, 2)
+            .slot_request(SlotType::Durable, 5)
+            .build();
+
+        let declaration = WorkflowDeclaration::<Value, Value>::new("payments").step(
+            &crate::Client::new(std::sync::Arc::new(crate::InMemoryTransport::new()))
+                .task::<Value, Value>("charge"),
+            task_config.clone(),
+        );
+
+        let registration = WorkflowRegistration::from_declaration(&declaration, None);
+        assert_eq!(registration.tasks.len(), 1);
+        let task = &registration.tasks[0];
+
+        assert_eq!(task.rate_limits, task_config.rate_limits);
+        assert_eq!(task.worker_labels, task_config.desired_worker_labels);
+        assert_eq!(task.backoff_factor, Some(2.25));
+        assert_eq!(task.backoff_max_seconds, Some(77));
+        assert_eq!(task.concurrency, task_config.concurrency);
+        assert_eq!(task.slot_requests, task_config.slot_requests);
+    }
+
+    #[test]
+    fn rendered_to_proto_task_maps_rate_limits_labels_concurrency_backoff_and_slots() {
+        let dynamic_limit =
+            RateLimit::new(4, 90, RateLimitDuration::Hour).with_dynamic_key("input.account_id");
+        let task_config = TaskConfig::builder()
+            .retries(2)
+            .backoff(BackoffConfig {
+                factor: 1.5,
+                max_seconds: 42,
+            })
+            .rate_limit(RateLimit::new(1, 20, RateLimitDuration::Second).with_static_key("burst"))
+            .rate_limit(dynamic_limit.clone())
+            .desired_label(
+                "score",
+                DesiredLabelConfig::new(LabelValue::Int(7))
+                    .required(false)
+                    .weight(12)
+                    .comparator(WorkerLabelComparator::GreaterThanOrEqual),
+            )
+            .concurrency(
+                ConcurrencyConfig::new("input.org")
+                    .max_runs(3)
+                    .limit_strategy(ConcurrencyLimitStrategy::CancelOldest),
+            )
+            .slot_request(SlotType::Default, 6)
+            .slot_request(SlotType::Durable, 1)
+            .build();
+
+        let declaration = WorkflowDeclaration::<Value, Value>::new("billing").step(
+            &crate::Client::new(std::sync::Arc::new(crate::InMemoryTransport::new()))
+                .task::<Value, Value>("charge"),
+            task_config,
+        );
+
+        let registration = WorkflowRegistration::from_declaration(&declaration, None);
+        let task = &registration.tasks[0];
+        let proto = rendered_to_proto_task(task, &registration);
+
+        assert_eq!(proto.rate_limits.len(), 2);
+        assert_eq!(proto.rate_limits[0].key, "burst");
+        assert_eq!(proto.rate_limits[0].units, Some(1));
+        assert_eq!(
+            proto.rate_limits[0].limit_values_expr.as_deref(),
+            Some("20")
+        );
+        assert_eq!(
+            proto.rate_limits[0].duration,
+            Some(crate::proto::v1::RateLimitDuration::Second as i32)
+        );
+        assert_eq!(proto.rate_limits[1].key, "dynamic");
+        assert_eq!(
+            proto.rate_limits[1].key_expr.as_deref(),
+            Some("input.account_id")
+        );
+        assert_eq!(
+            proto.rate_limits[1].duration,
+            Some(crate::proto::v1::RateLimitDuration::Hour as i32)
+        );
+
+        let score_label = proto
+            .worker_labels
+            .get("score")
+            .expect("score label should be present");
+        assert_eq!(score_label.int_value, Some(7));
+        assert_eq!(score_label.required, Some(false));
+        assert_eq!(score_label.weight, Some(12));
+        assert_eq!(
+            score_label.comparator,
+            Some(crate::proto::v1::WorkerLabelComparator::GreaterThanOrEqual as i32)
+        );
+
+        assert_eq!(proto.backoff_factor, Some(1.5));
+        assert_eq!(proto.backoff_max_seconds, Some(42));
+        assert_eq!(proto.concurrency.len(), 1);
+        assert_eq!(proto.concurrency[0].expression, "input.org");
+        assert_eq!(proto.concurrency[0].max_runs, Some(3));
+        assert_eq!(
+            proto.concurrency[0].limit_strategy,
+            Some(crate::proto::v1::ConcurrencyLimitStrategy::CancelNewest as i32)
+        );
+        assert_eq!(proto.slot_requests.get("default").copied(), Some(6));
+        assert_eq!(proto.slot_requests.get("durable").copied(), Some(1));
+    }
+
+    #[test]
+    fn workflow_event_payload_parser_handles_json_and_plain_text() {
+        let mut event = crate::proto::dispatcher::WorkflowEvent {
+            workflow_run_id: "run-1".to_owned(),
+            resource_type: 0,
+            event_type: 0,
+            resource_id: "resource-1".to_owned(),
+            event_timestamp: None,
+            event_payload: "{\"ok\":true}".to_owned(),
+            hangup: false,
+            task_retries: None,
+            retry_count: None,
+            event_index: None,
+        };
+
+        assert_eq!(
+            workflow_event_payload_to_json(&event),
+            serde_json::json!({"ok": true})
+        );
+
+        event.event_payload = "not-json".to_owned();
+        assert_eq!(
+            workflow_event_payload_to_json(&event),
+            serde_json::json!({"event_payload":"not-json"})
+        );
+    }
+
+    #[test]
+    fn parses_v1_log_list_payload_shape() {
+        let payload = r#"{
+            "rows":[
+                {"createdAt":"2026-01-01T00:00:00Z","message":"hello","level":"INFO","metadata":{}},
+                {"createdAt":"2026-01-01T00:00:01Z","message":"warn","level":"WARN","metadata":{}}
+            ]
+        }"#;
+        let parsed: V1LogLineList = serde_json::from_str(payload).expect("log list parses");
+        assert_eq!(parsed.rows.len(), 2);
+        assert_eq!(parsed.rows[0].message, "hello");
+        assert_eq!(parsed.rows[1].level.as_deref(), Some("WARN"));
+    }
+
+    #[test]
+    fn completion_event_marks_cancelled_runs_as_failed_even_on_success() {
+        let (event_type, payload) =
+            completion_event_from_result(Ok(serde_json::json!({"ok":true})), true);
+        assert_eq!(
+            event_type,
+            crate::proto::dispatcher::StepActionEventType::StepEventTypeFailed
+        );
+        assert_eq!(payload, "task cancelled");
+    }
+
+    #[test]
+    fn resolve_action_task_name_prefers_registered_action_id_and_falls_back_to_task_name() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let dispatcher = crate::worker::WorkerDispatcher::new(tx);
+        let mut opts = crate::transport::WorkerStartOpts {
+            worker_name: "worker".to_owned(),
+            labels: HashMap::new(),
+            slot_config: HashMap::new(),
+            task_dispatchers: HashMap::new(),
+            durable_task_dispatchers: HashMap::new(),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        };
+        opts.task_dispatchers
+            .insert("wf:step".to_owned(), dispatcher.clone());
+
+        let action = crate::proto::dispatcher::AssignedAction {
+            tenant_id: String::new(),
+            workflow_run_id: String::new(),
+            get_group_key_run_id: String::new(),
+            job_id: String::new(),
+            job_name: String::new(),
+            job_run_id: String::new(),
+            task_id: String::new(),
+            task_run_external_id: "task-run-1".to_owned(),
+            action_id: "wf:step".to_owned(),
+            action_type: crate::proto::dispatcher::ActionType::StartStepRun as i32,
+            action_payload: "{}".to_owned(),
+            task_name: "step".to_owned(),
+            retry_count: 0,
+            additional_metadata: None,
+            child_workflow_index: None,
+            child_workflow_key: None,
+            parent_workflow_run_id: None,
+            priority: 0,
+            workflow_id: None,
+            workflow_version_id: None,
+            durable_task_invocation_count: None,
+        };
+        assert_eq!(resolve_action_task_name(&action, &opts), "wf:step");
+
+        let mut opts_without_action = opts.clone();
+        opts_without_action.task_dispatchers.clear();
+        assert_eq!(
+            resolve_action_task_name(&action, &opts_without_action),
+            "step"
+        );
+    }
+
+    #[test]
+    fn worker_action_id_uses_default_integration_prefix() {
+        assert_eq!(worker_action_id("echo"), "default:echo");
+        assert_eq!(worker_action_id("hook.success"), "default:hook.success");
+    }
+
+    #[test]
+    fn run_opt_label_mapping_supports_rich_config() {
+        let rich = hatchet_core::DesiredWorkerLabelConfig::Rich(hatchet_core::DesiredWorkerLabel {
+            value: "us-east".to_owned(),
+            required: true,
+            weight: Some(42),
+            comparator: Some(hatchet_core::WorkerLabelComparator::Equal),
+        });
+        let proto = run_opt_label_to_proto(&rich);
+        assert_eq!(proto.str_value.as_deref(), Some("us-east"));
+        assert_eq!(proto.required, Some(true));
+        assert_eq!(proto.weight, Some(42));
+        assert_eq!(
+            proto.comparator,
+            Some(crate::proto::v1::WorkerLabelComparator::Equal as i32)
+        );
+    }
+
+    #[test]
+    fn serialize_input_schema_encodes_json_bytes() {
+        let schema = serde_json::json!({"type":"object","required":["id"]});
+        let bytes = serialize_input_schema(Some(&schema)).expect("schema serializes");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("serialized bytes are valid json");
+        assert_eq!(parsed, schema);
+    }
 }

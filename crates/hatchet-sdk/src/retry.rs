@@ -31,6 +31,12 @@ pub struct RetryConfig {
     pub max_backoff: Duration,
     /// Multiplier applied to backoff on each retry.
     pub backoff_multiplier: f64,
+    /// Lower bound for jitter factor applied to each sleep.
+    pub jitter_min_factor: f64,
+    /// Upper bound for jitter factor applied to each sleep.
+    pub jitter_max_factor: f64,
+    /// Maximum total wall-clock time spent retrying.
+    pub max_elapsed: Option<Duration>,
 }
 
 impl Default for RetryConfig {
@@ -40,6 +46,9 @@ impl Default for RetryConfig {
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
             backoff_multiplier: DEFAULT_BACKOFF_MULTIPLIER,
+            jitter_min_factor: 0.75,
+            jitter_max_factor: 1.25,
+            max_elapsed: None,
         }
     }
 }
@@ -61,6 +70,7 @@ where
 {
     let mut last_error = None;
     let mut backoff = config.initial_backoff;
+    let started_at = tokio::time::Instant::now();
 
     for attempt in 0..=config.max_retries {
         match f().await {
@@ -72,10 +82,17 @@ where
 
                 last_error = Some(error);
 
-                // Add jitter: 75-125% of the computed backoff
-                let jitter_factor = 0.75 + (pseudo_random_f64() * 0.5);
+                let jitter_span = (config.jitter_max_factor - config.jitter_min_factor).max(0.0);
+                let jitter_factor = config.jitter_min_factor + (pseudo_random_f64() * jitter_span);
                 let jittered = Duration::from_secs_f64(backoff.as_secs_f64() * jitter_factor);
                 let capped = jittered.min(config.max_backoff);
+
+                if let Some(max_elapsed) = config.max_elapsed
+                    && started_at.elapsed() + capped > max_elapsed {
+                        return Err(last_error.unwrap_or_else(|| {
+                            Error::Transport("retry max elapsed exceeded".to_owned())
+                        }));
+                    }
 
                 tokio::time::sleep(capped).await;
 
@@ -136,6 +153,9 @@ mod tests {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(10),
             backoff_multiplier: 2.0,
+            jitter_min_factor: 1.0,
+            jitter_max_factor: 1.0,
+            max_elapsed: None,
         };
 
         let result = retry(
@@ -187,6 +207,9 @@ mod tests {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(5),
             backoff_multiplier: 2.0,
+            jitter_min_factor: 1.0,
+            jitter_max_factor: 1.0,
+            max_elapsed: None,
         };
 
         let result: Result<i32> = retry(
@@ -201,5 +224,31 @@ mod tests {
         assert!(result.is_err());
         // 1 initial + 2 retries = 3 total
         assert_eq!(call_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn stops_when_max_elapsed_is_exceeded() {
+        let call_count = AtomicU32::new(0);
+        let config = RetryConfig {
+            max_retries: 10,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(10),
+            backoff_multiplier: 1.0,
+            jitter_min_factor: 1.0,
+            jitter_max_factor: 1.0,
+            max_elapsed: Some(Duration::from_millis(15)),
+        };
+
+        let result: Result<i32> = retry(
+            || {
+                call_count.fetch_add(1, Ordering::Relaxed);
+                async { Err(Error::Transport("still failing".to_owned())) }
+            },
+            &config,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(call_count.load(Ordering::Relaxed) <= 2);
     }
 }
