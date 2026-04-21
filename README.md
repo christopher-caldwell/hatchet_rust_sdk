@@ -89,6 +89,12 @@ cargo run -p example --bin 05_conditions
 
 # 6. Ergonomic macro integration using `#[workflow]`
 cargo run -p example --bin 06_macros
+
+# 7. Spawning and awaiting child workflows dynamically
+cargo run -p example --bin 07_child_workflows
+
+# 8. Declaring and executing completely freestanding functional tasks
+cargo run -p example --bin 08_standalone_functions
 ```
 
 ## Development and Testing

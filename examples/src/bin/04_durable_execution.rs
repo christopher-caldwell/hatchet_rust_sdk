@@ -1,5 +1,5 @@
 use hatchet_sdk::{
-    Client, DurableContext, InMemoryDurableContext, InMemoryTransport, Result, TaskConfig,
+    config::HatchetConfig, Client, DurableContext, GrpcTransport, InMemoryDurableContext, Result, TaskConfig,
     WorkflowDeclaration,
 };
 use std::sync::Arc;
@@ -10,7 +10,8 @@ use std::time::Duration;
 /// and memoization (caching variables on the context to support yield-retry scenarios).
 #[tokio::main]
 async fn main() -> Result<()> {
-    let transport = Arc::new(InMemoryTransport::new());
+    let config = HatchetConfig::from_env()?;
+    let transport = Arc::new(GrpcTransport::from_config(config).await?);
     let client = Client::new(transport);
 
     // Note: We use `durable_task` instead of `task` to access DurableContext methods

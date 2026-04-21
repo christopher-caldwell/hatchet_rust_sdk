@@ -1,5 +1,5 @@
 use hatchet_sdk::{
-    Client, ConcurrencyConfig, ConcurrencyLimitStrategy, InMemoryContext, InMemoryTransport,
+    config::HatchetConfig, Client, ConcurrencyConfig, ConcurrencyLimitStrategy, GrpcTransport, InMemoryContext,
     Result, TaskConfig, WorkflowDeclaration,
 };
 use std::sync::Arc;
@@ -8,7 +8,8 @@ use std::sync::Arc;
 /// to restrict how many instances of a workflow or task can run simultaneously.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let transport = Arc::new(InMemoryTransport::new());
+    let config = HatchetConfig::from_env()?;
+    let transport = Arc::new(GrpcTransport::from_config(config).await?);
     let client = Client::new(transport);
 
     // 1. Setup a standard task

@@ -1,5 +1,5 @@
 use hatchet_sdk::{
-    Client, Condition, InMemoryContext, InMemoryTransport, Result, StepConditions, TaskConfig,
+    config::HatchetConfig, Client, Condition, GrpcTransport, InMemoryContext, Result, StepConditions, TaskConfig,
     WorkflowDeclaration, or,
 };
 use std::sync::Arc;
@@ -9,7 +9,8 @@ use std::time::Duration;
 /// for specific events or timeouts before deciding to trigger, cancel, or skip execution.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let transport = Arc::new(InMemoryTransport::new());
+    let config = HatchetConfig::from_env()?;
+    let transport = Arc::new(GrpcTransport::from_config(config).await?);
     let client = Client::new(transport);
 
     let conditional_task = client.task::<serde_json::Value, String>("conditional-task");

@@ -1,13 +1,14 @@
 use hatchet_sdk::{
-    Client, ContextExt, InMemoryContext, InMemoryTransport, Result, TaskConfig, WorkflowDeclaration,
+    config::HatchetConfig, Client, Context, ContextExt, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
 };
 use std::sync::Arc;
 
-/// This example demonstrates how to build a Directed Acyclic Graph (DAG) workflow,
-/// where some tasks run concurrently and a final task runs after they complete.
+/// This example demonstrates a Directed Acyclic Graph (DAG) with both sequential
+/// and concurrent execution paths.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let transport = Arc::new(InMemoryTransport::new());
+    let config = HatchetConfig::from_env()?;
+    let transport = Arc::new(GrpcTransport::from_config(config).await?);
     let client = Client::new(transport);
 
     // 1. Declare Tasks
@@ -60,7 +61,7 @@ async fn main() -> Result<()> {
                 TaskConfig::default(),
             );
 
-    let _ = client.register_workflow(decl).await;
+    client.register_workflow(decl).await;
 
     // 4. Run the Workflow
     println!("Starting DAG workflow...");

@@ -1,5 +1,5 @@
 use hatchet_sdk::{
-    Client, Context, InMemoryContext, InMemoryDurableContext, InMemoryTransport,
+    config::HatchetConfig, Client, Context, GrpcTransport, InMemoryContext, InMemoryDurableContext,
     Result, durable_task, task, workflow,
 };
 use std::sync::Arc;
@@ -28,9 +28,6 @@ mod user_signup_workflow {
         input: serde_json::Value,
         ctx: InMemoryDurableContext<T>,
     ) -> hatchet_sdk::Result<String> {
-        // Log output that lives with the step history permanently natively
-        ctx.log(hatchet_sdk::LogLevel::Info, "Notifying administrator...")
-            .await?;
         println!(
             "[{}] Sent admin notification for {:?}",
             ctx.task_name(),
@@ -44,7 +41,8 @@ mod user_signup_workflow {
 /// codebase, building entire workflow orchestrations ergonomically.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let transport = Arc::new(InMemoryTransport::new());
+    let config = HatchetConfig::from_env()?;
+    let transport = Arc::new(GrpcTransport::from_config(config).await?);
     let client = Client::new(transport);
 
     // 4. Hook up the generated properties onto the builder utilizing `register_all` helper

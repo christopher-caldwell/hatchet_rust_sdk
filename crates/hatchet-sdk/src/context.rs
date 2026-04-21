@@ -476,9 +476,11 @@ impl<T: Transport> Context for InMemoryContext<T> {
         input: Value,
         opts: RunOpts,
     ) -> Result<WorkflowRunId> {
-        self.transport
+        let run_id = self.transport
             .run_workflow(workflow_name, input, self.child_run_opts(opts))
-            .await
+            .await?;
+        self.transport.register_result_channel(&run_id).await?;
+        Ok(run_id)
     }
 
     async fn run_child_no_wait_json(
@@ -496,9 +498,13 @@ impl<T: Transport> Context for InMemoryContext<T> {
         inputs: Vec<Value>,
         opts: RunOpts,
     ) -> Result<Vec<WorkflowRunId>> {
-        self.transport
+        let run_ids = self.transport
             .run_workflows(workflow_name, inputs, self.child_run_opts(opts))
-            .await
+            .await?;
+        for run_id in &run_ids {
+            self.transport.register_result_channel(run_id).await?;
+        }
+        Ok(run_ids)
     }
 
     async fn bulk_run_children_no_wait_json(
