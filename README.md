@@ -1,6 +1,6 @@
 # Hatchet Rust SDK
 
-The official Hatchet Rust SDK. This library provides a native, idiomatic Rust client for declaring, dispatching, and executing Hatchet workflows, tasks, and durable functions.
+A Hatchet Rust SDK. This library provides a native, idiomatic Rust client for declaring, dispatching, and executing Hatchet workflows, tasks, and durable functions.
 
 ## Features
 
@@ -21,13 +21,15 @@ cargo add hatchet-sdk hatchet-macros
 ### Protocol Buffers Requirement
 
 Because the SDK natively compiles gRPC protocol buffers via `tonic-build`, you must have `protoc` installed on your system.
+
 ```bash
 # macOS
 brew install protobuf
 # Ubuntu
 apt install -y protobuf-compiler
 ```
-*(If cargo is having trouble locating the installation, simply export `PROTOC=/path/to/protoc` prior to running `cargo build`.)*
+
+_(If cargo is having trouble locating the installation, simply export `PROTOC=/path/to/protoc` prior to running `cargo build`.)_
 
 ## Quickstart
 
@@ -49,7 +51,7 @@ async fn main() -> Result<()> {
             Ok("Success!".to_string())
         })
         .build();
-        
+
     let _handle = worker.start()?;
 
     // 3. Declare Workflow and Run
