@@ -411,9 +411,10 @@ async fn workflow_handle_helpers_cover_run_many_and_scheduling() {
 
     client
         .worker("helper-worker")
-        .register_task(&client.task::<u32, u32>("helper.workflow"), |input, _ctx| async move {
-            Ok(input + 1)
-        })
+        .register_task(
+            &client.task::<u32, u32>("helper.workflow"),
+            |input, _ctx| async move { Ok(input + 1) },
+        )
         .build()
         .start()
         .unwrap()
@@ -421,7 +422,10 @@ async fn workflow_handle_helpers_cover_run_many_and_scheduling() {
         .await
         .unwrap();
 
-    let outputs = workflow.run_many([1_u32, 2_u32], RunOpts::default()).await.unwrap();
+    let outputs = workflow
+        .run_many([1_u32, 2_u32], RunOpts::default())
+        .await
+        .unwrap();
     assert_eq!(outputs, vec![2, 3]);
 
     let schedule = workflow
@@ -456,8 +460,9 @@ async fn durable_steps_register_and_execute_in_workflow_graph() {
         .await
         .unwrap();
 
-    let declaration = WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("durable-wf")
-        .durable_step(&durable, TaskConfig::default());
+    let declaration =
+        WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("durable-wf")
+            .durable_step(&durable, TaskConfig::default());
     client.register_workflow(declaration).await;
 
     let registrations = transport.workflow_registrations().await;

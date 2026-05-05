@@ -1,6 +1,6 @@
 use hatchet_sdk::{
-    config::HatchetConfig, Client, Context, GrpcTransport, InMemoryContext, InMemoryDurableContext,
-    Result, durable_task, task, workflow,
+    Client, Context, GrpcTransport, InMemoryContext, InMemoryDurableContext, Result,
+    config::HatchetConfig, durable_task, task, workflow,
 };
 use std::sync::Arc;
 
@@ -8,9 +8,7 @@ use std::sync::Arc;
 // reducing boilerplate drastically for step declaration.
 #[workflow(name = "user.signup")]
 mod user_signup_workflow {
-    use super::{
-        Context, InMemoryContext, InMemoryDurableContext, durable_task, task,
-    };
+    use super::{Context, InMemoryContext, InMemoryDurableContext, durable_task, task};
 
     // 2. The `#[task]` macro automatically implements the `ErasedTaskFn` mapping to the handler
     #[task]

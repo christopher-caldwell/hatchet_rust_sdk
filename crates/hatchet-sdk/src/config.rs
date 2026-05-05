@@ -25,8 +25,7 @@ pub enum TlsConfig {
 }
 
 /// Log level for the SDK's internal logging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SdkLogLevel {
     Off,
     Error,
@@ -36,7 +35,6 @@ pub enum SdkLogLevel {
     Debug,
     Trace,
 }
-
 
 /// Connection configuration for the Hatchet engine.
 ///

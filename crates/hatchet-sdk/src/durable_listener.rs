@@ -413,9 +413,7 @@ async fn open_durable_stream(
     };
 
     let mut request = tonic::Request::new(outbound);
-    if let Ok(value) =
-        format!("Bearer {token}").parse::<MetadataValue<tonic::metadata::Ascii>>()
-    {
+    if let Ok(value) = format!("Bearer {token}").parse::<MetadataValue<tonic::metadata::Ascii>>() {
         request.metadata_mut().insert("authorization", value);
     }
 

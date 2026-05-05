@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::error::{Error, Result};
 use crate::run_ref::{RunControl, WorkflowRunRef};
+use crate::task::RateLimitDuration;
 use crate::transport::Transport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,10 +173,7 @@ impl<T: Transport> RunsClient<T> {
                 RunStatus::Completed => "COMPLETED",
             });
             return api
-                .list_runs_filtered(
-                    filter.workflow_name.as_deref(),
-                    status_str,
-                )
+                .list_runs_filtered(filter.workflow_name.as_deref(), status_str)
                 .await;
         }
         let state = self.state.read().await;
@@ -469,7 +467,9 @@ impl<T: Transport> CronsClient<T> {
         input: serde_json::Value,
     ) -> Result<Cron> {
         if let Some(api) = self._transport.rest_api() {
-            return api.create_cron(workflow_name, cron_name, expression, &input).await;
+            return api
+                .create_cron(workflow_name, cron_name, expression, &input)
+                .await;
         }
         let cron = Cron {
             name: cron_name.to_owned(),
@@ -664,18 +664,68 @@ impl<T: Transport> RateLimitsClient<T> {
     }
 
     pub async fn list(&self) -> Result<HashMap<String, u32>> {
+        if let Some(api) = self._transport.rest_api() {
+            return api.list_rate_limits().await;
+        }
+
+        if let Ok(rate_limits) = self._transport.list_rate_limits().await {
+            return Ok(rate_limits);
+        }
+
         let state = self.state.read().await;
         Ok(state.rate_limits.clone())
     }
 
-    pub async fn put(&self, key: impl Into<String>, limit: u32) {
+    pub async fn upsert(
+        &self,
+        key: impl Into<String>,
+        limit: u32,
+        duration: RateLimitDuration,
+    ) -> Result<String> {
+        let key = key.into();
+        let returned_key = self
+            ._transport
+            .upsert_rate_limit(&key, limit, duration)
+            .await?;
+
         let mut state = self.state.write().await;
-        state.rate_limits.insert(key.into(), limit);
+        state.rate_limits.insert(returned_key.clone(), limit);
+        Ok(returned_key)
+    }
+
+    pub async fn put(&self, key: impl Into<String>, limit: u32) {
+        let key = key.into();
+        if self
+            .upsert(key.clone(), limit, RateLimitDuration::Second)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+
+        let mut state = self.state.write().await;
+        state.rate_limits.insert(key, limit);
     }
 
     pub async fn delete(&self, key: &str) {
+        if self.delete_result(key).await.is_ok() {
+            return;
+        }
+
         let mut state = self.state.write().await;
         state.rate_limits.remove(key);
+    }
+
+    pub async fn delete_result(&self, key: &str) -> Result<()> {
+        if let Some(api) = self._transport.rest_api() {
+            api.delete_rate_limit(key).await?;
+        } else {
+            self._transport.delete_rate_limit(key).await?;
+        }
+
+        let mut state = self.state.write().await;
+        state.rate_limits.remove(key);
+        Ok(())
     }
 }
 

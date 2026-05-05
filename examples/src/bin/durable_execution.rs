@@ -1,6 +1,6 @@
 use hatchet_sdk::{
-    config::HatchetConfig, Client, DurableContext, GrpcTransport, InMemoryDurableContext, Result, TaskConfig,
-    WorkflowDeclaration,
+    Client, DurableContext, GrpcTransport, InMemoryDurableContext, Result, TaskConfig,
+    WorkflowDeclaration, config::HatchetConfig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +43,8 @@ async fn main() -> Result<()> {
 
     // To add a durable task to a declaration, use the `.durable_step()` builder method.
     let decl: WorkflowDeclaration<serde_json::Value, String> =
-        WorkflowDeclaration::new("durable-sleep-workflow").durable_step(&durable_sleep_task, TaskConfig::default());
+        WorkflowDeclaration::new("durable-sleep-workflow")
+            .durable_step(&durable_sleep_task, TaskConfig::default());
 
     let _ = client.register_workflow(decl).await;
 

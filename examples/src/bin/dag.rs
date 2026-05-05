@@ -1,5 +1,6 @@
 use hatchet_sdk::{
-    config::HatchetConfig, Client, Context, ContextExt, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
+    Client, Context, ContextExt, GrpcTransport, InMemoryContext, Result, TaskConfig,
+    WorkflowDeclaration, config::HatchetConfig,
 };
 use std::sync::Arc;
 

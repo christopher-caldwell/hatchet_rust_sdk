@@ -47,4 +47,3 @@ Result: `5 passed, 0 failed`
 1. Build `P6.2` as a machine-checkable parity matrix.
 2. Replace or formally define the live logs contract.
 3. Clean up warnings and temporary scaffolding.
-

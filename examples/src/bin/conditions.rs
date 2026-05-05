@@ -1,6 +1,6 @@
 use hatchet_sdk::{
-    config::HatchetConfig, Client, Condition, GrpcTransport, InMemoryContext, Result, StepConditions, TaskConfig,
-    WorkflowDeclaration, or,
+    Client, Condition, GrpcTransport, InMemoryContext, Result, StepConditions, TaskConfig,
+    WorkflowDeclaration, config::HatchetConfig, or,
 };
 use std::sync::Arc;
 use std::time::Duration;

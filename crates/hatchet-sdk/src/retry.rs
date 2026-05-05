@@ -88,11 +88,12 @@ where
                 let capped = jittered.min(config.max_backoff);
 
                 if let Some(max_elapsed) = config.max_elapsed
-                    && started_at.elapsed() + capped > max_elapsed {
-                        return Err(last_error.unwrap_or_else(|| {
-                            Error::Transport("retry max elapsed exceeded".to_owned())
-                        }));
-                    }
+                    && started_at.elapsed() + capped > max_elapsed
+                {
+                    return Err(last_error.unwrap_or_else(|| {
+                        Error::Transport("retry max elapsed exceeded".to_owned())
+                    }));
+                }
 
                 tokio::time::sleep(capped).await;
 

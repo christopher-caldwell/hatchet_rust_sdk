@@ -378,7 +378,7 @@ impl<I, O> WorkflowDeclaration<I, O> {
     }
 }
 
-fn workflow_leaf_names(steps: &[WorkflowStep]) -> Vec<String> {
+pub(crate) fn workflow_leaf_names(steps: &[WorkflowStep]) -> Vec<String> {
     let mut non_leaves = std::collections::BTreeSet::new();
     for step in steps {
         for parent in &step.parents {
@@ -386,7 +386,8 @@ fn workflow_leaf_names(steps: &[WorkflowStep]) -> Vec<String> {
         }
     }
 
-    steps.iter()
+    steps
+        .iter()
         .filter(|step| !non_leaves.contains(&step.task_name))
         .map(|step| step.task_name.clone())
         .collect()

@@ -1,5 +1,6 @@
 use hatchet_sdk::{
-    config::HatchetConfig, Client, Context, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
+    Client, Context, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
+    config::HatchetConfig,
 };
 use std::sync::Arc;
 
@@ -11,13 +12,21 @@ async fn process_payment(
     ctx: InMemoryContext<GrpcTransport>,
 ) -> Result<String> {
     println!("[Task {}] Initialized standalone function", ctx.task_name());
-    println!("[Task {}] Processing payment for: {:?}", ctx.task_name(), input);
+    println!(
+        "[Task {}] Processing payment for: {:?}",
+        ctx.task_name(),
+        input
+    );
 
     // Business logic goes here
     let status = format!("Payment successful for payload: {:?}", input);
 
     // Context metadata is still fully available
-    println!("[Task {}] Retry count: {}", ctx.task_name(), ctx.retry_count());
+    println!(
+        "[Task {}] Retry count: {}",
+        ctx.task_name(),
+        ctx.retry_count()
+    );
 
     Ok(status)
 }
@@ -42,9 +51,9 @@ async fn main() -> Result<()> {
     let _handle = worker.start()?;
 
     // 4. Declare the Workflow and register it
-    let workflow_decl: WorkflowDeclaration<serde_json::Value, String> = WorkflowDeclaration::new("payment-workflow")
-        .step(&payment_task, TaskConfig::default());
-        
+    let workflow_decl: WorkflowDeclaration<serde_json::Value, String> =
+        WorkflowDeclaration::new("payment-workflow").step(&payment_task, TaskConfig::default());
+
     client.register_workflow(workflow_decl).await;
 
     // 5. Trigger the workflow run

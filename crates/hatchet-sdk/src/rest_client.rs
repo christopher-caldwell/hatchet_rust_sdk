@@ -3,9 +3,9 @@
 //! Used by feature clients to back their methods with real engine state
 //! rather than in-memory simulation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{SystemTime, Duration};
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -53,7 +53,10 @@ impl RestApiClient {
     }
 
     fn stable_tenant_url(&self, path: &str) -> String {
-        format!("{}/stable/tenants/{}{}", self.base_url, self.tenant_id, path)
+        format!(
+            "{}/stable/tenants/{}{}",
+            self.base_url, self.tenant_id, path
+        )
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
@@ -73,8 +76,6 @@ impl RestApiClient {
             .await
             .map_err(|e| crate::error::Error::Transport(format!("REST decode failed: {e}")))
     }
-
-
 
     async fn post_json<T: for<'de> Deserialize<'de>>(&self, url: &str, body: &Value) -> Result<T> {
         let resp = self
@@ -115,7 +116,9 @@ impl RestApiClient {
 
     pub async fn list_runs(&self) -> Result<Vec<RunRecord>> {
         let since = self.default_since();
-        let url = self.stable_tenant_url(&format!("/workflow-runs?limit=200&only_tasks=false&since={since}"));
+        let url = self.stable_tenant_url(&format!(
+            "/workflow-runs?limit=200&only_tasks=false&since={since}"
+        ));
         let resp: V1WorkflowRunList = self.get_json(&url).await?;
         Ok(resp.rows.into_iter().map(run_record_from_v1).collect())
     }
@@ -372,6 +375,27 @@ impl RestApiClient {
         self.get_json(&url).await
     }
 
+    // --- Rate limits ---
+
+    pub async fn list_rate_limits(&self) -> Result<HashMap<String, u32>> {
+        let url = self.tenant_url("/rate-limits?limit=200");
+        let resp: V1RateLimitList = self.get_json(&url).await?;
+        Ok(resp
+            .rows
+            .into_iter()
+            .filter_map(|row| {
+                let key = row.key?;
+                let limit = row.limit_value.unwrap_or_default();
+                Some((key, u32::try_from(limit).unwrap_or_default()))
+            })
+            .collect())
+    }
+
+    pub async fn delete_rate_limit(&self, key: &str) -> Result<()> {
+        let url = self.tenant_url(&format!("/rate-limits?key={}", urlencoding_simple(key)));
+        self.delete_empty(&url).await
+    }
+
     fn default_since(&self) -> String {
         let hour_ago = SystemTime::now() - Duration::from_secs(3600);
         system_time_to_iso(&hour_ago)
@@ -522,6 +546,21 @@ struct V1Webhook {
     url: Option<String>,
     #[serde(default)]
     is_active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct V1RateLimitList {
+    #[serde(default)]
+    rows: Vec<V1RateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V1RateLimit {
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    limit_value: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

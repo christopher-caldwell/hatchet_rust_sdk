@@ -1213,7 +1213,10 @@ mod tests {
         reply_rx.await.expect("task reply should arrive").unwrap();
         tokio::time::sleep(Duration::from_millis(5)).await;
 
-        let logs = transport.list_logs("task-run-1").await.expect("logs should load");
+        let logs = transport
+            .list_logs("task-run-1")
+            .await
+            .expect("logs should load");
         assert!(logs.iter().any(|entry| {
             entry.level == "Warn"
                 && entry
@@ -1267,11 +1270,13 @@ mod tests {
         assert!(result.is_err());
         tokio::time::sleep(Duration::from_millis(25)).await;
 
-        assert!(transport
-            .list_logs("task-run-1")
-            .await
-            .expect("logs should load")
-            .is_empty());
+        assert!(
+            transport
+                .list_logs("task-run-1")
+                .await
+                .expect("logs should load")
+                .is_empty()
+        );
 
         worker.shutdown().await.expect("worker should shut down");
     }

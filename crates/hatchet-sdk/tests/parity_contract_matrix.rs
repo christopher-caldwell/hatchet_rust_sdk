@@ -1,12 +1,10 @@
 //! Machine-checkable parity matrix for TS function equivalence.
-//! 
+//!
 //! This file maps TS feature rows (from the audit matrix) to Rust tests.
 //! By making this an executable test suite, we ensure we don't drift from parity.
 //! Every row from the audit that is unimplemented is ignored with an issue reference.
 
 #![cfg(test)]
-
-
 
 macro_rules! parity_row {
     ($name:ident, $issue_ref:expr) => {
@@ -33,7 +31,10 @@ parity_row!(conditions_parent);
 parity_row!(conditions_or_group);
 parity_row!(conditions_render);
 parity_row!(conditions_to_pb); // Model serialization exists
-parity_row!(conditions_task_to_pb, "issue #101: needs transport layer wiring for wait_for");
+parity_row!(
+    conditions_task_to_pb,
+    "issue #101: needs transport layer wiring for wait_for"
+);
 
 // ---------------------------------------------------------------------------
 // Module 2 & 3: Workflow Declarations & Task Configuration
@@ -44,7 +45,7 @@ parity_row!(workflow_wait_for);
 parity_row!(workflow_cancel_if);
 parity_row!(workflow_skip_if);
 parity_row!(task_config_retries);
-parity_row!(task_config_rate_limits); 
+parity_row!(task_config_rate_limits);
 parity_row!(task_config_concurrency);
 
 // ---------------------------------------------------------------------------
@@ -56,8 +57,14 @@ parity_row!(context_workflow_name);
 parity_row!(context_parent_output);
 parity_row!(context_spawn_child);
 parity_row!(context_log);
-parity_row!(context_release_slot, "issue #102: implement release_slot on ContextExt");
-parity_row!(context_cancel, "issue #103: cancel() method missing from ContextExt");
+parity_row!(
+    context_release_slot,
+    "issue #102: implement release_slot on ContextExt"
+);
+parity_row!(
+    context_cancel,
+    "issue #103: cancel() method missing from ContextExt"
+);
 
 // ---------------------------------------------------------------------------
 // Module 5: Durable Context
@@ -76,10 +83,13 @@ parity_row!(durable_memo_durable, "issue #105: memo() cache missing");
 parity_row!(client_workflow);
 parity_row!(client_task);
 parity_row!(client_run_no_wait);
-parity_row!(client_namespace, "issue #106: Namespace wrapping object missing");
+parity_row!(
+    client_namespace,
+    "issue #106: Namespace wrapping object missing"
+);
 
 // ---------------------------------------------------------------------------
-// Module 9: Feature Clients 
+// Module 9: Feature Clients
 // ---------------------------------------------------------------------------
 
 parity_row!(feature_runs_client);

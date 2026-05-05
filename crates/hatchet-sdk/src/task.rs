@@ -172,13 +172,15 @@ pub enum RateLimitKey {
     Dynamic(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RateLimitDuration {
     Second,
     Minute,
     Hour,
     Day,
     Week,
+    Month,
+    Year,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -339,9 +341,10 @@ fn validate_schema(schema: &Value, input: &Value, path: &str, errors: &mut Vec<S
     }
 
     if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
-        && !enum_values.iter().any(|candidate| candidate == input) {
-            errors.push(format!("{path}: value is not in enum"));
-        }
+        && !enum_values.iter().any(|candidate| candidate == input)
+    {
+        errors.push(format!("{path}: value is not in enum"));
+    }
 
     if let Some(object) = input.as_object() {
         if let Some(required) = schema.get("required").and_then(Value::as_array) {

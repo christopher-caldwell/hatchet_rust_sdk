@@ -14,7 +14,7 @@ use crate::durable::{RenderedConditions, task_conditions_to_pb};
 use crate::durable_listener::DurableListenerClient;
 use crate::error::{Error, Result};
 use crate::rest_client::RestApiClient;
-use crate::task::{ConcurrencyConfig, DesiredLabelConfig, RateLimit, SlotType};
+use crate::task::{ConcurrencyConfig, DesiredLabelConfig, RateLimit, RateLimitDuration, SlotType};
 use crate::worker::WorkerDispatcher;
 use crate::workflow::{WorkflowDeclaration, WorkflowStep};
 use tokio_util::sync::CancellationToken;
@@ -149,6 +149,29 @@ pub trait Transport: Send + Sync {
 
     async fn list_logs(&self, task_run_id: &str) -> Result<Vec<LogRecord>>;
 
+    async fn upsert_rate_limit(
+        &self,
+        _key: &str,
+        _limit: u32,
+        _duration: RateLimitDuration,
+    ) -> Result<String> {
+        Err(Error::Transport(
+            "rate-limit upsert is not supported by this transport".to_owned(),
+        ))
+    }
+
+    async fn list_rate_limits(&self) -> Result<HashMap<String, u32>> {
+        Err(Error::Transport(
+            "rate-limit list is not supported by this transport".to_owned(),
+        ))
+    }
+
+    async fn delete_rate_limit(&self, _key: &str) -> Result<()> {
+        Err(Error::Transport(
+            "rate-limit delete is not supported by this transport".to_owned(),
+        ))
+    }
+
     fn durable_listener(&self) -> Option<Arc<DurableListenerClient>> {
         None
     }
@@ -171,6 +194,7 @@ pub struct InMemoryTransport {
     durable_task_dispatchers: Arc<RwLock<HashMap<String, Vec<WorkerDispatcher>>>>,
     workflow_definitions: Arc<RwLock<HashMap<String, WorkflowDeclaration<Value, Value>>>>,
     workflow_registrations: Arc<RwLock<HashMap<String, WorkflowRegistration>>>,
+    rate_limits: Arc<RwLock<HashMap<String, u32>>>,
 }
 
 impl InMemoryTransport {
@@ -387,14 +411,23 @@ impl Transport for InMemoryTransport {
         let mut run_ids = Vec::with_capacity(inputs.len());
         let mut runs = self.runs.write().await;
 
-        for input in inputs {
+        for (index, input) in inputs.into_iter().enumerate() {
             let run_id = self.next_run_id();
             let input_for_run = input.clone();
             run_ids.push(run_id);
+            let mut run_opts = opts.clone();
+            if run_opts.parent_workflow_run_id.is_some() {
+                run_opts.child_index = Some(
+                    run_opts
+                        .child_index
+                        .unwrap_or_default()
+                        .saturating_add(index as u64),
+                );
+            }
             runs.push(SubmittedRun {
                 workflow_name: workflow_name.to_owned(),
                 input,
-                opts: opts.clone(),
+                opts: run_opts,
             });
             let transport = self.clone();
             let workflow_name = workflow_name.to_owned();
@@ -517,12 +550,32 @@ impl Transport for InMemoryTransport {
     }
 
     async fn list_logs(&self, _task_run_id: &str) -> Result<Vec<LogRecord>> {
-        Ok(self.logs
+        Ok(self
+            .logs
             .lock()
             .await
             .values()
             .flat_map(|records| records.clone())
             .collect())
+    }
+
+    async fn upsert_rate_limit(
+        &self,
+        key: &str,
+        limit: u32,
+        _duration: RateLimitDuration,
+    ) -> Result<String> {
+        self.rate_limits.write().await.insert(key.to_owned(), limit);
+        Ok(key.to_owned())
+    }
+
+    async fn list_rate_limits(&self) -> Result<HashMap<String, u32>> {
+        Ok(self.rate_limits.read().await.clone())
+    }
+
+    async fn delete_rate_limit(&self, key: &str) -> Result<()> {
+        self.rate_limits.write().await.remove(key);
+        Ok(())
     }
 }
 

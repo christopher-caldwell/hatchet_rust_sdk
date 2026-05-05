@@ -391,6 +391,16 @@ impl<T: Transport> InMemoryContext<T> {
         opts.child_index = Some(child_index);
         opts
     }
+
+    fn bulk_child_run_opts(&self, mut opts: RunOpts, child_count: usize) -> RunOpts {
+        let first_child_index = self
+            .child_index
+            .fetch_add(child_count as u64, Ordering::Relaxed);
+        opts.parent_workflow_run_id = Some(self.ids.workflow_run_id.0.clone());
+        opts.parent_task_run_id = Some(self.ids.task_run_id.clone());
+        opts.child_index = Some(first_child_index);
+        opts
+    }
 }
 
 #[async_trait]
@@ -476,7 +486,8 @@ impl<T: Transport> Context for InMemoryContext<T> {
         input: Value,
         opts: RunOpts,
     ) -> Result<WorkflowRunId> {
-        let run_id = self.transport
+        let run_id = self
+            .transport
             .run_workflow(workflow_name, input, self.child_run_opts(opts))
             .await?;
         self.transport.register_result_channel(&run_id).await?;
@@ -498,8 +509,14 @@ impl<T: Transport> Context for InMemoryContext<T> {
         inputs: Vec<Value>,
         opts: RunOpts,
     ) -> Result<Vec<WorkflowRunId>> {
-        let run_ids = self.transport
-            .run_workflows(workflow_name, inputs, self.child_run_opts(opts))
+        let child_count = inputs.len();
+        let run_ids = self
+            .transport
+            .run_workflows(
+                workflow_name,
+                inputs,
+                self.bulk_child_run_opts(opts, child_count),
+            )
             .await?;
         for run_id in &run_ids {
             self.transport.register_result_channel(run_id).await?;

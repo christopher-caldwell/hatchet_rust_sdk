@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use hatchet_core::{RunOpts, WorkflowRunId};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{Mutex, RwLock};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::{Request, Status};
@@ -25,7 +25,7 @@ use crate::proto;
 use crate::rest_client::RestApiClient;
 use crate::retry::{RetryConfig, retry};
 use crate::transport::{Transport, WorkerStartOpts, WorkflowRegistration};
-use crate::workflow::WorkflowDeclaration;
+use crate::workflow::{WorkflowDeclaration, workflow_leaf_names};
 
 /// gRPC transport that connects to a real Hatchet engine.
 ///
@@ -43,13 +43,13 @@ pub struct GrpcTransport {
     retry_config: RetryConfig,
     /// Worker ID assigned after registration (set by the worker startup flow).
     worker_id: Arc<RwLock<Option<String>>>,
-    /// Result channels for awaiting run completion.
-    pending: Arc<Mutex<HashMap<WorkflowRunId, oneshot::Sender<Result<Value>>>>>,
-    receivers: Arc<Mutex<HashMap<WorkflowRunId, oneshot::Receiver<Result<Value>>>>>,
+    workflow_output_tasks: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    run_output_tasks: Arc<Mutex<HashMap<WorkflowRunId, Vec<String>>>>,
     completed: Arc<Mutex<HashMap<WorkflowRunId, Result<Value>>>>,
     log_records: Arc<Mutex<Vec<LogRecord>>>,
     running_cancellations: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
-    durable_listener: Arc<std::sync::RwLock<Option<Arc<crate::durable_listener::DurableListenerClient>>>>,
+    durable_listener:
+        Arc<std::sync::RwLock<Option<Arc<crate::durable_listener::DurableListenerClient>>>>,
     rest_api_client: Arc<RestApiClient>,
     rest_base: String,
 }
@@ -127,7 +127,11 @@ impl GrpcTransport {
 
         let rest_client = build_rest_client(&config)?;
         let rest_base = format!("{}/api/v1", config.server_url.trim_end_matches('/'));
-        let rest_api_client = RestApiClient::new(rest_client.clone(), rest_base.clone(), config.tenant_id.clone());
+        let rest_api_client = RestApiClient::new(
+            rest_client.clone(),
+            rest_base.clone(),
+            config.tenant_id.clone(),
+        );
         Ok(Self {
             rest: rest_client,
             admin: proto::v1::admin_service_client::AdminServiceClient::new(channel.clone()),
@@ -141,8 +145,8 @@ impl GrpcTransport {
             v1_dispatcher: proto::v1::v1_dispatcher_client::V1DispatcherClient::new(channel),
             retry_config: RetryConfig::default(),
             worker_id: Arc::new(RwLock::new(None)),
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            receivers: Arc::new(Mutex::new(HashMap::new())),
+            workflow_output_tasks: Arc::new(RwLock::new(HashMap::new())),
+            run_output_tasks: Arc::new(Mutex::new(HashMap::new())),
             completed: Arc::new(Mutex::new(HashMap::new())),
             log_records: Arc::new(Mutex::new(Vec::new())),
             running_cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -248,9 +252,7 @@ impl GrpcTransport {
                 let mut client = dispatcher.clone();
                 let authed = self.authed_request(req);
                 async move {
-                    let res = client
-                        .register(authed)
-                        .await;
+                    let res = client.register(authed).await;
                     res.map(|response| response.into_inner())
                         .map_err(grpc_error)
                 }
@@ -282,7 +284,13 @@ impl GrpcTransport {
                     worker_id: worker_id.clone(),
                     heartbeat_at: Some(prost_now()),
                 });
-                async move { client.heartbeat(authed).await.map(|_| ()).map_err(grpc_error) }
+                async move {
+                    client
+                        .heartbeat(authed)
+                        .await
+                        .map(|_| ())
+                        .map_err(grpc_error)
+                }
             },
             &self.retry_config,
         )
@@ -334,7 +342,11 @@ impl GrpcTransport {
                     increment_timeout_by: increment.to_owned(),
                 });
                 async move {
-                    client.refresh_timeout(authed).await.map(|_| ()).map_err(grpc_error)
+                    client
+                        .refresh_timeout(authed)
+                        .await
+                        .map(|_| ())
+                        .map_err(grpc_error)
                 }
             },
             &self.retry_config,
@@ -355,7 +367,13 @@ impl GrpcTransport {
                 let authed = self.authed_request(proto::dispatcher::ReleaseSlotRequest {
                     task_run_external_id: task_run_external_id.to_owned(),
                 });
-                async move { client.release_slot(authed).await.map(|_| ()).map_err(grpc_error) }
+                async move {
+                    client
+                        .release_slot(authed)
+                        .await
+                        .map(|_| ())
+                        .map_err(grpc_error)
+                }
             },
             &self.retry_config,
         )
@@ -405,7 +423,6 @@ impl GrpcTransport {
         )
         .await
     }
-
 }
 
 #[async_trait]
@@ -463,6 +480,9 @@ impl Transport for GrpcTransport {
         )
         .await?;
 
+        self.remember_run_output_tasks(workflow_name, &response)
+            .await;
+
         Ok(response)
     }
 
@@ -495,10 +515,15 @@ impl Transport for GrpcTransport {
             .into_iter()
             .enumerate()
             .map(|(index, input)| {
-                let mut child_index = opts.child_index.map(|ci| ci as i32);
-                if child_index.is_none() && opts.parent_workflow_run_id.is_some() {
-                    child_index = Some(index as i32);
-                }
+                let child_index = if opts.parent_workflow_run_id.is_some() {
+                    Some(
+                        opts.child_index
+                            .unwrap_or_default()
+                            .saturating_add(index as u64) as i32,
+                    )
+                } else {
+                    opts.child_index.map(|ci| ci as i32)
+                };
                 proto::v1::TriggerWorkflowRequest {
                     name: workflow_name.to_owned(),
                     input: serde_json::to_string(&input).unwrap_or_default(),
@@ -534,7 +559,7 @@ impl Transport for GrpcTransport {
                                 .workflow_run_ids
                                 .into_iter()
                                 .map(WorkflowRunId)
-                                .collect()
+                                .collect::<Vec<_>>()
                         })
                         .map_err(grpc_error)
                 }
@@ -543,13 +568,13 @@ impl Transport for GrpcTransport {
         )
         .await?;
 
+        self.remember_bulk_run_output_tasks(workflow_name, &response)
+            .await;
+
         Ok(response)
     }
 
-    async fn register_result_channel(&self, run_id: &WorkflowRunId) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(run_id.clone(), tx);
-        self.receivers.lock().await.insert(run_id.clone(), rx);
+    async fn register_result_channel(&self, _run_id: &WorkflowRunId) -> Result<()> {
         Ok(())
     }
 
@@ -559,26 +584,20 @@ impl Transport for GrpcTransport {
             return result;
         }
 
-        // Try to receive from the oneshot channel
-        if let Some(rx) = self.receivers.lock().await.remove(run_id) {
-            let result = rx
-                .await
-                .map_err(|error| Error::Transport(format!("result channel closed: {error}")))?;
-            self.completed
-                .lock()
-                .await
-                .insert(run_id.clone(), result.clone());
-            return result;
-        }
-
-        // Poll the engine for the result
-        self.poll_run_result(run_id).await
+        // Engine-backed runs complete through Hatchet. This mirrors the
+        // TypeScript SDK's WorkflowRunRef, which waits through the run listener
+        // rather than an in-process channel.
+        let result = self.poll_run_result(run_id).await;
+        self.run_output_tasks.lock().await.remove(run_id);
+        self.completed
+            .lock()
+            .await
+            .insert(run_id.clone(), result.clone());
+        result
     }
 
     async fn resolve_result(&self, run_id: &WorkflowRunId, result: Result<Value>) {
-        if let Some(sender) = self.pending.lock().await.remove(run_id) {
-            let _ = sender.send(result.clone());
-        }
+        self.run_output_tasks.lock().await.remove(run_id);
         self.completed.lock().await.insert(run_id.clone(), result);
     }
 
@@ -674,6 +693,7 @@ impl Transport for GrpcTransport {
         &self,
         definition: WorkflowDeclaration<Value, Value>,
     ) -> Result<()> {
+        let output_tasks = workflow_leaf_names(&definition.steps);
         let registration =
             WorkflowRegistration::from_declaration(&definition, self.config.namespace.as_deref());
 
@@ -682,11 +702,15 @@ impl Transport for GrpcTransport {
             .iter()
             .map(|task| rendered_to_proto_task(task, &registration))
             .collect();
-        let on_failure_task = definition.on_failure.as_ref().and_then(|failure_task_name| {
-            tasks.iter()
-                .find(|task| task.readable_id == *failure_task_name)
-                .cloned()
-        });
+        let on_failure_task = definition
+            .on_failure
+            .as_ref()
+            .and_then(|failure_task_name| {
+                tasks
+                    .iter()
+                    .find(|task| task.readable_id == *failure_task_name)
+                    .cloned()
+            });
 
         let create_request = proto::v1::CreateWorkflowVersionRequest {
             name: registration.name.clone(),
@@ -756,7 +780,14 @@ impl Transport for GrpcTransport {
             },
             &self.retry_config,
         )
-        .await
+        .await?;
+
+        self.workflow_output_tasks
+            .write()
+            .await
+            .insert(registration.name, output_tasks);
+
+        Ok(())
     }
 
     async fn append_run_stream(&self, run_id: &WorkflowRunId, payload: Value) {
@@ -855,10 +886,7 @@ impl Transport for GrpcTransport {
                 "{}/stable/tasks/{}/logs?limit=500",
                 self.rest_base, task_run_id
             ),
-            format!(
-                "{}/tasks/{}/logs?limit=500",
-                self.rest_base, task_run_id
-            ),
+            format!("{}/tasks/{}/logs?limit=500", self.rest_base, task_run_id),
         ];
 
         let mut last_error = None;
@@ -897,8 +925,46 @@ impl Transport for GrpcTransport {
         Err(last_error.unwrap_or_else(|| Error::Transport("REST GET logs failed".to_owned())))
     }
 
+    async fn upsert_rate_limit(
+        &self,
+        key: &str,
+        limit: u32,
+        duration: crate::task::RateLimitDuration,
+    ) -> Result<String> {
+        let key = key.to_owned();
+        let limit = i32::try_from(limit)
+            .map_err(|_| Error::Transport("rate limit exceeds i32::MAX".to_owned()))?;
+        let request = proto::workflows::PutRateLimitRequest {
+            key: key.clone(),
+            limit,
+            duration: rate_limit_duration_to_legacy_proto(duration) as i32,
+        };
+        let workflows = self.legacy_workflows.clone();
+
+        retry(
+            || {
+                let req = request.clone();
+                let returned_key = key.clone();
+                let mut client = workflows.clone();
+                let authed = self.authed_request(req);
+                async move {
+                    client
+                        .put_rate_limit(authed)
+                        .await
+                        .map(|_| returned_key)
+                        .map_err(grpc_error)
+                }
+            },
+            &self.retry_config,
+        )
+        .await
+    }
+
     fn durable_listener(&self) -> Option<Arc<crate::durable_listener::DurableListenerClient>> {
-        self.durable_listener.read().ok().and_then(|guard| guard.clone())
+        self.durable_listener
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     fn rest_api(&self) -> Option<Arc<RestApiClient>> {
@@ -907,6 +973,38 @@ impl Transport for GrpcTransport {
 }
 
 impl GrpcTransport {
+    async fn remember_run_output_tasks(&self, workflow_name: &str, run_id: &WorkflowRunId) {
+        let output_tasks = self
+            .workflow_output_tasks
+            .read()
+            .await
+            .get(workflow_name)
+            .cloned();
+
+        if let Some(output_tasks) = output_tasks {
+            self.run_output_tasks
+                .lock()
+                .await
+                .insert(run_id.clone(), output_tasks);
+        }
+    }
+
+    async fn remember_bulk_run_output_tasks(&self, workflow_name: &str, run_ids: &[WorkflowRunId]) {
+        let output_tasks = self
+            .workflow_output_tasks
+            .read()
+            .await
+            .get(workflow_name)
+            .cloned();
+
+        if let Some(output_tasks) = output_tasks {
+            let mut run_output_tasks = self.run_output_tasks.lock().await;
+            for run_id in run_ids {
+                run_output_tasks.insert(run_id.clone(), output_tasks.clone());
+            }
+        }
+    }
+
     async fn handle_assigned_action(
         &self,
         action: proto::dispatcher::AssignedAction,
@@ -1039,15 +1137,11 @@ impl GrpcTransport {
             if details.done {
                 match proto::v1::RunStatus::try_from(details.status) {
                     Ok(proto::v1::RunStatus::Completed) => {
-                        // Collect task outputs — find the last task's output
-                        let mut output = Value::Null;
-                        for task_detail in details.task_runs.values() {
-                            if let Some(output_bytes) = &task_detail.output
-                                && let Ok(parsed) = serde_json::from_slice(output_bytes) {
-                                    output = parsed;
-                                }
-                        }
-                        return Ok(output);
+                        let output_tasks = self.run_output_tasks.lock().await.get(run_id).cloned();
+                        return Ok(run_output_from_details(
+                            &details.task_runs,
+                            output_tasks.as_deref(),
+                        ));
                     }
                     Ok(proto::v1::RunStatus::Failed) => {
                         let error_msg = details
@@ -1089,6 +1183,72 @@ fn resolve_action_task_name(
 
 fn worker_action_id(task_name: &str) -> String {
     format!("default:{task_name}")
+}
+
+fn run_output_from_details(
+    task_runs: &HashMap<String, proto::v1::TaskRunDetail>,
+    output_tasks: Option<&[String]>,
+) -> Value {
+    if let Some(output_tasks) = output_tasks {
+        if output_tasks.len() == 1
+            && let Some(output) = find_task_output(task_runs, &output_tasks[0])
+        {
+            return output;
+        }
+
+        let output_map = task_outputs_by_name(
+            output_tasks
+                .iter()
+                .filter_map(|task_name| find_task_detail(task_runs, task_name)),
+        );
+        if !output_map.is_empty() {
+            return Value::Object(output_map);
+        }
+    }
+
+    if task_runs.len() == 1
+        && let Some(output) = task_runs.values().find_map(parse_task_output)
+    {
+        return output;
+    }
+
+    Value::Object(task_outputs_by_name(task_runs.values()))
+}
+
+fn find_task_output(
+    task_runs: &HashMap<String, proto::v1::TaskRunDetail>,
+    task_name: &str,
+) -> Option<Value> {
+    find_task_detail(task_runs, task_name).and_then(parse_task_output)
+}
+
+fn find_task_detail<'a>(
+    task_runs: &'a HashMap<String, proto::v1::TaskRunDetail>,
+    task_name: &str,
+) -> Option<&'a proto::v1::TaskRunDetail> {
+    task_runs
+        .values()
+        .find(|task_detail| task_detail.readable_id == task_name)
+}
+
+fn task_outputs_by_name<'a>(
+    task_details: impl IntoIterator<Item = &'a proto::v1::TaskRunDetail>,
+) -> serde_json::Map<String, Value> {
+    let mut outputs: Vec<_> = task_details
+        .into_iter()
+        .filter_map(|task_detail| {
+            parse_task_output(task_detail).map(|output| (task_detail.readable_id.clone(), output))
+        })
+        .collect();
+    outputs.sort_by(|(left, _), (right, _)| left.cmp(right));
+    outputs.into_iter().collect()
+}
+
+fn parse_task_output(task_detail: &proto::v1::TaskRunDetail) -> Option<Value> {
+    task_detail
+        .output
+        .as_deref()
+        .and_then(|output| serde_json::from_slice(output).ok())
 }
 
 fn completion_event_from_result(
@@ -1285,13 +1445,7 @@ fn rate_limit_to_proto(rate_limit: &crate::task::RateLimit) -> proto::v1::Create
         crate::task::RateLimitKey::Dynamic(expr) => ("dynamic".to_owned(), Some(expr.clone())),
     };
 
-    let duration = match rate_limit.duration {
-        crate::task::RateLimitDuration::Second => proto::v1::RateLimitDuration::Second,
-        crate::task::RateLimitDuration::Minute => proto::v1::RateLimitDuration::Minute,
-        crate::task::RateLimitDuration::Hour => proto::v1::RateLimitDuration::Hour,
-        crate::task::RateLimitDuration::Day => proto::v1::RateLimitDuration::Day,
-        crate::task::RateLimitDuration::Week => proto::v1::RateLimitDuration::Week,
-    };
+    let duration = rate_limit_duration_to_v1_proto(rate_limit.duration);
 
     proto::v1::CreateTaskRateLimit {
         key,
@@ -1300,6 +1454,34 @@ fn rate_limit_to_proto(rate_limit: &crate::task::RateLimit) -> proto::v1::Create
         units_expr: None,
         limit_values_expr: Some(rate_limit.limit.to_string()),
         duration: Some(duration as i32),
+    }
+}
+
+fn rate_limit_duration_to_v1_proto(
+    duration: crate::task::RateLimitDuration,
+) -> proto::v1::RateLimitDuration {
+    match duration {
+        crate::task::RateLimitDuration::Second => proto::v1::RateLimitDuration::Second,
+        crate::task::RateLimitDuration::Minute => proto::v1::RateLimitDuration::Minute,
+        crate::task::RateLimitDuration::Hour => proto::v1::RateLimitDuration::Hour,
+        crate::task::RateLimitDuration::Day => proto::v1::RateLimitDuration::Day,
+        crate::task::RateLimitDuration::Week => proto::v1::RateLimitDuration::Week,
+        crate::task::RateLimitDuration::Month => proto::v1::RateLimitDuration::Month,
+        crate::task::RateLimitDuration::Year => proto::v1::RateLimitDuration::Year,
+    }
+}
+
+fn rate_limit_duration_to_legacy_proto(
+    duration: crate::task::RateLimitDuration,
+) -> proto::workflows::RateLimitDuration {
+    match duration {
+        crate::task::RateLimitDuration::Second => proto::workflows::RateLimitDuration::Second,
+        crate::task::RateLimitDuration::Minute => proto::workflows::RateLimitDuration::Minute,
+        crate::task::RateLimitDuration::Hour => proto::workflows::RateLimitDuration::Hour,
+        crate::task::RateLimitDuration::Day => proto::workflows::RateLimitDuration::Day,
+        crate::task::RateLimitDuration::Week => proto::workflows::RateLimitDuration::Week,
+        crate::task::RateLimitDuration::Month => proto::workflows::RateLimitDuration::Month,
+        crate::task::RateLimitDuration::Year => proto::workflows::RateLimitDuration::Year,
     }
 }
 
@@ -1519,9 +1701,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        V1LogLineList, WorkflowRegistration, completion_event_from_result, rendered_to_proto_task,
-        resolve_action_task_name, run_opt_label_to_proto, serialize_input_schema,
-        worker_action_id, workflow_event_payload_to_json,
+        V1LogLineList, WorkflowRegistration, completion_event_from_result,
+        rate_limit_duration_to_legacy_proto, rate_limit_duration_to_v1_proto,
+        rendered_to_proto_task, resolve_action_task_name, run_opt_label_to_proto,
+        run_output_from_details, serialize_input_schema, worker_action_id,
+        workflow_event_payload_to_json,
     };
     use crate::task::{
         BackoffConfig, ConcurrencyConfig, ConcurrencyLimitStrategy, DesiredLabelConfig, LabelValue,
@@ -1529,6 +1713,17 @@ mod tests {
     };
     use crate::workflow::WorkflowDeclaration;
     use serde_json::Value;
+
+    fn task_run_detail(readable_id: &str, output: Value) -> crate::proto::v1::TaskRunDetail {
+        crate::proto::v1::TaskRunDetail {
+            external_id: format!("{readable_id}-run"),
+            status: crate::proto::v1::RunStatus::Completed as i32,
+            error: None,
+            output: Some(serde_json::to_vec(&output).expect("test output should serialize")),
+            readable_id: readable_id.to_owned(),
+            is_evicted: false,
+        }
+    }
 
     #[test]
     fn workflow_registration_from_declaration_carries_task_parity_fields() {
@@ -1658,6 +1853,26 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_duration_mapping_includes_month_and_year() {
+        assert_eq!(
+            rate_limit_duration_to_v1_proto(RateLimitDuration::Month),
+            crate::proto::v1::RateLimitDuration::Month
+        );
+        assert_eq!(
+            rate_limit_duration_to_v1_proto(RateLimitDuration::Year),
+            crate::proto::v1::RateLimitDuration::Year
+        );
+        assert_eq!(
+            rate_limit_duration_to_legacy_proto(RateLimitDuration::Month),
+            crate::proto::workflows::RateLimitDuration::Month
+        );
+        assert_eq!(
+            rate_limit_duration_to_legacy_proto(RateLimitDuration::Year),
+            crate::proto::workflows::RateLimitDuration::Year
+        );
+    }
+
+    #[test]
     fn workflow_event_payload_parser_handles_json_and_plain_text() {
         let mut event = crate::proto::dispatcher::WorkflowEvent {
             workflow_run_id: "run-1".to_owned(),
@@ -1682,6 +1897,45 @@ mod tests {
             workflow_event_payload_to_json(&event),
             serde_json::json!({"event_payload":"not-json"})
         );
+    }
+
+    #[test]
+    fn run_output_from_details_prefers_registered_single_leaf() {
+        let task_runs = HashMap::from([
+            (
+                "first-run".to_owned(),
+                task_run_detail("first", serde_json::json!("first-output")),
+            ),
+            (
+                "final-run".to_owned(),
+                task_run_detail("final", serde_json::json!("final-output")),
+            ),
+        ]);
+
+        let output = run_output_from_details(&task_runs, Some(&["final".to_owned()]));
+
+        assert_eq!(output, serde_json::json!("final-output"));
+    }
+
+    #[test]
+    fn run_output_from_details_returns_stable_map_for_multi_leaf_workflows() {
+        let task_runs = HashMap::from([
+            (
+                "z-run".to_owned(),
+                task_run_detail("z-task", serde_json::json!(2)),
+            ),
+            (
+                "a-run".to_owned(),
+                task_run_detail("a-task", serde_json::json!(1)),
+            ),
+        ]);
+
+        let output = run_output_from_details(
+            &task_runs,
+            Some(&["z-task".to_owned(), "a-task".to_owned()]),
+        );
+
+        assert_eq!(output, serde_json::json!({"a-task": 1, "z-task": 2}));
     }
 
     #[test]

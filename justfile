@@ -1,6 +1,3 @@
-set dotenv-load := true
-set dotenv-path := "examples/.env"
-
 fmt:
     cargo fmt --all
 
@@ -13,6 +10,3 @@ build:
 
 dev:
     cargo watch
-
-run target:
-    PROTOC="$PWD/.tmp/protoc/bin/protoc" cargo run -p example --bin {{target}}

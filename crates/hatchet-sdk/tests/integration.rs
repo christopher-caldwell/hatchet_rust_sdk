@@ -76,9 +76,8 @@ async fn integration_basic_register_and_run() {
 
     let echo_task = client.task::<serde_json::Value, String>("echo");
 
-    let declaration =
-        WorkflowDeclaration::<serde_json::Value, String>::new("basic")
-            .step(&echo_task, TaskConfig::default());
+    let declaration = WorkflowDeclaration::<serde_json::Value, String>::new("basic")
+        .step(&echo_task, TaskConfig::default());
 
     client.register_workflow(declaration).await;
 
@@ -148,10 +147,9 @@ async fn integration_dag_workflow() {
         .await
         .expect("dag worker ready");
 
-    let declaration =
-        WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("dag")
-            .step(&step_a, TaskConfig::default())
-            .step_after(&step_b, &[&step_a], TaskConfig::default());
+    let declaration = WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("dag")
+        .step(&step_a, TaskConfig::default())
+        .step_after(&step_b, &[&step_a], TaskConfig::default());
 
     client.register_workflow(declaration).await;
 
@@ -206,9 +204,8 @@ async fn integration_run_cancel() {
         .await
         .expect("cancel worker ready");
 
-    let declaration =
-        WorkflowDeclaration::<serde_json::Value, String>::new("cancel")
-            .step(&slow_task, TaskConfig::default());
+    let declaration = WorkflowDeclaration::<serde_json::Value, String>::new("cancel")
+        .step(&slow_task, TaskConfig::default());
 
     client.register_workflow(declaration).await;
 
@@ -221,9 +218,7 @@ async fn integration_run_cancel() {
     // Give the run a moment to start, then cancel
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let cancel_fut = client
-        .runs()
-        .cancel(run_ref.run_id());
+    let cancel_fut = client.runs().cancel(run_ref.run_id());
 
     let res = tokio::time::timeout(TEST_TIMEOUT, cancel_fut).await;
 
@@ -253,18 +248,33 @@ async fn integration_feature_clients_rest() {
     };
 
     // List runs (may be empty, but should not error)
-    let runs = client.runs().list().await.expect("list runs should succeed");
-    eprintln!("integration_feature_clients_rest: {} runs found", runs.len());
+    let runs = client
+        .runs()
+        .list()
+        .await
+        .expect("list runs should succeed");
+    eprintln!(
+        "integration_feature_clients_rest: {} runs found",
+        runs.len()
+    );
 
     // List workers
-    let workers = client.workers().list().await.expect("list workers should succeed");
+    let workers = client
+        .workers()
+        .list()
+        .await
+        .expect("list workers should succeed");
     eprintln!(
         "integration_feature_clients_rest: {} workers found",
         workers.len()
     );
 
     // List workflows
-    let workflows = client.workflows().list().await.expect("list workflows should succeed");
+    let workflows = client
+        .workflows()
+        .list()
+        .await
+        .expect("list workflows should succeed");
     eprintln!(
         "integration_feature_clients_rest: {} workflows found",
         workflows.len()
@@ -328,9 +338,8 @@ async fn integration_log_retrieval() {
         .await
         .expect("log worker ready");
 
-    let declaration =
-        WorkflowDeclaration::<serde_json::Value, String>::new("logworkflow")
-            .step(&log_task, TaskConfig::default());
+    let declaration = WorkflowDeclaration::<serde_json::Value, String>::new("logworkflow")
+        .step(&log_task, TaskConfig::default());
 
     client.register_workflow(declaration).await;
 
@@ -347,9 +356,15 @@ async fn integration_log_retrieval() {
         Err(_) => panic!("log workflow run timed out after {TEST_TIMEOUT:?}"),
     }
 
-    let task_run_id = rx.await.expect("worker should have executed and sent task run id");
+    let task_run_id = rx
+        .await
+        .expect("worker should have executed and sent task run id");
 
-    let logs = client.logs().list(&task_run_id).await.expect("list logs should succeed");
+    let logs = client
+        .logs()
+        .list(&task_run_id)
+        .await
+        .expect("list logs should succeed");
     eprintln!(
         "integration_log_retrieval: {} log entries from transport",
         logs.len()

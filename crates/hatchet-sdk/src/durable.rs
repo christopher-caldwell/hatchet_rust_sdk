@@ -912,7 +912,11 @@ impl<T: Transport> InMemoryDurableContext<T> {
             Conditions::Or(cs) => (cs.clone(), true),
         };
 
-        let or_group_id = if is_or { next_or_group_id() } else { String::new() };
+        let or_group_id = if is_or {
+            next_or_group_id()
+        } else {
+            String::new()
+        };
 
         let mut sleep_conds = Vec::new();
         let mut event_conds = Vec::new();
@@ -989,7 +993,9 @@ impl<T: Transport> InMemoryDurableContext<T> {
 
         let task_id = self.base.task_run_id();
         let inv = self.invocation_count as i32;
-        let ack = listener.send_wait_for(task_id, inv, proto_conditions).await?;
+        let ack = listener
+            .send_wait_for(task_id, inv, proto_conditions)
+            .await?;
         let result = listener
             .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
             .await?;
@@ -997,8 +1003,7 @@ impl<T: Transport> InMemoryDurableContext<T> {
         let payload = if result.payload.is_empty() {
             None
         } else {
-            serde_json::from_slice::<Value>(&result.payload)
-                .ok()
+            serde_json::from_slice::<Value>(&result.payload).ok()
         };
 
         let (matched_index, matched_condition) = match &conditions {
@@ -1193,12 +1198,11 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
         if let Some(listener) = &self.durable_listener {
             let task_id = self.base.task_run_id();
             let inv = self.invocation_count as i32;
-            let conditions = condition_to_durable_listener_proto(&Condition::SleepFor(
-                SleepCondition {
+            let conditions =
+                condition_to_durable_listener_proto(&Condition::SleepFor(SleepCondition {
                     duration,
                     metadata: ConditionMetadata::default(),
-                },
-            ));
+                }));
             match listener.send_wait_for(task_id, inv, conditions).await {
                 Ok(ack) => {
                     let _ = listener
@@ -1218,12 +1222,11 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
         if let Some(listener) = &self.durable_listener {
             let task_id = self.base.task_run_id();
             let inv = self.invocation_count as i32;
-            let conditions = condition_to_durable_listener_proto(&Condition::SleepUntil(
-                SleepUntilCondition {
+            let conditions =
+                condition_to_durable_listener_proto(&Condition::SleepUntil(SleepUntilCondition {
                     at,
                     metadata: ConditionMetadata::default(),
-                },
-            ));
+                }));
             match listener.send_wait_for(task_id, inv, conditions).await {
                 Ok(ack) => {
                     let _ = listener
@@ -1249,13 +1252,14 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
         if let Some(listener) = &self.durable_listener {
             let task_id = self.base.task_run_id();
             let inv = self.invocation_count as i32;
-            let conditions = condition_to_durable_listener_proto(&Condition::Event(EventCondition {
-                event_key: event_key.to_owned(),
-                expression: None,
-                scope: None,
-                lookback_window: None,
-                metadata: ConditionMetadata::default(),
-            }));
+            let conditions =
+                condition_to_durable_listener_proto(&Condition::Event(EventCondition {
+                    event_key: event_key.to_owned(),
+                    expression: None,
+                    scope: None,
+                    lookback_window: None,
+                    metadata: ConditionMetadata::default(),
+                }));
             match listener.send_wait_for(task_id, inv, conditions).await {
                 Ok(ack) => {
                     match tokio::time::timeout(
@@ -1583,7 +1587,9 @@ fn condition_readable_data_key(condition: &Condition) -> Option<String> {
     }
 }
 
-fn condition_to_durable_listener_proto(condition: &Condition) -> v1::DurableEventListenerConditions {
+fn condition_to_durable_listener_proto(
+    condition: &Condition,
+) -> v1::DurableEventListenerConditions {
     let base = base_match_condition(condition);
     let proto_base = condition_base_to_proto(&base);
     match condition {
@@ -1693,7 +1699,20 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
         year += 1;
     }
     let leap = is_leap_year(year);
-    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 0usize;
     for &md in &month_days {
         if remaining < md {

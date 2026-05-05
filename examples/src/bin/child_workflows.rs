@@ -1,5 +1,6 @@
 use hatchet_sdk::{
-    config::HatchetConfig, Client, Context, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
+    Client, Context, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
+    config::HatchetConfig,
 };
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ async fn main() -> Result<()> {
 
     // 1. Declare the Child Workflow Task
     let child_task = client.task::<serde_json::Value, String>("child-task");
-    
+
     // We create a WorkflowHandle for the child workflow so we can spawn it from the parent
     let child_workflow_handle = client.workflow::<serde_json::Value, String>("child-workflow");
 
@@ -25,20 +26,37 @@ async fn main() -> Result<()> {
     let worker = client
         .worker("child-runtime-worker")
         .register_task(&child_task, |input, ctx: InMemoryContext<_>| async move {
-            println!("[Child Task {}] Running with input: {:?}", ctx.task_name(), input);
-            Ok(format!("Child completed dynamically with input: {:?}", input))
+            println!(
+                "[Child Task {}] Running with input: {:?}",
+                ctx.task_name(),
+                input
+            );
+            Ok(format!(
+                "Child completed dynamically with input: {:?}",
+                input
+            ))
         })
         .register_task(&parent_task, move |input, ctx: InMemoryContext<_>| {
             // Because the handler is called multiple times, we clone the handle for each async execution block
             let child_handle = child_handle_for_closure.clone();
             async move {
-                println!("[Parent Task {}] Running with input: {:?}", ctx.task_name(), input);
-                
+                println!(
+                    "[Parent Task {}] Running with input: {:?}",
+                    ctx.task_name(),
+                    input
+                );
+
                 println!("[Parent Task] Spawning and waiting for child workflow...");
                 // Spawn the child workflow natively
-                let child_run = ctx.run_child(&child_handle, serde_json::json!({ "prop": "value" }), hatchet_sdk::RunOpts::default()).await?;
+                let child_run = ctx
+                    .run_child(
+                        &child_handle,
+                        serde_json::json!({ "prop": "value" }),
+                        hatchet_sdk::RunOpts::default(),
+                    )
+                    .await?;
                 let output = child_run.output().await?;
-                
+
                 Ok(format!("Parent got result from child: {}", output))
             }
         })
@@ -47,12 +65,12 @@ async fn main() -> Result<()> {
     let _handle = worker.start()?;
 
     // 4. Register both workflow declarations to the engine
-    let child_decl: WorkflowDeclaration<serde_json::Value, String> = WorkflowDeclaration::new("child-workflow")
-        .step(&child_task, TaskConfig::default());
+    let child_decl: WorkflowDeclaration<serde_json::Value, String> =
+        WorkflowDeclaration::new("child-workflow").step(&child_task, TaskConfig::default());
     client.register_workflow(child_decl).await;
 
-    let parent_decl: WorkflowDeclaration<serde_json::Value, String> = WorkflowDeclaration::new("parent-workflow")
-        .step(&parent_task, TaskConfig::default());
+    let parent_decl: WorkflowDeclaration<serde_json::Value, String> =
+        WorkflowDeclaration::new("parent-workflow").step(&parent_task, TaskConfig::default());
     client.register_workflow(parent_decl).await;
 
     // 5. Trigger the parent workflow

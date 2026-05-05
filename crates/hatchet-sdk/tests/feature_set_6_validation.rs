@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use hatchet_sdk::{
     Client, ConcurrencyConfig, Condition, ConditionAction, Conditions, Context, ContextExt,
-    ContextIds, DurableContext, DurableContextExt, EventRecord,
-    InMemoryContext, InMemoryDurableContext, InMemoryTransport, LabelValue, RunOpts, RunStatus,
-    Schedule, StepConditions, TaskConfig, WorkerInfo, WorkflowDeclaration,
-    WorkflowRunId, conditions_to_rendered, or, render_conditions,
+    ContextIds, DurableContext, DurableContextExt, EventRecord, InMemoryContext,
+    InMemoryDurableContext, InMemoryTransport, LabelValue, RateLimitDuration, RunOpts, RunStatus,
+    StepConditions, TaskConfig, WorkerInfo, WorkflowDeclaration, WorkflowRunId,
+    conditions_to_rendered, or, render_conditions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -76,12 +76,24 @@ async fn validates_child_workflow_metadata_propagation() {
     let second = context
         .run_child_no_wait(&child, WorkflowInput { value: 2 }, RunOpts::default())
         .await;
+    let bulk = context
+        .bulk_run_children_no_wait(
+            &child,
+            [
+                WorkflowInput { value: 3 },
+                WorkflowInput { value: 4 },
+                WorkflowInput { value: 5 },
+            ],
+            RunOpts::default(),
+        )
+        .await;
 
     assert!(first.is_ok());
     assert!(second.is_ok());
+    assert!(bulk.is_ok());
 
     let submitted = transport.submitted_runs().await;
-    assert_eq!(submitted.len(), 2);
+    assert_eq!(submitted.len(), 5);
 
     let first_meta = &submitted[0].opts;
     assert_eq!(
@@ -93,6 +105,12 @@ async fn validates_child_workflow_metadata_propagation() {
 
     let second_meta = &submitted[1].opts;
     assert_eq!(second_meta.child_index, Some(1));
+
+    let bulk_indices: Vec<_> = submitted[2..]
+        .iter()
+        .map(|run| run.opts.child_index)
+        .collect();
+    assert_eq!(bulk_indices, vec![Some(2), Some(3), Some(4)]);
 }
 
 #[tokio::test]
@@ -377,14 +395,27 @@ async fn validates_feature_client_operations() {
         Some(1)
     );
 
-    let created_schedule = client.schedules().create("feature.workflow", "daily", "0 0 * * *", json!({ "kind": "daily" })).await.unwrap();
+    let created_schedule = client
+        .schedules()
+        .create(
+            "feature.workflow",
+            "daily",
+            "0 0 * * *",
+            json!({ "kind": "daily" }),
+        )
+        .await
+        .unwrap();
     assert_eq!(created_schedule.name, "daily");
     assert_eq!(
         client.schedules().get("daily").await.ok().map(|s| s.name),
         Some("daily".to_owned())
     );
 
-    let created_cron = client.crons().create("feature.workflow", "nightly", "0 2 * * *", json!({})).await.unwrap();
+    let created_cron = client
+        .crons()
+        .create("feature.workflow", "nightly", "0 2 * * *", json!({}))
+        .await
+        .unwrap();
     assert_eq!(created_cron.name, "nightly");
 
     let worker_info = WorkerInfo {
@@ -396,11 +427,40 @@ async fn validates_feature_client_operations() {
     assert_eq!(updated_worker.name, "worker-a");
     assert!(client.workers().get("worker-a").await.is_ok());
 
-    client.rate_limits().put("default", 10).await;
+    let upserted = client
+        .rate_limits()
+        .upsert("default", 10, RateLimitDuration::Minute)
+        .await
+        .unwrap();
+    assert_eq!(upserted, "default");
     assert_eq!(
-        client.rate_limits().list().await.unwrap().get("default").copied(),
+        client
+            .rate_limits()
+            .list()
+            .await
+            .unwrap()
+            .get("default")
+            .copied(),
         Some(10)
     );
+    client.rate_limits().put("compat", 5).await;
+    assert_eq!(
+        client
+            .rate_limits()
+            .list()
+            .await
+            .unwrap()
+            .get("compat")
+            .copied(),
+        Some(5)
+    );
+    client.rate_limits().delete("compat").await;
+    assert!(!client
+        .rate_limits()
+        .list()
+        .await
+        .unwrap()
+        .contains_key("compat"));
 
     client
         .events()
@@ -411,10 +471,22 @@ async fn validates_feature_client_operations() {
         .await;
     assert_eq!(client.events().list().await.unwrap().len(), 1);
 
-    let created_filter = client.filters().create("feature.workflow", "high-priority", "payload.priority == 'high'").await.unwrap();
+    let created_filter = client
+        .filters()
+        .create(
+            "feature.workflow",
+            "high-priority",
+            "payload.priority == 'high'",
+        )
+        .await
+        .unwrap();
     assert_eq!(created_filter.name, "high-priority");
 
-    let created_webhook = client.webhooks().create("ops", "https://example.com/webhook").await.unwrap();
+    let created_webhook = client
+        .webhooks()
+        .create("ops", "https://example.com/webhook")
+        .await
+        .unwrap();
     assert_eq!(created_webhook.name, "ops");
 
     let status_before = client.runs().get_status(&run_id).await;
