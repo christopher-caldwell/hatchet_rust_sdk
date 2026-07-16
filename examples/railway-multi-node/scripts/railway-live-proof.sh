@@ -8,7 +8,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 OUT="$ROOT/examples/railway-multi-node/target/railway"
-SESSION=hatchet-rust-sdk-comparison-20260715
+SESSION=${RAILWAY_AGENT_SESSION:-hatchet-rust-sdk-comparison-20260715}
 mkdir -p "$OUT"
 
 railway_cli() {
@@ -16,10 +16,13 @@ railway_cli() {
     RAILWAY_AGENT_SESSION="$SESSION" railway "$@"
 }
 
-ssh_args=()
-if [[ -n "${RAILWAY_SSH_IDENTITY_FILE:-}" ]]; then
-  ssh_args+=(--identity-file "$RAILWAY_SSH_IDENTITY_FILE")
-fi
+railway_ssh() {
+  if [[ -n "${RAILWAY_SSH_IDENTITY_FILE:-}" ]]; then
+    railway_cli ssh --identity-file "$RAILWAY_SSH_IDENTITY_FILE" "$@"
+  else
+    railway_cli ssh "$@"
+  fi
+}
 
 deployment_status() {
   railway_cli deployment list \
@@ -49,7 +52,7 @@ wait_for_success() {
 trigger() {
   order_id=$1
   output_file=$2
-  railway_cli ssh "${ssh_args[@]}" \
+  railway_ssh \
     --project "$RAILWAY_PROJECT_ID" \
     --environment "$RAILWAY_ENVIRONMENT_ID" \
     --service "$ORDERS_SERVICE_ID" \
@@ -62,12 +65,12 @@ trigger() {
 worker_health() {
   local service_id=$1
   local port
-  port=$(railway_cli ssh "${ssh_args[@]}" \
+  port=$(railway_ssh \
     --project "$RAILWAY_PROJECT_ID" \
     --environment "$RAILWAY_ENVIRONMENT_ID" \
     --service "$service_id" printenv PORT)
   [[ "$port" =~ ^[0-9]+$ ]]
-  railway_cli ssh "${ssh_args[@]}" \
+  railway_ssh \
     --project "$RAILWAY_PROJECT_ID" \
     --environment "$RAILWAY_ENVIRONMENT_ID" \
     --service "$service_id" curl -fsS "http://127.0.0.1:$port/health"
@@ -92,8 +95,9 @@ capture_action_log() {
     if railway_cli logs --project "$RAILWAY_PROJECT_ID" \
       --environment "$RAILWAY_ENVIRONMENT_ID" --service "$service_id" \
       --since 20m --lines 300 --json \
-      | jq -c --arg action "$action" --arg run_id "$run_id" \
-        'select(.action == $action and .run_id == $run_id)' >"$output_file"; then
+      | jq -R -c --arg action "$action" --arg run_id "$run_id" \
+        'fromjson? | select(.action == $action and .run_id == $run_id)' \
+        >"$output_file"; then
       [[ -s "$output_file" ]] && return 0
     fi
     sleep 3

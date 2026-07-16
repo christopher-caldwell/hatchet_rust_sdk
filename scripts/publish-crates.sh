@@ -70,6 +70,10 @@ workspace_version() {
   sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' Cargo.toml | head -n 1
 }
 
+workspace_rust_version() {
+  sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' Cargo.toml | head -n 1
+}
+
 cargo_dirty_flag=()
 if [[ "$allow_dirty" == true || "$mode" == "prepare" || "$mode" == "release" ]]; then
   cargo_dirty_flag=(--allow-dirty)
@@ -133,6 +137,13 @@ verify_package_contents() {
 }
 
 run_quality_gates() {
+  local rust_version
+  rust_version="$(workspace_rust_version)"
+  [[ -n "$rust_version" ]] || {
+    printf '%s\n' "Could not read workspace.package.rust-version from Cargo.toml." >&2
+    exit 1
+  }
+
   printf '%s\n' "==> Formatting"
   cargo fmt --all -- --check
   printf '%s\n' "==> Clippy"
@@ -143,6 +154,11 @@ run_quality_gates() {
   cargo test -p "$sdk_name" --no-default-features --all-targets
   printf '%s\n' "==> Strict rustdoc"
   RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+  printf '==> Minimum Rust %s workspace check\n' "$rust_version"
+  rustup run "$rust_version" cargo check --workspace --all-targets --all-features --locked
+  printf '==> Minimum Rust %s standalone Railway check\n' "$rust_version"
+  rustup run "$rust_version" cargo check --locked \
+    --manifest-path examples/railway-multi-node/Cargo.toml --all-targets
 }
 
 create_package_archives() {
@@ -393,6 +409,7 @@ require_command cargo
 require_command git
 require_command grep
 require_command perl
+require_command rustup
 require_command sed
 require_command tar
 

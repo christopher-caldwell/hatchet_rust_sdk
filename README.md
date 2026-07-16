@@ -208,4 +208,7 @@ The guarded release command prepares versions and the changelog with
 `release-plz`, validates the exact package archives in an isolated temporary
 consumer, commits and pushes the release metadata, publishes all three crates,
 and finally pushes the version tag. Use `just package-check` for a dirty-tree
-safe preflight without publishing.
+safe preflight without publishing. The release machine must have the declared
+Rust 1.85 toolchain installed through `rustup`; the preflight compiles both the
+workspace and standalone Railway consumer with that exact compiler before it
+creates any package archive.

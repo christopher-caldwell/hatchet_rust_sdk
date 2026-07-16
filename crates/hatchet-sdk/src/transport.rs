@@ -642,10 +642,10 @@ impl Transport for InMemoryTransport {
             let _ = sender.send(result.clone());
         }
         let mut completed = self.completed.lock().await;
-        if completed.len() >= MAX_COMPLETED_RUNS
-            && !completed.contains_key(run_id)
-            && let Some(oldest) = completed.keys().next().cloned()
-        {
+        let oldest = (completed.len() >= MAX_COMPLETED_RUNS && !completed.contains_key(run_id))
+            .then(|| completed.keys().next().cloned())
+            .flatten();
+        if let Some(oldest) = oldest {
             completed.remove(&oldest);
         }
         completed.insert(run_id.clone(), result);

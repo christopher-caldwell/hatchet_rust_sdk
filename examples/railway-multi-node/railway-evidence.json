@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-07-16T05:37:16Z",
+  "captured_at": "2026-07-16T19:26:45Z",
   "status": "pass",
   "sdk": {
-    "git_commit": "05fa2d489d036d17f9c6476684f92aa4a3392298",
+    "git_commit": "68115a81fd9f59aceae13208d98dda0a08728bd7",
     "working_tree_contains_comparison_changes": true
   },
   "official_hatchet": {
@@ -29,7 +29,7 @@
       {
         "name": "Postgres",
         "id": "221e6003-9513-4756-94f9-95a6dc187224",
-        "deployment_id": "cbcc5d10-9132-4ee5-abcf-701b2478a7ca",
+        "deployment_id": "6329bda4-002a-4826-be2d-193f508fb875",
         "status": "SUCCESS",
         "public": false,
         "replicas": 1
@@ -37,7 +37,7 @@
       {
         "name": "hatchet-orchestrator",
         "id": "439d63ee-61b2-4796-96f0-af463839a809",
-        "deployment_id": "7b951736-3444-4a57-92dd-dfcf939454a2",
+        "deployment_id": "04b2a064-f160-49ff-9feb-f513ff1b918d",
         "status": "SUCCESS",
         "public": true,
         "public_port": 8888,
@@ -48,7 +48,7 @@
       {
         "name": "rust-orders-worker",
         "id": "edf7f45f-9680-4869-89d3-e1c0e41154a6",
-        "deployment_id": "46e4fe44-7283-478a-a9f5-336cbd574158",
+        "deployment_id": "b87b4fff-c3c4-4c18-ae3d-d87b12f51eb0",
         "status": "SUCCESS",
         "public": false,
         "health_path": "/health",
@@ -57,7 +57,7 @@
       {
         "name": "rust-notifications-worker",
         "id": "6f4e7196-3124-4f8f-ae44-8e1b3c14dbee",
-        "deployment_id": "1fce98e3-a41e-4b98-a52d-0bb9d006c669",
+        "deployment_id": "5ab09f1e-df88-4a4b-965c-00da0813df67",
         "status": "SUCCESS",
         "public": false,
         "health_path": "/health",
@@ -151,19 +151,139 @@
       }
     }
   },
+  "final_publish_checkpoint": {
+    "captured_at": "2026-07-16T19:26:45Z",
+    "candidate": {
+      "crate": "another-hatchet-sdk",
+      "version": "0.1.0",
+      "declared_rust_version": "1.85",
+      "source": "current working tree prepared by scripts/prepare-railway-context.sh"
+    },
+    "initial_deploy_attempt": {
+      "status": "FAILED",
+      "orders_deployment_id": "a5d3117f-6a54-453a-998e-3009b3a8d5fe",
+      "notifications_deployment_id": "86d6b9f6-32d3-473b-a536-e50e5efa5fd7",
+      "cause": "post-Rust-1.85 let-chain syntax in the SDK",
+      "served": false
+    },
+    "remediation": {
+      "rust_1_85_compatibility_restored": true,
+      "guarded_publish_preflight_enforces_msrv": true,
+      "macos_bash_3_proof_harness_supported": true,
+      "railway_json_log_notices_tolerated": true
+    },
+    "successful_deployments": [
+      {
+        "service": "rust-orders-worker",
+        "service_id": "edf7f45f-9680-4869-89d3-e1c0e41154a6",
+        "deployment_id": "b87b4fff-c3c4-4c18-ae3d-d87b12f51eb0",
+        "status": "SUCCESS",
+        "running_replicas": 1,
+        "crashed_replicas": 0
+      },
+      {
+        "service": "rust-notifications-worker",
+        "service_id": "6f4e7196-3124-4f8f-ae44-8e1b3c14dbee",
+        "deployment_id": "5ab09f1e-df88-4a4b-965c-00da0813df67",
+        "status": "SUCCESS",
+        "running_replicas": 1,
+        "crashed_replicas": 0
+      }
+    ],
+    "dependency_services": [
+      {
+        "service": "hatchet-orchestrator",
+        "deployment_id": "04b2a064-f160-49ff-9feb-f513ff1b918d",
+        "status": "SUCCESS",
+        "running_replicas": 1,
+        "crashed_replicas": 0
+      },
+      {
+        "service": "Postgres",
+        "deployment_id": "6329bda4-002a-4826-be2d-193f508fb875",
+        "status": "SUCCESS",
+        "running_replicas": 1,
+        "crashed_replicas": 0
+      }
+    ],
+    "worker_health": {
+      "rust-orders-worker": {
+        "healthy": true,
+        "actions": ["default:process-order"],
+        "labels": {"service": "orders"},
+        "slots": 2,
+        "durable_slots": 2
+      },
+      "rust-notifications-worker": {
+        "healthy": true,
+        "actions": ["default:send-order-receipt"],
+        "labels": {"service": "notifications"},
+        "slots": 2,
+        "durable_slots": 2
+      }
+    },
+    "runtime_proof": {
+      "before_restart": {
+        "order_id": "ord_sdk_final_20260716_c",
+        "run_id": "c82fa3c2-3fd8-4b4d-8d47-d8ace3606a2a",
+        "status": "COMPLETED",
+        "observer_elapsed_ms": 17,
+        "orders_log_at": "2026-07-16T19:07:59.125937156Z",
+        "notifications_log_at": "2026-07-16T19:08:04.764919429Z"
+      },
+      "restart": {
+        "service": "rust-notifications-worker",
+        "worker_ready_observed": true,
+        "worker_ready_at": "2026-07-16T19:08:09.777740485Z"
+      },
+      "after_restart": {
+        "order_id": "ord_sdk_final_20260716_d",
+        "run_id": "20627f5c-6765-4a6a-b2fb-272e6df56877",
+        "status": "COMPLETED",
+        "observer_elapsed_ms": 10,
+        "orders_log_at": "2026-07-16T19:08:18.822087698Z",
+        "notifications_log_at": "2026-07-16T19:08:17.515532092Z"
+      },
+      "proof_harness_exit_code": 0
+    },
+    "post_ready_error_logs": {
+      "rust-orders-worker": 0,
+      "rust-notifications-worker": 0
+    },
+    "security_cleanup": {
+      "temporary_ssh_public_key_removed": true,
+      "registered_ssh_keys_after_cleanup": 0
+    }
+  },
   "verification": {
-    "sdk_library_tests": {"status": "pass", "tests": 30, "ignored": 0},
+    "workspace_tests": {"status": "pass", "tests": 94, "ignored_live": 9},
     "standalone_tests": {"status": "pass", "tests": 7, "ignored": 0},
+    "exact_sdk_archive_tests": {"status": "pass", "tests": 92, "ignored_live": 9},
     "standalone_strict_clippy": "pass",
+    "workspace_fmt": "pass",
+    "workspace_strict_clippy": "pass",
+    "no_default_features": "pass",
+    "strict_rustdoc": "pass",
+    "rust_1_85_workspace_check": "pass",
+    "rust_1_85_standalone_railway_check": "pass",
+    "root_and_standalone_rustsec_vulnerabilities": 0,
+    "guarded_publish_preflight": {
+      "status": "pass",
+      "nothing_published": true
+    },
+    "local_linux_amd64_docker_rebuild": {
+      "status": "cancelled",
+      "reason": "redundant QEMU build was stopped after the equivalent native Railway amd64 build succeeded",
+      "counted_as_pass": false
+    },
     "local_official_full_stack": {
       "status": "pass",
-      "run_id": "14c51560-ec12-4bb8-9446-beb8c43cf6e2",
-      "elapsed_seconds": 12,
+      "run_id": "9f75decc-0b40-451e-9384-f302222a286d",
+      "elapsed_seconds": 65,
+      "live_sdk_tests": 9,
+      "post_run_worker_health": "pass",
       "cleanup": "complete"
     },
-    "workspace_fmt": "pre-existing unrelated failure",
-    "workspace_strict_clippy": "pre-existing unrelated failures",
-    "workspace_tests": "pre-existing unrelated compile failure",
     "skipped_live_tests_counted_as_success": false
   },
   "idle_measurements": {

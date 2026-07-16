@@ -24,6 +24,17 @@ Hatchet Lite image and PostgreSQL 16, completed the cross-process workflow and
 all nine live SDK tests, rechecked both worker health endpoints after stream
 recovery, and removed its isolated Docker resources.
 
+The final candidate sources were also uploaded to both Railway workers. The
+first build correctly exposed late Rust syntax that violated the declared 1.85
+minimum; that release blocker was fixed and the publish preflight now repeats
+both MSRV checks. Corrected deployments `b87b4fff-c3c4-4c18-ae3d-d87b12f51eb0`
+and `5ab09f1e-df88-4a4b-965c-00da0813df67` reached `SUCCESS`. Runs
+`c82fa3c2-3fd8-4b4d-8d47-d8ace3606a2a` and
+`20627f5c-6765-4a6a-b2fb-272e6df56877` completed on the intended separate
+workers before and after a notifications-worker restart. Both private health
+endpoints were healthy, all four services had one running replica and zero
+crashes, and post-ready worker error logs were empty.
+
 ## Narrow SDK defects fixed for the proof
 
 - Engine workflow-registration errors were swallowed, allowing false readiness.

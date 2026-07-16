@@ -339,8 +339,10 @@ fn validate_schema(schema: &Value, input: &Value, path: &str, errors: &mut Vec<S
         }
     }
 
-    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
-        && !enum_values.iter().any(|candidate| candidate == input)
+    if schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .is_some_and(|enum_values| !enum_values.iter().any(|candidate| candidate == input))
     {
         errors.push(format!("{path}: value is not in enum"));
     }
@@ -363,9 +365,7 @@ fn validate_schema(schema: &Value, input: &Value, path: &str, errors: &mut Vec<S
         }
     }
 
-    if let Some(items_schema) = schema.get("items")
-        && let Some(items) = input.as_array()
-    {
+    if let Some((items_schema, items)) = schema.get("items").zip(input.as_array()) {
         for (index, item) in items.iter().enumerate() {
             validate_schema(items_schema, item, &format!("{path}[{index}]"), errors);
         }

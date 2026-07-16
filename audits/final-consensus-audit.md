@@ -56,7 +56,7 @@ harness used PostgreSQL 16 and the exact official image
 `ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.94.14@sha256:b8d6b7e9b96d354f1a252590d1480d3bb70f01604cc6cba1fd97ff7aaa2cb07c`.
 
 - The separate orders and notifications processes completed workflow run
-  `925da8e7-6756-497a-a6bf-a7ea75ce1171` in the expected cross-worker order.
+  `9f75decc-0b40-451e-9384-f302222a286d` in the expected cross-worker order.
 - All nine live SDK tests passed: basic execution, child workflow/output,
   dependent DAG, durable memo/sleep/resume, scoped and namespaced durable-event
   lookback, event triggering/context, REST feature clients, log retrieval, and
@@ -66,6 +66,37 @@ harness used PostgreSQL 16 and the exact official image
   required to pass afterward.
 - The harness reported complete teardown of its two containers, Docker network,
   and configuration volume. It left no SDK worker process running.
+
+## Final Railway Artifact Checkpoint
+
+The candidate crate sources and locked standalone worker artifact were then
+uploaded from the prepared local build context to the existing Railway
+production project on 2026-07-16. This checkpoint found one additional genuine
+release blocker: late remediation had introduced Rust let-chain syntax that the
+declared Rust 1.85 compiler rejects. Both initial Railway builds failed before
+serving traffic. The SDK was rewritten with Rust-1.85-compatible control flow,
+and the guarded publish preflight now runs the workspace and standalone MSRV
+checks itself so a late regression cannot bypass the release command.
+
+The corrected deployments both reached `SUCCESS`:
+
+- `rust-orders-worker`: `b87b4fff-c3c4-4c18-ae3d-d87b12f51eb0`
+- `rust-notifications-worker`: `5ab09f1e-df88-4a4b-965c-00da0813df67`
+
+The full Railway proof then completed run
+`c82fa3c2-3fd8-4b4d-8d47-d8ace3606a2a`, restarted the notifications service,
+waited for its health endpoint to recover, and completed run
+`20627f5c-6765-4a6a-b2fb-272e6df56877`. Per-service logs place
+`process-order` on the orders worker and `send-order-receipt` on the
+notifications worker for both runs. Both private health endpoints report the
+expected single action, labels, slot counts, and `healthy: true`. The
+orchestrator, PostgreSQL, and both workers read back `SUCCESS` with one running
+replica and zero crashes; neither worker emitted an error after its latest ready
+event. The temporary Railway SSH public key used for private-container proof
+commands was removed and the empty key list was verified.
+
+The complete IDs and runtime records are retained in
+[`railway-evidence.json`](../examples/railway-multi-node/railway-evidence.json).
 
 ## Consensus Findings
 
@@ -489,6 +520,11 @@ the pinned contract, and percent encoding is UTF-8 correct. Route tests pass.
 - Added scoped event publication, fail-fast validation for lookback without a
   scope, transport namespace handling for durable event conditions, and
   callback-envelope normalization with correct OR-branch reporting.
+- Removed post-Rust-1.85 let-chain syntax exposed by the final Railway build and
+  made the guarded publish preflight execute both MSRV checks after all other
+  source changes.
+- Made the Railway proof harness portable to macOS Bash 3.2 and tolerant of
+  occasional non-JSON Railway CLI notices without weakening log matching.
 
 ## Split or Disputed Findings
 
@@ -540,8 +576,10 @@ acceptable fixes for three design questions:
 | Local Docker cleanup | complete; no harness containers/network/volume remain |
 | `release-plz` configuration in a clean temporary Git repository | pass |
 | Shell syntax for release/Railway scripts | pass |
-| Railway production service/deployment status | all four services `SUCCESS`/running |
-| Railway two-worker task logs | matching end-to-end runs, no error-level entries |
+| Final Railway candidate deployments | both corrected worker deployments `SUCCESS` |
+| Railway restart workflow proof | runs `c82fa3c2…` and `20627f5c…` completed with matching per-worker action logs |
+| Railway health and post-ready logs | both workers healthy; all four services running with zero crashes; zero post-ready worker errors |
+| Temporary Railway SSH access | public key removed; zero registered keys after cleanup |
 
 ## Final Recommendation
 
@@ -566,13 +604,18 @@ unsupported management methods only when their v0.94.14 contracts are verified.
 - All nine credentialed SDK integration tests ran against the final worktree
   and the pinned local Hatchet image. They remain explicit opt-in tests so normal
   offline `cargo test` runs never report credential skips as success.
-- The existing Railway deployment was inspected read-only. It proves the
-  multi-node v0.94.14 happy path and currently has successful deployments and
-  error-free worker logs, but it predates the final local remediation changes.
+- The final candidate SDK sources were deployed to both Railway workers and
+  exercised before and after a notifications-worker restart. The existing
+  official Hatchet orchestrator and PostgreSQL services were reused rather than
+  replaced; both read back healthy during the proof.
 - Natural action-stream closure exercised and recovered both main worker
   reconnect loops. Forced durable-stream disconnect, eviction, and
   completion-delivery faults were not injected; deterministic tests cover those
   paths.
+- A redundant local `linux/amd64` Docker rebuild was cancelled after prolonged
+  Apple-Silicon QEMU emulation and is not counted as a pass. Railway completed
+  the same Rust-1.85 Dockerfile natively on amd64, while the separate local
+  Hatchet Docker suite, real Rust 1.85 checks, and standalone tests all passed.
 - The SDK intentionally does not claim full TypeScript management-client parity
   in v0.1; unsupported live operations fail explicitly.
 - The actual SDK crates.io upload dry-run cannot resolve its internal crates on

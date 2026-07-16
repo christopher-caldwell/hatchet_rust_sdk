@@ -734,9 +734,10 @@ async fn dispatch_response(
                 } else {
                     // The engine may deliver completion immediately after its ack,
                     // before the caller installs its waiter. Buffer it atomically.
-                    if callbacks.completed.len() >= MAX_BUFFERED_CALLBACKS
-                        && let Some(oldest) = callbacks.completed.keys().next().cloned()
-                    {
+                    let oldest = (callbacks.completed.len() >= MAX_BUFFERED_CALLBACKS)
+                        .then(|| callbacks.completed.keys().next().cloned())
+                        .flatten();
+                    if let Some(oldest) = oldest {
                         callbacks.completed.remove(&oldest);
                     }
                     callbacks.completed.insert(key, result);

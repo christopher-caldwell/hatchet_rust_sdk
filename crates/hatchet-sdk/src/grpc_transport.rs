@@ -583,10 +583,10 @@ impl Transport for GrpcTransport {
         if result.is_ok() {
             self.run_output_tasks.lock().await.remove(run_id);
             let mut completed = self.completed.lock().await;
-            if completed.len() >= MAX_COMPLETED_RUNS
-                && !completed.contains_key(run_id)
-                && let Some(oldest) = completed.keys().next().cloned()
-            {
+            let oldest = (completed.len() >= MAX_COMPLETED_RUNS && !completed.contains_key(run_id))
+                .then(|| completed.keys().next().cloned())
+                .flatten();
+            if let Some(oldest) = oldest {
                 completed.remove(&oldest);
             }
             completed.insert(run_id.clone(), result.clone());
@@ -597,10 +597,10 @@ impl Transport for GrpcTransport {
     async fn resolve_result(&self, run_id: &WorkflowRunId, result: Result<Value>) {
         self.run_output_tasks.lock().await.remove(run_id);
         let mut completed = self.completed.lock().await;
-        if completed.len() >= MAX_COMPLETED_RUNS
-            && !completed.contains_key(run_id)
-            && let Some(oldest) = completed.keys().next().cloned()
-        {
+        let oldest = (completed.len() >= MAX_COMPLETED_RUNS && !completed.contains_key(run_id))
+            .then(|| completed.keys().next().cloned())
+            .flatten();
+        if let Some(oldest) = oldest {
             completed.remove(&oldest);
         }
         completed.insert(run_id.clone(), result);
@@ -1533,9 +1533,10 @@ fn run_output_from_details(
     output_tasks: Option<&[String]>,
 ) -> Value {
     if let Some(output_tasks) = output_tasks {
-        if output_tasks.len() == 1
-            && let Some(output) = find_task_output(task_runs, &output_tasks[0])
-        {
+        let single_output = (output_tasks.len() == 1)
+            .then(|| find_task_output(task_runs, &output_tasks[0]))
+            .flatten();
+        if let Some(output) = single_output {
             return output;
         }
 
@@ -1549,9 +1550,10 @@ fn run_output_from_details(
         }
     }
 
-    if task_runs.len() == 1
-        && let Some(output) = task_runs.values().find_map(parse_task_output)
-    {
+    let single_output = (task_runs.len() == 1)
+        .then(|| task_runs.values().find_map(parse_task_output))
+        .flatten();
+    if let Some(output) = single_output {
         return output;
     }
 

@@ -87,8 +87,9 @@ where
                 let jittered = Duration::from_secs_f64(backoff.as_secs_f64() * jitter_factor);
                 let capped = jittered.min(config.max_backoff);
 
-                if let Some(max_elapsed) = config.max_elapsed
-                    && started_at.elapsed() + capped > max_elapsed
+                if config
+                    .max_elapsed
+                    .is_some_and(|max_elapsed| started_at.elapsed() + capped > max_elapsed)
                 {
                     return Err(last_error.unwrap_or_else(|| {
                         Error::Transport("retry max elapsed exceeded".to_owned())

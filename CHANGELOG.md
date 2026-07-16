@@ -47,6 +47,10 @@ First public release of the unofficial Rust Hatchet SDK.
 - Redact client tokens from debug output.
 - Return explicit unsupported-operation errors for unimplemented live management calls.
 - Correct workflow-specific cron and scheduled-run REST routes.
+- Restore actual Rust 1.85 compatibility after late hardening changes and make
+  the guarded publish preflight enforce the declared compiler version.
+- Keep the Railway proof portable to macOS Bash 3.2 and resilient to non-JSON
+  CLI notices while matching exact run/action log records.
 
 [Unreleased]: https://github.com/christopher-caldwell/hatchet_rust_sdk/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/christopher-caldwell/hatchet_rust_sdk/releases/tag/v0.1.0

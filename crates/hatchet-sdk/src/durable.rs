@@ -1649,8 +1649,10 @@ fn resolve_event_payload(event: &EventCondition, observed: &ObservedDurableEvent
         return None;
     }
 
-    if let Some(scope) = &event.scope
-        && observed.scope.as_deref() != Some(scope.as_str())
+    if event
+        .scope
+        .as_deref()
+        .is_some_and(|scope| observed.scope.as_deref() != Some(scope))
     {
         return None;
     }
