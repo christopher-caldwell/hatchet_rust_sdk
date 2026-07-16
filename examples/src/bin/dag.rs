@@ -1,6 +1,6 @@
-use hatchet_sdk::{
-    Client, Context, ContextExt, GrpcTransport, InMemoryContext, Result, TaskConfig,
-    WorkflowDeclaration, config::HatchetConfig,
+use another_hatchet_sdk::{
+    Client, ContextExt, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
+    config::HatchetConfig,
 };
 use std::sync::Arc;
 
@@ -33,14 +33,12 @@ async fn main() -> Result<()> {
             println!("Fetching resource B...");
             Ok("data_b".to_string())
         })
-        // Context exposes methods like `.parent_output()` to get outputs of dependents
+        // Parent outputs are keyed by the parent task's readable name.
         .register_task(&combine_task, |_, ctx: InMemoryContext<_>| async move {
-            let res_a: String = ctx.parent_output().await?.unwrap_or_default();
+            let res_a: String = ctx.parent_output("fetch-a").await?;
+            let res_b: String = ctx.parent_output("fetch-b").await?;
             println!("Combining results...");
-            Ok(format!(
-                "Combined result: data A is {}, data B was successful too",
-                res_a
-            ))
+            Ok(format!("Combined result: {res_a} + {res_b}"))
         })
         .build();
 
@@ -62,13 +60,16 @@ async fn main() -> Result<()> {
                 TaskConfig::default(),
             );
 
-    client.register_workflow(decl).await;
+    client.register_workflow(decl).await?;
 
     // 4. Run the Workflow
     println!("Starting DAG workflow...");
     let result = client
         .workflow::<serde_json::Value, String>("dag-workflow")
-        .run(serde_json::json!({}), hatchet_sdk::RunOpts::default())
+        .run(
+            serde_json::json!({}),
+            another_hatchet_sdk::RunOpts::default(),
+        )
         .await?;
 
     println!("DAG Workflow Output: {}", result);

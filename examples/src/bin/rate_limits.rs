@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use hatchet_sdk::{Client, GrpcTransport, RateLimitDuration, Result, config::HatchetConfig};
+use another_hatchet_sdk::{
+    Client, GrpcTransport, RateLimitDuration, Result, config::HatchetConfig,
+};
 
 /// Demonstrates TS-style server-backed rate limit upsert.
 /// Requires Hatchet connection env vars such as `HATCHET_CLIENT_TOKEN`.

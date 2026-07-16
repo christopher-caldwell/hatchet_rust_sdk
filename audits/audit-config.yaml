@@ -1,0 +1,25 @@
+audit_target: "Current working tree of /Users/christophercaldwell/Code/projects/rust/hatchet_rust_sdk at base commit 05fa2d489d036d17f9c6476684f92aa4a3392298"
+audit_type: "code_review"
+reviewer_count: 5
+reviewer_mode: "identical_reviewers"
+quorum_threshold: 0.60
+include_minority_findings: true
+minority_severity_floor: "high"
+output_directory: "./audits"
+individual_report_pattern: "reviewer-{number}.md"
+final_report_filename: "final-consensus-audit.md"
+review_focuses:
+  reviewer_01: "full SDK v0.1 publish readiness"
+  reviewer_02: "full SDK v0.1 publish readiness"
+  reviewer_03: "full SDK v0.1 publish readiness"
+  reviewer_04: "full SDK v0.1 publish readiness"
+  reviewer_05: "full SDK v0.1 publish readiness"
+allowed_materials:
+  - "All repository files and current uncommitted changes except disallowed audit outputs"
+  - "Local build, test, lint, documentation, packaging, and example command output"
+  - "Public upstream Hatchet TypeScript SDK and official Hatchet documentation"
+  - "Railway example documentation, scripts, checked-in evidence, and publicly reachable example endpoints"
+disallowed_materials:
+  - "./audits/reviewer-*.md"
+  - "./audits/final-consensus-audit.md"
+  - "Any other reviewer's messages, notes, or conclusions"

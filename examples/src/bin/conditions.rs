@@ -1,4 +1,4 @@
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, Condition, GrpcTransport, InMemoryContext, Result, StepConditions, TaskConfig,
     WorkflowDeclaration, config::HatchetConfig, or,
 };
@@ -46,13 +46,16 @@ async fn main() -> Result<()> {
     )
     .step_with(&conditional_task, TaskConfig::default(), conditions);
 
-    let _ = client.register_workflow(decl).await;
+    client.register_workflow(decl).await?;
 
     // Trigger the workflow
     // It will halt before executing 'conditional-task' until "approval:received" goes through the event stream
     let _run = client
         .workflow::<serde_json::Value, String>("conditions-workflow")
-        .run_no_wait(serde_json::json!({}), hatchet_sdk::RunOpts::default())
+        .run_no_wait(
+            serde_json::json!({}),
+            another_hatchet_sdk::RunOpts::default(),
+        )
         .await?;
 
     println!("Workflow is hanging, waiting for 'approval:received' event...");

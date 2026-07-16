@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-16T05:37:16Z",
+  "status": "pass",
+  "sdk": {
+    "git_commit": "05fa2d489d036d17f9c6476684f92aa4a3392298",
+    "working_tree_contains_comparison_changes": true
+  },
+  "official_hatchet": {
+    "retrieved_at": "2026-07-15",
+    "documentation_url": "https://docs.hatchet.run/self-hosting/hatchet-lite",
+    "repository_url": "https://github.com/hatchet-dev/hatchet",
+    "source_tag": "v0.94.14",
+    "source_commit": "301391d9915036ab8e2a5387525572baac980ba8",
+    "image": "ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.94.14@sha256:b8d6b7e9b96d354f1a252590d1480d3bb70f01604cc6cba1fd97ff7aaa2cb07c",
+    "server_modified": false,
+    "message_queue": "postgres"
+  },
+  "railway": {
+    "project": {
+      "id": "36e3ecfa-52bd-4ed7-9678-78bedf996419",
+      "name": "hatchet-rust-sdk-comparison"
+    },
+    "environment": {
+      "id": "063eac01-472e-4a7b-84ec-f211b88ccd59",
+      "name": "production"
+    },
+    "services": [
+      {
+        "name": "Postgres",
+        "id": "221e6003-9513-4756-94f9-95a6dc187224",
+        "deployment_id": "cbcc5d10-9132-4ee5-abcf-701b2478a7ca",
+        "status": "SUCCESS",
+        "public": false,
+        "replicas": 1
+      },
+      {
+        "name": "hatchet-orchestrator",
+        "id": "439d63ee-61b2-4796-96f0-af463839a809",
+        "deployment_id": "7b951736-3444-4a57-92dd-dfcf939454a2",
+        "status": "SUCCESS",
+        "public": true,
+        "public_port": 8888,
+        "health_path": "/ready",
+        "volume_mount": "/config",
+        "replicas": 1
+      },
+      {
+        "name": "rust-orders-worker",
+        "id": "edf7f45f-9680-4869-89d3-e1c0e41154a6",
+        "deployment_id": "46e4fe44-7283-478a-a9f5-336cbd574158",
+        "status": "SUCCESS",
+        "public": false,
+        "health_path": "/health",
+        "replicas": 1
+      },
+      {
+        "name": "rust-notifications-worker",
+        "id": "6f4e7196-3124-4f8f-ae44-8e1b3c14dbee",
+        "deployment_id": "1fce98e3-a41e-4b98-a52d-0bb9d006c669",
+        "status": "SUCCESS",
+        "public": false,
+        "health_path": "/health",
+        "replicas": 1
+      }
+    ],
+    "dashboard_url": "https://hatchet-orchestrator-production.up.railway.app",
+    "dashboard_authentication": {
+      "login_http_status": 200,
+      "auth_disabled": false,
+      "signup_allowed": false,
+      "invites_allowed": false
+    },
+    "private_topology": {
+      "orchestrator_http": "hatchet-orchestrator.railway.internal:8888",
+      "orchestrator_grpc": "hatchet-orchestrator.railway.internal:7077",
+      "postgres_port": 5432,
+      "public_tcp_proxies": 0,
+      "public_worker_domains": 0,
+      "public_grpc_proxy": false
+    }
+  },
+  "workflow_proof": {
+    "workflow": "rust-order-processing",
+    "api_visible": true,
+    "active_workers": [
+      {
+        "name": "rust-orders-worker",
+        "actions": ["default:process-order"]
+      },
+      {
+        "name": "rust-notifications-worker",
+        "actions": ["default:send-order-receipt"]
+      }
+    ],
+    "before_restart": {
+      "order_id": "ord_railway_005",
+      "run_id": "5ade3060-3741-4cbd-a1d7-27a245da8f02",
+      "status": "COMPLETED",
+      "engine_duration_ms": 126,
+      "observer_elapsed_ms": 15,
+      "ordered_tasks": [
+        {
+          "action": "default:process-order",
+          "worker": "rust-orders-worker",
+          "started_at": "2026-07-16T05:22:13.734403Z",
+          "finished_at": "2026-07-16T05:22:13.737074Z"
+        },
+        {
+          "action": "default:send-order-receipt",
+          "worker": "rust-notifications-worker",
+          "started_at": "2026-07-16T05:22:13.834893Z",
+          "finished_at": "2026-07-16T05:22:13.842991Z"
+        }
+      ],
+      "receipt": {
+        "order_id": "ord_railway_005",
+        "recipient": "buyer@example.test",
+        "subject": "Receipt for order ord_railway_005"
+      }
+    },
+    "restart": {
+      "service": "rust-notifications-worker",
+      "worker_ready_observed": true,
+      "worker_ready_at": "2026-07-16T05:22:23.910427614Z"
+    },
+    "after_restart": {
+      "order_id": "ord_railway_006",
+      "run_id": "8cc8b643-ca45-4bb1-aff9-979742f47f64",
+      "status": "COMPLETED",
+      "engine_duration_ms": 92,
+      "observer_elapsed_ms": 13,
+      "ordered_tasks": [
+        {
+          "action": "default:process-order",
+          "worker": "rust-orders-worker",
+          "started_at": "2026-07-16T05:22:30.373045Z",
+          "finished_at": "2026-07-16T05:22:30.375957Z"
+        },
+        {
+          "action": "default:send-order-receipt",
+          "worker": "rust-notifications-worker",
+          "started_at": "2026-07-16T05:22:30.438938Z",
+          "finished_at": "2026-07-16T05:22:30.443091Z"
+        }
+      ],
+      "receipt": {
+        "order_id": "ord_railway_006",
+        "recipient": "buyer@example.test",
+        "subject": "Receipt for order ord_railway_006"
+      }
+    }
+  },
+  "verification": {
+    "sdk_library_tests": {"status": "pass", "tests": 30, "ignored": 0},
+    "standalone_tests": {"status": "pass", "tests": 7, "ignored": 0},
+    "standalone_strict_clippy": "pass",
+    "local_official_full_stack": {
+      "status": "pass",
+      "run_id": "14c51560-ec12-4bb8-9446-beb8c43cf6e2",
+      "elapsed_seconds": 12,
+      "cleanup": "complete"
+    },
+    "workspace_fmt": "pre-existing unrelated failure",
+    "workspace_strict_clippy": "pre-existing unrelated failures",
+    "workspace_tests": "pre-existing unrelated compile failure",
+    "skipped_live_tests_counted_as_success": false
+  },
+  "idle_measurements": {
+    "window_seconds": 600,
+    "pg_stat_statements_preinstalled": false,
+    "baseline": {
+      "connections_start": 22,
+      "connections_end": 29,
+      "database_per_minute": {
+        "commits": 1831.5,
+        "rollbacks": 124.1,
+        "blocks_read": 0.4,
+        "blocks_hit": 35486.3,
+        "tuples_returned": 17598.8,
+        "tuples_fetched": 13487.2,
+        "tuples_inserted": 0.2,
+        "tuples_updated": 153.6,
+        "tuples_deleted": 0.2
+      },
+      "services": {
+        "Postgres": {"cpu_vcpu": 0.0182691667, "memory_mb": 313.2097},
+        "hatchet-orchestrator": {"cpu_vcpu": 0.0159640333, "memory_mb": 70.1246},
+        "rust-orders-worker": {"cpu_vcpu": 0.0001142, "memory_mb": 1.8371},
+        "rust-notifications-worker": {"cpu_vcpu": 0.0001372, "memory_mb": 4.8612}
+      }
+    },
+    "low_load": {
+      "connections_start": 16,
+      "connections_end": 16,
+      "database_per_minute": {
+        "commits": 1368.7,
+        "rollbacks": 84.3,
+        "blocks_read": 0.0,
+        "blocks_hit": 8339.4,
+        "tuples_returned": 6132.9,
+        "tuples_fetched": 2491.0,
+        "tuples_inserted": 0.0,
+        "tuples_updated": 154.0,
+        "tuples_deleted": 0.0
+      },
+      "services": {
+        "Postgres": {"cpu_vcpu": 0.0082675333, "memory_mb": 218.7833},
+        "hatchet-orchestrator": {"cpu_vcpu": 0.0139863333, "memory_mb": 59.9198},
+        "rust-orders-worker": {"cpu_vcpu": 0.0001315333, "memory_mb": 1.9336},
+        "rust-notifications-worker": {"cpu_vcpu": 0.0001393667, "memory_mb": 5.8175}
+      }
+    }
+  },
+  "final_low_load_variables": {
+    "DATABASE_MAX_CONNS": "10",
+    "DATABASE_MIN_CONNS": "1",
+    "DATABASE_MAX_QUEUE_CONNS": "10",
+    "DATABASE_MIN_QUEUE_CONNS": "1",
+    "SCHEDULER_CONCURRENCY_POLLING_MIN_INTERVAL": "5s",
+    "SCHEDULER_CONCURRENCY_POLLING_MAX_INTERVAL": "10s",
+    "SCHEDULER_CHECK_ACTIVE_MIN_INTERVAL": "60s",
+    "SCHEDULER_CHECK_ACTIVE_MAX_INTERVAL": "120s",
+    "SERVER_OPERATIONS_POLL_INTERVAL": "10",
+    "SERVER_OPERATIONS_JITTER": "1000"
+  },
+  "known_floors": {
+    "sdk_result_poll_ms": 500,
+    "sdk_worker_heartbeat_seconds": 4,
+    "server_queue_and_rate_limit_loops_seconds": 1,
+    "server_lease_loop_seconds": 5,
+    "server_patched": false,
+    "engine_logs_may_fallback_locally_on_403": true
+  },
+  "security": {
+    "secrets_redacted": true,
+    "finite_worker_token_hours": 720,
+    "temporary_ssh_key_removed_after_proof": true
+  },
+  "inngest_repository_or_deployment_modified": false
+}

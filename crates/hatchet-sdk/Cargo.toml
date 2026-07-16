@@ -1,36 +1,50 @@
 [package]
-name = "hatchet-sdk"
+name = "another-hatchet-sdk"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
+description = "An unofficial, idiomatic Rust SDK for Hatchet workflow orchestration"
+readme = "../../README.md"
+keywords = ["hatchet", "workflow", "task-queue", "durable-execution", "sdk"]
+categories = ["api-bindings", "asynchronous"]
+exclude = ["tests/fixtures/live/**"]
 
 [dependencies]
 async-trait = "0.1"
 async-stream = "0.3"
-hatchet-core = { path = "../hatchet-core" }
-hatchet-macros = { path = "../hatchet-macros" }
+another-hatchet-core = { version = "0.1.0", path = "../hatchet-core" }
+another-hatchet-macros = { version = "0.1.0", path = "../hatchet-macros" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["rt", "sync", "time", "net", "io-util", "fs"] }
 tokio-util = "0.7"
+uuid = { version = "1.0", features = ["v4"] }
 
-# gRPC transport dependencies (feature-gated)
-tonic = { version = "0.12", features = ["tls", "tls-roots"], optional = true }
-prost = { version = "0.13", optional = true }
-prost-types = { version = "0.13", optional = true }
-base64 = { version = "0.22", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+# The production transport is part of the supported v0.1 surface. Keeping these
+# dependencies mandatory makes every advertised feature combination honest.
+tonic = { version = "=0.14.2", default-features = false, features = ["channel", "codegen", "tls-native-roots", "tls-ring"] }
+tonic-prost = "=0.14.2"
+prost = "=0.14.1"
+prost-types = "=0.14.1"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [build-dependencies]
-tonic-build = { version = "0.12", optional = true }
+tonic-prost-build = "=0.14.2"
+protoc-bin-vendored = "3.2"
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 base64 = "0.22"
 
 [features]
+# Retained as a no-op compatibility feature; gRPC/REST support is always built.
 default = ["grpc"]
-grpc = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:base64", "dep:tonic-build", "dep:reqwest"]
+grpc = []
 integration = []

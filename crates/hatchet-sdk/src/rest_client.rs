@@ -59,6 +59,20 @@ impl RestApiClient {
         )
     }
 
+    fn workflow_crons_url(&self, workflow_name: &str) -> String {
+        self.tenant_url(&format!(
+            "/workflows/{}/crons",
+            urlencoding_simple(workflow_name)
+        ))
+    }
+
+    fn workflow_schedules_url(&self, workflow_name: &str) -> String {
+        self.tenant_url(&format!(
+            "/workflows/{}/scheduled",
+            urlencoding_simple(workflow_name)
+        ))
+    }
+
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
         let resp = self
             .client
@@ -94,6 +108,43 @@ impl RestApiClient {
         resp.json::<T>()
             .await
             .map_err(|e| crate::error::Error::Transport(format!("REST decode failed: {e}")))
+    }
+
+    /// Triggers a top-level workflow through the current stable API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an HTTP failure or a response without a run ID.
+    pub async fn trigger_workflow(
+        &self,
+        workflow_name: &str,
+        input: &Value,
+        additional_metadata: &std::collections::HashMap<String, String>,
+        priority: Option<i32>,
+    ) -> Result<String> {
+        let url = self.stable_tenant_url("/workflow-runs/trigger");
+        let response: Value = self
+            .post_json(
+                &url,
+                &serde_json::json!({
+                    "workflowName": workflow_name,
+                    "input": input,
+                    "additionalMetadata": additional_metadata,
+                    "priority": priority,
+                    "returnOnlyId": true,
+                }),
+            )
+            .await?;
+        response
+            .pointer("/run/metadata/id")
+            .or_else(|| response.pointer("/metadata/id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                crate::error::Error::Transport(
+                    "REST trigger response did not include a workflow run ID".to_owned(),
+                )
+            })
     }
 
     async fn delete_empty(&self, url: &str) -> Result<()> {
@@ -174,9 +225,11 @@ impl RestApiClient {
     }
 
     pub async fn get_workflow(&self, name: &str) -> Result<WorkflowDefinition> {
-        let url = self.tenant_url(&format!("/workflows/{name}"));
-        let row: V1Workflow = self.get_json(&url).await?;
-        Ok(workflow_definition_from_v1(row))
+        self.list_workflows()
+            .await?
+            .into_iter()
+            .find(|workflow| workflow.name == name)
+            .ok_or_else(|| crate::error::Error::Worker(format!("workflow not found: {name}")))
     }
 
     // --- Workers ---
@@ -311,12 +364,12 @@ impl RestApiClient {
         expression: &str,
         input: &Value,
     ) -> Result<Cron> {
-        let url = self.tenant_url("/workflows/crons");
+        let url = self.workflow_crons_url(workflow_name);
         let body = serde_json::json!({
-            "workflowName": workflow_name,
-            "name": cron_name,
+            "cronName": cron_name,
             "cronExpression": expression,
             "input": input,
+            "additionalMetadata": {},
         });
         let resp: V1Cron = self.post_json(&url, &body).await?;
         Ok(cron_from_v1(resp))
@@ -331,12 +384,11 @@ impl RestApiClient {
         trigger_at: &str,
         input: &Value,
     ) -> Result<Schedule> {
-        let url = self.tenant_url("/workflows/scheduled");
+        let url = self.workflow_schedules_url(workflow_name);
         let body = serde_json::json!({
-            "workflowName": workflow_name,
-            "name": schedule_name,
             "triggerAt": trigger_at,
             "input": input,
+            "additionalMetadata": { "scheduleName": schedule_name },
         });
         let resp: V1Schedule = self.post_json(&url, &body).await?;
         Ok(schedule_from_v1(resp))
@@ -571,7 +623,7 @@ struct V1Metadata {
 // --- Conversion helpers ---
 
 fn run_record_from_v1(row: V1WorkflowRun) -> RunRecord {
-    use hatchet_core::{RunOpts, WorkflowRunId};
+    use another_hatchet_core::{RunOpts, WorkflowRunId};
     use std::collections::HashMap;
     let id = row
         .metadata
@@ -698,12 +750,12 @@ pub struct V1QueueMetrics {
 }
 
 fn urlencoding_simple(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| {
-            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
-                vec![c]
+    s.bytes()
+        .flat_map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                vec![char::from(byte)]
             } else {
-                format!("%{:02X}", c as u32).chars().collect()
+                format!("%{byte:02X}").chars().collect()
             }
         })
         .collect()
@@ -747,4 +799,27 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_creation_routes_include_the_workflow_path_segment() {
+        let api = RestApiClient {
+            client: reqwest::Client::new(),
+            base_url: "https://hatchet.example/api/v1".to_owned(),
+            tenant_id: "tenant-1".to_owned(),
+        };
+
+        assert_eq!(
+            api.workflow_crons_url("billing/nightly"),
+            "https://hatchet.example/api/v1/tenants/tenant-1/workflows/billing%2Fnightly/crons"
+        );
+        assert_eq!(
+            api.workflow_schedules_url("café"),
+            "https://hatchet.example/api/v1/tenants/tenant-1/workflows/caf%C3%A9/scheduled"
+        );
+    }
 }

@@ -1,4 +1,4 @@
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, Context, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
     config::HatchetConfig,
 };
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     let workflow_decl: WorkflowDeclaration<serde_json::Value, String> =
         WorkflowDeclaration::new("payment-workflow").step(&payment_task, TaskConfig::default());
 
-    client.register_workflow(workflow_decl).await;
+    client.register_workflow(workflow_decl).await?;
 
     // 5. Trigger the workflow run
     println!("Triggering workflow run...");
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         .workflow::<serde_json::Value, String>("payment-workflow")
         .run(
             serde_json::json!({ "amount": 100, "currency": "USD" }),
-            hatchet_sdk::RunOpts::default(),
+            another_hatchet_sdk::RunOpts::default(),
         )
         .await?;
 

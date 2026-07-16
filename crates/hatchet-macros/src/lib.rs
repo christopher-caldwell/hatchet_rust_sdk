@@ -77,11 +77,11 @@ pub fn workflow(attr: TokenStream, item: TokenStream) -> TokenStream {
         pub const WORKFLOW_NAME: &str = #name;
 
         pub fn register_all<T>(
-            client: &::hatchet_sdk::Client<T>,
-            mut builder: ::hatchet_sdk::WorkerBuilder<T>,
-        ) -> ::hatchet_sdk::WorkerBuilder<T>
+            client: &::another_hatchet_sdk::Client<T>,
+            mut builder: ::another_hatchet_sdk::WorkerBuilder<T>,
+        ) -> ::another_hatchet_sdk::WorkerBuilder<T>
         where
-            T: ::hatchet_sdk::Transport + 'static,
+            T: ::another_hatchet_sdk::Transport + 'static,
         {
             #(#registrations)*
             builder
@@ -110,9 +110,9 @@ fn expand_task_like(attr: TokenStream, item: TokenStream, durable: bool) -> Toke
     let task_name = fn_name.to_string();
 
     let return_type = if durable {
-        quote! { ::hatchet_sdk::DurableTaskHandle<#input_type, #output_type> }
+        quote! { ::another_hatchet_sdk::DurableTaskHandle<#input_type, #output_type> }
     } else {
-        quote! { ::hatchet_sdk::TaskHandle<#input_type, #output_type> }
+        quote! { ::another_hatchet_sdk::TaskHandle<#input_type, #output_type> }
     };
 
     let handle_body = if durable {
@@ -131,10 +131,10 @@ fn expand_task_like(attr: TokenStream, item: TokenStream, durable: bool) -> Toke
         pub const #name_const: &str = #task_name;
 
         pub fn #handle_fn<T>(
-            client: &::hatchet_sdk::Client<T>,
+            client: &::another_hatchet_sdk::Client<T>,
         ) -> #return_type
         where
-            T: ::hatchet_sdk::Transport + 'static,
+            T: ::another_hatchet_sdk::Transport + 'static,
         {
             #handle_body
         }

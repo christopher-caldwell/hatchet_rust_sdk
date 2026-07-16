@@ -1,4 +1,4 @@
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, Context, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
     config::HatchetConfig,
 };
@@ -68,7 +68,11 @@ async fn main() -> Result<()> {
 
                 println!("[Parent Task] Spawning {child_count} child workflows...");
                 let child_runs = ctx
-                    .bulk_run_children(&child_handle, child_inputs, hatchet_sdk::RunOpts::default())
+                    .bulk_run_children(
+                        &child_handle,
+                        child_inputs,
+                        another_hatchet_sdk::RunOpts::default(),
+                    )
                     .await?;
 
                 let mut outputs = Vec::with_capacity(child_runs.len());
@@ -91,12 +95,12 @@ async fn main() -> Result<()> {
     let child_decl: WorkflowDeclaration<serde_json::Value, String> =
         WorkflowDeclaration::new("children-child-workflow")
             .step(&child_task, TaskConfig::default());
-    client.register_workflow(child_decl).await;
+    client.register_workflow(child_decl).await?;
 
     let parent_decl: WorkflowDeclaration<serde_json::Value, String> =
         WorkflowDeclaration::new("children-parent-workflow")
             .step(&parent_task, TaskConfig::default());
-    client.register_workflow(parent_decl).await;
+    client.register_workflow(parent_decl).await?;
 
     // 5. Trigger the parent workflow.
     println!("Triggering parent workflow that spawns children...");
@@ -107,7 +111,7 @@ async fn main() -> Result<()> {
                 "start": true,
                 "child_count": 5,
             }),
-            hatchet_sdk::RunOpts::default(),
+            another_hatchet_sdk::RunOpts::default(),
         )
         .await?;
 

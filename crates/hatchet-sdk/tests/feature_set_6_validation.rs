@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, ConcurrencyConfig, Condition, ConditionAction, Conditions, Context, ContextExt,
     ContextIds, DurableContext, DurableContextExt, EventRecord, InMemoryContext,
     InMemoryDurableContext, InMemoryTransport, LabelValue, RateLimitDuration, RunOpts, RunStatus,
@@ -187,11 +187,16 @@ async fn validates_durable_wait_or_lookback_and_event_matching() {
     );
 
     durable
-        .emit_event("approval.null", json!({ "user": { "email": null } }))
+        .emit_scoped_event(
+            "approval.null",
+            "tenant-a",
+            json!({ "user": { "email": null } }),
+        )
         .expect("null payload should record");
     let filtered = durable
         .wait_for(or([
             Condition::event("approval.null")
+                .scope("tenant-a")
                 .lookback(Duration::from_secs(1))
                 .expression("user.email != null")
                 .build(),
@@ -321,7 +326,7 @@ async fn validates_worker_runtime_enforcement() {
             TaskConfig::builder()
                 .desired_label(
                     "region",
-                    hatchet_sdk::DesiredLabelConfig::new("us").required(true),
+                    another_hatchet_sdk::DesiredLabelConfig::new("us").required(true),
                 )
                 .input_schema(json!({
                     "type": "object",
@@ -362,7 +367,7 @@ async fn validates_worker_runtime_enforcement() {
         .await;
     assert!(matches!(
         invalid_result,
-        Err(hatchet_sdk::Error::InputValidation(_))
+        Err(another_hatchet_sdk::Error::InputValidation(_))
     ));
 
     handle.pause().await.expect("pause should succeed");
@@ -388,7 +393,8 @@ async fn validates_feature_client_operations() {
     let workflow_def = client
         .workflows()
         .put("feature.workflow", json!({ "v": 1 }))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(workflow_def.version, 1);
     assert_eq!(
         client.workflows().version("feature.workflow").await.ok(),
@@ -423,7 +429,7 @@ async fn validates_feature_client_operations() {
         paused: false,
         labels: BTreeMap::from([("region".to_owned(), "us".to_owned())]),
     };
-    let updated_worker = client.workers().update(worker_info).await;
+    let updated_worker = client.workers().update(worker_info).await.unwrap();
     assert_eq!(updated_worker.name, "worker-a");
     assert!(client.workers().get("worker-a").await.is_ok());
 
@@ -443,7 +449,7 @@ async fn validates_feature_client_operations() {
             .copied(),
         Some(10)
     );
-    client.rate_limits().put("compat", 5).await;
+    client.rate_limits().put("compat", 5).await.unwrap();
     assert_eq!(
         client
             .rate_limits()
@@ -454,21 +460,21 @@ async fn validates_feature_client_operations() {
             .copied(),
         Some(5)
     );
-    client.rate_limits().delete("compat").await;
-    assert!(!client
-        .rate_limits()
-        .list()
-        .await
-        .unwrap()
-        .contains_key("compat"));
+    client.rate_limits().delete("compat").await.unwrap();
+    assert!(
+        !client
+            .rate_limits()
+            .list()
+            .await
+            .unwrap()
+            .contains_key("compat")
+    );
 
     client
         .events()
-        .push(EventRecord {
-            key: "order.created".to_owned(),
-            payload: json!({ "id": "ord-1" }),
-        })
-        .await;
+        .push(EventRecord::new("order.created", json!({ "id": "ord-1" })))
+        .await
+        .unwrap();
     assert_eq!(client.events().list().await.unwrap().len(), 1);
 
     let created_filter = client
@@ -508,7 +514,8 @@ async fn validates_feature_client_operations() {
 
     let cel = client
         .cel()
-        .debug("payload.id != ''", &json!({ "id": "ord-1" }));
+        .debug("payload.id != ''", &json!({ "id": "ord-1" }))
+        .unwrap();
     assert!(cel.accepted);
 
     assert!(client.schedules().delete("daily").await.is_ok());
@@ -538,7 +545,10 @@ async fn validates_task_config_and_workflow_declaration_builders() {
         .step(&validate, validate.config().clone())
         .step_after(&charge, &[&validate], TaskConfig::default());
 
-    let registered = client.register_workflow(declaration.clone()).await;
+    let registered = client
+        .register_workflow(declaration.clone())
+        .await
+        .expect("workflow registration succeeds");
     assert_eq!(registered.name, "checkout");
     assert_eq!(registered.steps.len(), 2);
     assert_eq!(registered.steps[1].parents, vec!["validate".to_owned()]);
@@ -565,7 +575,7 @@ async fn validates_expanded_context_and_durable_helpers() {
         })
         .with_retry_count(2)
         .with_filter_payload(json!({"ok": true}))
-        .with_parent_output(json!({"value": 41}))
+        .with_parent_output("parent", json!({"value": 41}))
         .with_worker_id("worker-1")
         .with_worker_label("region", "us");
 
@@ -585,11 +595,9 @@ async fn validates_expanded_context_and_durable_helpers() {
     );
     assert!(
         context
-            .parent_output::<serde_json::Value>()
+            .parent_output::<serde_json::Value>("parent")
             .await
-            .ok()
-            .flatten()
-            .is_some()
+            .is_ok()
     );
 
     let no_wait = ContextExt::run_child_no_wait(
@@ -612,8 +620,8 @@ async fn validates_expanded_context_and_durable_helpers() {
         .wait_for(Condition::sleep_for(Duration::from_millis(1)).into())
         .await
         .expect("wait_for");
-    let now_a = durable.now().await;
-    let now_b = durable.now().await;
+    let now_a = durable.now().await.expect("durable now");
+    let now_b = durable.now().await.expect("durable now");
 
     assert_eq!(memo, json!({"v": 1}));
     assert_eq!(waited.matched_condition_index, 0);
@@ -655,7 +663,10 @@ async fn validates_workflow_scheduler_executes_registered_steps() {
         WorkflowDeclaration::<WorkflowInput, WorkflowOutput>::new("checkout.workflow")
             .step(&validate, TaskConfig::default())
             .step_after(&finalize, &[&validate], TaskConfig::default());
-    client.register_workflow(declaration).await;
+    client
+        .register_workflow(declaration)
+        .await
+        .expect("workflow registration succeeds");
 
     let workflow = client.workflow::<WorkflowInput, WorkflowOutput>("checkout.workflow");
     let run_ref = workflow

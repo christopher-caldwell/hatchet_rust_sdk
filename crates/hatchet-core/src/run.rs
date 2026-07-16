@@ -9,7 +9,6 @@ pub enum Priority {
     Low,
     Normal,
     High,
-    Critical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

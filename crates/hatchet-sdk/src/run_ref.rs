@@ -3,8 +3,8 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use another_hatchet_core::WorkflowRunId;
 use async_trait::async_trait;
-use hatchet_core::WorkflowRunId;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 

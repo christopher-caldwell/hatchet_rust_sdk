@@ -1,4 +1,4 @@
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, ConcurrencyConfig, ConcurrencyLimitStrategy, GrpcTransport, InMemoryContext, Result,
     TaskConfig, WorkflowDeclaration, config::HatchetConfig,
 };
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
 
     let step_concurrency = ConcurrencyConfig::new("input.group")
         .max_runs(2)
-        .limit_strategy(ConcurrencyLimitStrategy::QueueNewRuns);
+        .limit_strategy(ConcurrencyLimitStrategy::CancelNewest);
 
     // 3. Attach configurations to the workflow
     let task_config = TaskConfig::builder().concurrency(step_concurrency).build();
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
             .concurrency(wf_concurrency)
             .step(&task, task_config);
 
-    let _ = client.register_workflow(decl).await;
+    client.register_workflow(decl).await?;
 
     // 4. Trigger multiple runs and see limits apply (engine backed, so local InMemoryTransport mimics this)
     println!("Dispatching workflows...");
@@ -55,14 +55,14 @@ async fn main() -> Result<()> {
     let run1 = wf_client
         .run_no_wait(
             serde_json::json!({"user_id": "U1", "group": "G1"}),
-            hatchet_sdk::RunOpts::default(),
+            another_hatchet_sdk::RunOpts::default(),
         )
         .await?;
     // Second request cancels the first due to CancelInProgress
     let _run2 = wf_client
         .run_no_wait(
             serde_json::json!({"user_id": "U1", "group": "G1"}),
-            hatchet_sdk::RunOpts::default(),
+            another_hatchet_sdk::RunOpts::default(),
         )
         .await?;
 

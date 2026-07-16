@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hatchet_core::{RunOpts, WorkflowRunId};
+use another_hatchet_core::{RunOpts, WorkflowRunId};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
@@ -73,10 +73,32 @@ pub struct QueueMetrics {
     pub queued_runs: usize,
 }
 
-#[derive(Debug, Clone)]
+/// An event to publish to Hatchet.
+///
+/// Use [`EventRecord::with_scope`] when the event should satisfy a scoped
+/// condition. Hatchet requires scoped events for durable lookback waits.
+#[derive(Debug, Clone, PartialEq)]
 pub struct EventRecord {
     pub key: String,
     pub payload: Value,
+    pub scope: Option<String>,
+}
+
+impl EventRecord {
+    #[must_use]
+    pub fn new(key: impl Into<String>, payload: Value) -> Self {
+        Self {
+            key: key.into(),
+            payload,
+            scope: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +342,11 @@ impl<T: Transport> WorkflowsClient<T> {
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation(
+                "workflow deletion is not implemented for engine-backed clients".to_owned(),
+            ));
+        }
         let mut state = self.state.write().await;
         if state.workflows.remove(name).is_none() {
             return Err(Error::Worker(format!("workflow not found: {name}")));
@@ -327,7 +354,25 @@ impl<T: Transport> WorkflowsClient<T> {
         Ok(())
     }
 
-    pub async fn put(&self, name: impl Into<String>, definition: Value) -> WorkflowDefinition {
+    pub async fn put(
+        &self,
+        name: impl Into<String>,
+        definition: Value,
+    ) -> Result<WorkflowDefinition> {
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation(
+                "raw workflow writes are not supported for engine-backed clients; use Client::register_workflow"
+                    .to_owned(),
+            ));
+        }
+        Ok(self.record_put(name, definition).await)
+    }
+
+    pub(crate) async fn record_put(
+        &self,
+        name: impl Into<String>,
+        definition: Value,
+    ) -> WorkflowDefinition {
         let name = name.into();
         let mut state = self.state.write().await;
         let version = state.workflows.get(&name).map_or(1, |wf| wf.version + 1);
@@ -405,6 +450,11 @@ impl<T: Transport> SchedulesClient<T> {
     }
 
     pub async fn update(&self, schedule: Schedule) -> Result<Schedule> {
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation(
+                "schedule updates are not implemented for engine-backed clients".to_owned(),
+            ));
+        }
         let mut state = self.state.write().await;
         if !state.schedules.contains_key(&schedule.name) {
             return Err(Error::Worker(format!(
@@ -437,11 +487,11 @@ impl<T: Transport> SchedulesClient<T> {
         Ok(updated)
     }
 
-    pub async fn bulk_delete(&self, names: Vec<String>) {
-        let mut state = self.state.write().await;
+    pub async fn bulk_delete(&self, names: Vec<String>) -> Result<()> {
         for name in names {
-            state.schedules.remove(&name);
+            self.delete(&name).await?;
         }
+        Ok(())
     }
 }
 
@@ -547,10 +597,15 @@ impl<T: Transport> WorkersClient<T> {
             .ok_or_else(|| Error::Worker(format!("worker not found: {name}")))
     }
 
-    pub async fn update(&self, worker: WorkerInfo) -> WorkerInfo {
+    pub async fn update(&self, worker: WorkerInfo) -> Result<WorkerInfo> {
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation(
+                "arbitrary worker updates are not implemented for engine-backed clients".to_owned(),
+            ));
+        }
         let mut state = self.state.write().await;
         state.workers.insert(worker.name.clone(), worker.clone());
-        worker
+        Ok(worker)
     }
 
     pub async fn is_paused(&self, name: &str) -> Result<bool> {
@@ -564,7 +619,7 @@ impl<T: Transport> WorkersClient<T> {
         }
         let mut worker = self.get(name).await?;
         worker.paused = true;
-        Ok(self.update(worker).await)
+        self.update(worker).await
     }
 
     pub async fn unpause(&self, name: &str) -> Result<WorkerInfo> {
@@ -574,7 +629,7 @@ impl<T: Transport> WorkersClient<T> {
         }
         let mut worker = self.get(name).await?;
         worker.paused = false;
-        Ok(self.update(worker).await)
+        self.update(worker).await
     }
 }
 
@@ -693,27 +748,12 @@ impl<T: Transport> RateLimitsClient<T> {
         Ok(returned_key)
     }
 
-    pub async fn put(&self, key: impl Into<String>, limit: u32) {
-        let key = key.into();
-        if self
-            .upsert(key.clone(), limit, RateLimitDuration::Second)
-            .await
-            .is_ok()
-        {
-            return;
-        }
-
-        let mut state = self.state.write().await;
-        state.rate_limits.insert(key, limit);
+    pub async fn put(&self, key: impl Into<String>, limit: u32) -> Result<String> {
+        self.upsert(key, limit, RateLimitDuration::Second).await
     }
 
-    pub async fn delete(&self, key: &str) {
-        if self.delete_result(key).await.is_ok() {
-            return;
-        }
-
-        let mut state = self.state.write().await;
-        state.rate_limits.remove(key);
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        self.delete_result(key).await
     }
 
     pub async fn delete_result(&self, key: &str) -> Result<()> {
@@ -743,17 +783,46 @@ impl<T: Transport> EventsClient<T> {
         }
     }
 
-    pub async fn push(&self, event: EventRecord) {
+    pub async fn push(&self, event: EventRecord) -> Result<()> {
+        if self._transport.rest_api().is_some() {
+            self._transport
+                .push_event_with_scope(&event.key, &event.payload, event.scope.as_deref())
+                .await?;
+            return Ok(());
+        }
         let mut state = self.state.write().await;
         state.events.push(event);
+        Ok(())
     }
 
-    pub async fn bulk_push(&self, events: Vec<EventRecord>) {
+    pub async fn bulk_push(&self, events: Vec<EventRecord>) -> Result<()> {
+        if self._transport.rest_api().is_some() {
+            let records = events
+                .iter()
+                .map(|event| {
+                    (
+                        event.key.clone(),
+                        event.payload.clone(),
+                        event.scope.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            self._transport
+                .bulk_push_events_with_scope(&records)
+                .await?;
+            return Ok(());
+        }
         let mut state = self.state.write().await;
         state.events.extend(events);
+        Ok(())
     }
 
     pub async fn list(&self) -> Result<Vec<EventRecord>> {
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation(
+                "event listing is not implemented for engine-backed clients".to_owned(),
+            ));
+        }
         let state = self.state.read().await;
         Ok(state.events.clone())
     }
@@ -814,6 +883,11 @@ impl<T: Transport> FiltersClient<T> {
     }
 
     pub async fn get(&self, name: &str) -> Result<FilterDefinition> {
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation(
+                "filter lookup is not implemented for engine-backed clients".to_owned(),
+            ));
+        }
         let state = self.state.read().await;
         state
             .filters
@@ -831,6 +905,11 @@ impl<T: Transport> FiltersClient<T> {
     }
 
     pub async fn update(&self, filter: FilterDefinition) -> Result<FilterDefinition> {
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation(
+                "filter updates are not implemented for engine-backed clients".to_owned(),
+            ));
+        }
         let mut state = self.state.write().await;
         if !state.filters.contains_key(&filter.name) {
             return Err(Error::Worker(format!("filter not found: {}", filter.name)));
@@ -911,7 +990,12 @@ impl<T: Transport> CelClient<T> {
         }
     }
 
-    pub fn debug(&self, expression: impl Into<String>, payload: &Value) -> CelDebugResult {
+    pub fn debug(&self, expression: impl Into<String>, payload: &Value) -> Result<CelDebugResult> {
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation(
+                "CEL debugging is not implemented for engine-backed clients".to_owned(),
+            ));
+        }
         let expression = expression.into();
         let accepted = !expression.trim().is_empty() && !payload.is_null();
         let details = if accepted {
@@ -919,11 +1003,11 @@ impl<T: Transport> CelClient<T> {
         } else {
             "expression rejected by local debug evaluator".to_owned()
         };
-        CelDebugResult {
+        Ok(CelDebugResult {
             expression,
             accepted,
             details,
-        }
+        })
     }
 }
 

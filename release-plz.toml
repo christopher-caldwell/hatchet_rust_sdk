@@ -1,0 +1,33 @@
+[workspace]
+# Version/changelog preparation is local; the guarded script owns publishing
+# and the single workspace tag.
+changelog_update = false
+dependencies_update = false
+semver_check = true
+git_release_enable = false
+git_tag_enable = false
+publish = false
+
+[[package]]
+name = "another-hatchet-core"
+version_group = "another-hatchet-sdk"
+
+[[package]]
+name = "another-hatchet-macros"
+version_group = "another-hatchet-sdk"
+
+[[package]]
+name = "another-hatchet-sdk"
+version_group = "another-hatchet-sdk"
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+changelog_include = ["another-hatchet-core", "another-hatchet-macros"]
+
+[[package]]
+name = "another-hatchet-sdk-examples"
+release = false
+
+[changelog]
+protect_breaking_commits = true
+sort_commits = "oldest"
+

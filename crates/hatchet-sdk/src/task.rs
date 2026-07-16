@@ -315,9 +315,8 @@ impl ConcurrencyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConcurrencyLimitStrategy {
-    QueueNewRuns,
     CancelInProgress,
-    CancelOldest,
+    CancelNewest,
     GroupRoundRobin,
 }
 

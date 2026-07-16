@@ -1,4 +1,5 @@
 sources
 /target
+**/target/
 .DS_Store
 .tmp/

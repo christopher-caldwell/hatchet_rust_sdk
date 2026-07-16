@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, Context, ContextIds, DurableContext, InMemoryContext, InMemoryDurableContext,
     InMemoryTransport, WorkflowRunId, durable_task, task, workflow,
 };
@@ -12,18 +12,18 @@ mod macro_workflow {
     };
 
     #[task]
-    pub async fn render<T: hatchet_sdk::Transport>(
+    pub async fn render<T: another_hatchet_sdk::Transport>(
         input: u32,
         _ctx: InMemoryContext<T>,
-    ) -> hatchet_sdk::Result<u32> {
+    ) -> another_hatchet_sdk::Result<u32> {
         Ok(input + 10)
     }
 
     #[durable_task]
-    pub async fn await_approval<T: hatchet_sdk::Transport>(
+    pub async fn await_approval<T: another_hatchet_sdk::Transport>(
         input: u32,
         ctx: InMemoryDurableContext<T>,
-    ) -> hatchet_sdk::Result<u32> {
+    ) -> another_hatchet_sdk::Result<u32> {
         Ok(input + ctx.invocation_count())
     }
 
@@ -31,7 +31,7 @@ mod macro_workflow {
     pub async fn render_with_impl_context(
         input: u32,
         ctx: impl Context,
-    ) -> hatchet_sdk::Result<u32> {
+    ) -> another_hatchet_sdk::Result<u32> {
         Ok(input + if ctx.workflow_name().is_empty() { 0 } else { 1 })
     }
 }

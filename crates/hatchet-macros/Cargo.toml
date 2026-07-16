@@ -1,9 +1,17 @@
 [package]
-name = "hatchet-macros"
+name = "another-hatchet-macros"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
+description = "Procedural macros for another-hatchet-sdk"
+readme = "../../README.md"
+keywords = ["hatchet", "workflow", "macros"]
+categories = ["api-bindings", "asynchronous"]
 
 [lib]
 proc-macro = true

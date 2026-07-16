@@ -1,4 +1,4 @@
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, Context, GrpcTransport, InMemoryContext, Result, TaskConfig, WorkflowDeclaration,
     config::HatchetConfig,
 };
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
                     .run_child(
                         &child_handle,
                         serde_json::json!({ "prop": "value" }),
-                        hatchet_sdk::RunOpts::default(),
+                        another_hatchet_sdk::RunOpts::default(),
                     )
                     .await?;
                 let output = child_run.output().await?;
@@ -67,11 +67,11 @@ async fn main() -> Result<()> {
     // 4. Register both workflow declarations to the engine
     let child_decl: WorkflowDeclaration<serde_json::Value, String> =
         WorkflowDeclaration::new("child-workflow").step(&child_task, TaskConfig::default());
-    client.register_workflow(child_decl).await;
+    client.register_workflow(child_decl).await?;
 
     let parent_decl: WorkflowDeclaration<serde_json::Value, String> =
         WorkflowDeclaration::new("parent-workflow").step(&parent_task, TaskConfig::default());
-    client.register_workflow(parent_decl).await;
+    client.register_workflow(parent_decl).await?;
 
     // 5. Trigger the parent workflow
     println!("Triggering parent workflow...");
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
         .workflow::<serde_json::Value, String>("parent-workflow")
         .run(
             serde_json::json!({"start": true}),
-            hatchet_sdk::RunOpts::default(),
+            another_hatchet_sdk::RunOpts::default(),
         )
         .await?;
 

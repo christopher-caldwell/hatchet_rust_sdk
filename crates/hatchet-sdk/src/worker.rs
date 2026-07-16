@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use another_hatchet_core::RunOpts;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -13,12 +14,12 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::client::{DurableTaskHandle, TaskHandle};
 use crate::clients::{SharedFeatureState, WorkerInfo};
-use crate::context::{ContextIds, InMemoryContext};
+use crate::context::{ContextIds, InMemoryContext, TriggerData};
 use crate::durable::InMemoryDurableContext;
 use crate::error::{Error, Result};
 use crate::health::{HealthServer, HealthState};
 use crate::task::{DesiredLabelConfig, TaskConfig, WorkerLabelComparator};
-use crate::transport::{Transport, WorkerStartOpts};
+use crate::transport::{Transport, WorkerConnectionState, WorkerStartOpts};
 use tokio_util::sync::CancellationToken;
 
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'static>>;
@@ -212,6 +213,7 @@ pub struct WorkerBuilder<T: Transport> {
 enum WorkerLifecycleState {
     Starting,
     Ready,
+    Reconnecting,
     Failed(String),
     Stopped,
 }
@@ -221,9 +223,25 @@ pub struct WorkerDispatcher {
     tx: mpsc::Sender<WorkItem>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TaskContextData {
+    pub parent_outputs: HashMap<String, Value>,
+    pub cancel_token: Option<CancellationToken>,
+    pub run_opts: RunOpts,
+    pub retry_count: u32,
+    pub filter_payload: Option<Value>,
+    pub worker_id: Option<String>,
+    pub trigger_data: TriggerData,
+    pub errors: HashMap<String, String>,
+}
+
 impl WorkerDispatcher {
     pub(crate) fn new(tx: mpsc::Sender<WorkItem>) -> Self {
         Self { tx }
+    }
+
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
     }
 
     pub(crate) async fn run_task_json(
@@ -243,13 +261,32 @@ impl WorkerDispatcher {
         ids: ContextIds,
         cancel_token: Option<CancellationToken>,
     ) -> Result<Value> {
+        self.run_task_json_with_context(
+            task_name,
+            input,
+            ids,
+            TaskContextData {
+                cancel_token,
+                ..TaskContextData::default()
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn run_task_json_with_context(
+        &self,
+        task_name: &str,
+        input: Value,
+        ids: ContextIds,
+        context: TaskContextData,
+    ) -> Result<Value> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(WorkItem::RunTask {
                 task_name: task_name.to_owned(),
                 input,
                 ids,
-                cancel_token,
+                context,
                 reply: reply_tx,
             })
             .await
@@ -278,6 +315,27 @@ impl WorkerDispatcher {
         invocation_count: u32,
         cancel_token: Option<CancellationToken>,
     ) -> Result<Value> {
+        self.run_durable_task_json_with_context(
+            task_name,
+            input,
+            ids,
+            invocation_count,
+            TaskContextData {
+                cancel_token,
+                ..TaskContextData::default()
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn run_durable_task_json_with_context(
+        &self,
+        task_name: &str,
+        input: Value,
+        ids: ContextIds,
+        invocation_count: u32,
+        context: TaskContextData,
+    ) -> Result<Value> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(WorkItem::RunDurableTask {
@@ -285,7 +343,7 @@ impl WorkerDispatcher {
                 input,
                 ids,
                 invocation_count,
-                cancel_token,
+                context,
                 reply: reply_tx,
             })
             .await
@@ -444,6 +502,7 @@ impl<T: Transport + 'static> Worker<T> {
         let state = Arc::clone(&self.state);
         let worker_name = self.name.clone();
         let (ready_tx, ready_rx) = watch::channel(WorkerLifecycleState::Starting);
+        let (connection_tx, mut connection_rx) = watch::channel(WorkerConnectionState::Starting);
 
         let cancel_token = CancellationToken::new();
 
@@ -469,6 +528,7 @@ impl<T: Transport + 'static> Worker<T> {
             task_dispatchers,
             durable_task_dispatchers,
             cancel_token: cancel_token.clone(),
+            connection_tx,
         };
 
         let runtime = Arc::new(WorkerRuntime {
@@ -481,29 +541,30 @@ impl<T: Transport + 'static> Worker<T> {
             non_durable_semaphore: Arc::new(Semaphore::new(self.slots)),
             durable_semaphore: Arc::new(Semaphore::new(self.durable_slots)),
             cancellation_grace_period: self.cancellation_grace_period,
+            shutdown_token: cancel_token.clone(),
         });
 
-        let health_server = if let Some(port) = self.health_port {
+        let health_state = self.health_port.map(|_| {
             let actions = runtime
                 .non_durable_registry
                 .keys()
                 .chain(runtime.durable_registry.keys())
                 .map(|task_name| format!("default:{task_name}"))
                 .collect();
-            Some(HealthServer::start_detached(
-                port,
-                Arc::new(RwLock::new(HealthState {
-                    worker_name: worker_name.clone(),
-                    slots: self.slots,
-                    durable_slots: self.durable_slots,
-                    actions,
-                    labels: initial_labels,
-                    healthy: true,
-                })),
-            ))
-        } else {
-            None
-        };
+            Arc::new(RwLock::new(HealthState {
+                worker_name: worker_name.clone(),
+                slots: self.slots,
+                durable_slots: self.durable_slots,
+                actions,
+                labels: initial_labels,
+                healthy: false,
+            }))
+        });
+
+        let health_server = self
+            .health_port
+            .zip(health_state.as_ref())
+            .map(|(port, state)| HealthServer::start_detached(port, Arc::clone(state)));
 
         let mut health_server = match health_server {
             Some(Ok(server)) => Some(server),
@@ -516,7 +577,9 @@ impl<T: Transport + 'static> Worker<T> {
         };
 
         let worker_name_for_start = worker_name.clone();
-        tokio::spawn(async move {
+        let runtime_tx = tx.clone();
+        let health_state_for_transport = health_state.clone();
+        let transport_join = tokio::spawn(async move {
             {
                 let mut features = state.write().await;
                 features.workers.insert(
@@ -533,12 +596,49 @@ impl<T: Transport + 'static> Worker<T> {
                 );
             }
 
-            let _ = ready_tx.send(WorkerLifecycleState::Ready);
-            let result = transport.start_worker_loop(opts).await;
-            let _ = ready_tx.send(match result {
+            let transport_loop = transport.start_worker_loop(opts);
+            tokio::pin!(transport_loop);
+            let result = loop {
+                tokio::select! {
+                    result = &mut transport_loop => break result,
+                    changed = connection_rx.changed() => {
+                        if changed.is_err() {
+                            break Err(Error::Worker(
+                                "worker connection state channel closed".to_owned(),
+                            ));
+                        }
+                        let connection_state = connection_rx.borrow().clone();
+                        match connection_state {
+                            WorkerConnectionState::Starting => {}
+                            WorkerConnectionState::Ready => {
+                                if let Some(health_state) = &health_state_for_transport {
+                                    health_state.write().await.healthy = true;
+                                }
+                                let _ = ready_tx.send(WorkerLifecycleState::Ready);
+                            }
+                            WorkerConnectionState::Reconnecting(message) => {
+                                eprintln!(
+                                    "worker '{worker_name_for_start}' reconnecting: {message}"
+                                );
+                                if let Some(health_state) = &health_state_for_transport {
+                                    health_state.write().await.healthy = false;
+                                }
+                                let _ = ready_tx.send(WorkerLifecycleState::Reconnecting);
+                            }
+                        }
+                    }
+                }
+            };
+
+            if let Some(health_state) = &health_state_for_transport {
+                health_state.write().await.healthy = false;
+            }
+            let _ = ready_tx.send(match &result {
                 Ok(()) => WorkerLifecycleState::Stopped,
                 Err(error) => WorkerLifecycleState::Failed(error.to_string()),
             });
+            let _ = runtime_tx.send(WorkItem::Shutdown).await;
+            result
         });
 
         let join = tokio::spawn(async move {
@@ -548,6 +648,7 @@ impl<T: Transport + 'static> Worker<T> {
         Ok(WorkerHandle {
             tx,
             join: Some(join),
+            transport_join: Some(transport_join),
             paused,
             labels,
             cancel_token,
@@ -571,6 +672,7 @@ impl<T: Transport + 'static> Worker<T> {
 pub struct WorkerHandle {
     tx: mpsc::Sender<WorkItem>,
     join: Option<JoinHandle<()>>,
+    transport_join: Option<JoinHandle<Result<()>>>,
     paused: Arc<tokio::sync::RwLock<bool>>,
     labels: Arc<tokio::sync::RwLock<BTreeMap<String, String>>>,
     cancel_token: CancellationToken,
@@ -616,7 +718,7 @@ impl WorkerHandle {
                 task_name: task_name.to_owned(),
                 input,
                 ids,
-                cancel_token: None,
+                context: TaskContextData::default(),
                 reply: reply_tx,
             })
             .await
@@ -645,7 +747,7 @@ impl WorkerHandle {
                 input,
                 ids,
                 invocation_count,
-                cancel_token: None,
+                context: TaskContextData::default(),
                 reply: reply_tx,
             })
             .await
@@ -778,9 +880,42 @@ impl WorkerHandle {
     ///
     /// Returns an error if the runtime task panics.
     pub async fn wait(mut self) -> Result<()> {
-        if let Some(join) = self.join.take() {
-            join.await
-                .map_err(|error| Error::Worker(format!("worker join failed: {error}")))?;
+        match (self.join.take(), self.transport_join.take()) {
+            (Some(mut runtime_join), Some(mut transport_join)) => {
+                tokio::select! {
+                    runtime_result = &mut runtime_join => {
+                        self.cancel_token.cancel();
+                        runtime_result.map_err(|error| {
+                            Error::Worker(format!("worker runtime join failed: {error}"))
+                        })?;
+                        transport_join.await.map_err(|error| {
+                            Error::Worker(format!("worker transport join failed: {error}"))
+                        })??;
+                    }
+                    transport_result = &mut transport_join => {
+                        self.cancel_token.cancel();
+                        let _ = self.tx.send(WorkItem::Shutdown).await;
+                        let transport_result = transport_result.map_err(|error| {
+                            Error::Worker(format!("worker transport join failed: {error}"))
+                        })?;
+                        runtime_join.await.map_err(|error| {
+                            Error::Worker(format!("worker runtime join failed: {error}"))
+                        })?;
+                        transport_result?;
+                    }
+                }
+            }
+            (Some(runtime_join), None) => {
+                runtime_join.await.map_err(|error| {
+                    Error::Worker(format!("worker runtime join failed: {error}"))
+                })?;
+            }
+            (None, Some(transport_join)) => {
+                transport_join.await.map_err(|error| {
+                    Error::Worker(format!("worker transport join failed: {error}"))
+                })??;
+            }
+            (None, None) => {}
         }
         Ok(())
     }
@@ -808,7 +943,7 @@ impl WorkerHandle {
                             "worker stopped before becoming ready".to_owned(),
                         ));
                     }
-                    WorkerLifecycleState::Starting => {}
+                    WorkerLifecycleState::Starting | WorkerLifecycleState::Reconnecting => {}
                 }
 
                 ready_rx
@@ -827,7 +962,7 @@ pub(crate) enum WorkItem {
         task_name: String,
         input: Value,
         ids: ContextIds,
-        cancel_token: Option<CancellationToken>,
+        context: TaskContextData,
         reply: oneshot::Sender<Result<Value>>,
     },
     RunDurableTask {
@@ -835,10 +970,19 @@ pub(crate) enum WorkItem {
         input: Value,
         ids: ContextIds,
         invocation_count: u32,
-        cancel_token: Option<CancellationToken>,
+        context: TaskContextData,
         reply: oneshot::Sender<Result<Value>>,
     },
     Shutdown,
+}
+
+struct DurableInvocation {
+    task_name: String,
+    input: Value,
+    ids: ContextIds,
+    invocation_count: u32,
+    context: TaskContextData,
+    reply: oneshot::Sender<Result<Value>>,
 }
 
 struct WorkerRuntime<T: Transport> {
@@ -851,6 +995,7 @@ struct WorkerRuntime<T: Transport> {
     non_durable_semaphore: Arc<Semaphore>,
     durable_semaphore: Arc<Semaphore>,
     cancellation_grace_period: Duration,
+    shutdown_token: CancellationToken,
 }
 
 impl<T: Transport + 'static> WorkerRuntime<T> {
@@ -863,13 +1008,13 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                     task_name,
                     input,
                     ids,
-                    cancel_token,
+                    context,
                     reply,
                 } => {
                     let runtime = Arc::clone(&self);
                     join_set.spawn(async move {
                         runtime
-                            .execute_non_durable(task_name, input, ids, cancel_token, reply)
+                            .execute_non_durable(task_name, input, ids, context, reply)
                             .await;
                     });
                 }
@@ -878,20 +1023,20 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                     input,
                     ids,
                     invocation_count,
-                    cancel_token,
+                    context,
                     reply,
                 } => {
                     let runtime = Arc::clone(&self);
                     join_set.spawn(async move {
                         runtime
-                            .execute_durable(
+                            .execute_durable(DurableInvocation {
                                 task_name,
                                 input,
                                 ids,
                                 invocation_count,
-                                cancel_token,
+                                context,
                                 reply,
-                            )
+                            })
                             .await;
                     });
                 }
@@ -901,7 +1046,14 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
             while join_set.try_join_next().is_some() {}
         }
 
-        while join_set.join_next().await.is_some() {}
+        let drain = async { while join_set.join_next().await.is_some() {} };
+        if tokio::time::timeout(self.cancellation_grace_period, drain)
+            .await
+            .is_err()
+        {
+            join_set.abort_all();
+            while join_set.join_next().await.is_some() {}
+        }
     }
 
     fn spawn_cancellation_monitor(
@@ -952,16 +1104,27 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         task_name: String,
         input: Value,
         ids: ContextIds,
-        cancel_token: Option<CancellationToken>,
+        context: TaskContextData,
         reply: oneshot::Sender<Result<Value>>,
     ) {
+        let TaskContextData {
+            parent_outputs,
+            cancel_token,
+            run_opts,
+            retry_count,
+            filter_payload,
+            worker_id,
+            trigger_data,
+            errors,
+        } = context;
+        let cancel_token = combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
         let workflow_run_id = ids.workflow_run_id.clone();
         let resolve_run = ids.workflow_name == ids.task_name;
         let completed = Arc::new(AtomicBool::new(false));
         let (monitor, warned) = self.spawn_cancellation_monitor(
             &task_name,
             &ids,
-            cancel_token.clone(),
+            Some(cancel_token.clone()),
             Arc::clone(&completed),
         );
         let result = match self.non_durable_semaphore.clone().acquire_owned().await {
@@ -984,9 +1147,20 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                         )))
                     } else {
                         let _task_permit = acquire_task_permit(handler.concurrency_limit()).await;
-                        let ctx = InMemoryContext::new(ids, Arc::clone(&self.transport))
+                        let mut ctx = InMemoryContext::new(ids, Arc::clone(&self.transport))
+                            .with_run_opts(&run_opts)
+                            .with_retry_count(retry_count)
                             .with_worker_labels(worker_labels)
-                            .with_cancel_token(cancel_token.unwrap_or_default());
+                            .with_cancel_token(cancel_token)
+                            .with_parent_outputs(parent_outputs)
+                            .with_trigger_data(trigger_data)
+                            .with_errors(errors);
+                        if let Some(payload) = filter_payload {
+                            ctx = ctx.with_filter_payload(payload);
+                        }
+                        if let Some(worker_id) = worker_id {
+                            ctx = ctx.with_worker_id(worker_id);
+                        }
                         handler.call(input, ctx).await
                     }
                 }
@@ -1026,21 +1200,33 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         let _ = reply.send(result);
     }
 
-    async fn execute_durable(
-        self: Arc<Self>,
-        task_name: String,
-        input: Value,
-        ids: ContextIds,
-        invocation_count: u32,
-        cancel_token: Option<CancellationToken>,
-        reply: oneshot::Sender<Result<Value>>,
-    ) {
+    async fn execute_durable(self: Arc<Self>, invocation: DurableInvocation) {
+        let DurableInvocation {
+            task_name,
+            input,
+            ids,
+            invocation_count,
+            context,
+            reply,
+        } = invocation;
+        let TaskContextData {
+            parent_outputs,
+            cancel_token,
+            run_opts,
+            retry_count,
+            filter_payload,
+            worker_id,
+            trigger_data,
+            errors,
+        } = context;
+        let mut cancel_token =
+            combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
         let workflow_run_id = ids.workflow_run_id.clone();
         let resolve_run = ids.workflow_name == ids.task_name;
         let completed = Arc::new(AtomicBool::new(false));
 
         // Merge any server-eviction cancel with the existing cancel token.
-        let cancel_token = if let Some(listener) = self.transport.durable_listener() {
+        if let Some(listener) = self.transport.durable_listener() {
             let task_id = ids.task_run_id.clone();
             let inv = invocation_count as i32;
             let mut evict_rx = listener.subscribe_evictions();
@@ -1061,28 +1247,15 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                     }
                 }
             });
-            // If there's also an existing cancel token, combine them.
-            match cancel_token {
-                Some(existing) => {
-                    let combined = CancellationToken::new();
-                    let combined_clone = combined.clone();
-                    let existing_clone = existing.clone();
-                    tokio::spawn(async move {
-                        tokio::select! {
-                            _ = existing_clone.cancelled() => combined_clone.cancel(),
-                            _ = evict_token.cancelled() => combined_clone.cancel(),
-                        }
-                    });
-                    Some(combined)
-                }
-                None => Some(evict_token),
-            }
-        } else {
-            cancel_token
-        };
+            cancel_token = combine_cancellation_tokens(Some(cancel_token), evict_token);
+        }
 
-        let (monitor, warned) =
-            self.spawn_cancellation_monitor(&task_name, &ids, cancel_token, Arc::clone(&completed));
+        let (monitor, warned) = self.spawn_cancellation_monitor(
+            &task_name,
+            &ids,
+            Some(cancel_token.clone()),
+            Arc::clone(&completed),
+        );
         let result = match self.durable_semaphore.clone().acquire_owned().await {
             Ok(_permit) => {
                 let Some(handler) = self.durable_registry.get(&task_name).cloned() else {
@@ -1108,7 +1281,19 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                             Arc::clone(&self.transport),
                             invocation_count,
                         )
-                        .with_worker_labels(worker_labels);
+                        .with_run_opts(&run_opts)
+                        .with_retry_count(retry_count)
+                        .with_worker_labels(worker_labels)
+                        .with_cancel_token(cancel_token)
+                        .with_parent_outputs(parent_outputs)
+                        .with_trigger_data(trigger_data)
+                        .with_errors(errors);
+                        if let Some(payload) = filter_payload {
+                            ctx = ctx.with_filter_payload(payload);
+                        }
+                        if let Some(worker_id) = worker_id {
+                            ctx = ctx.with_worker_id(worker_id);
+                        }
                         if let Some(listener) = self.transport.durable_listener() {
                             ctx = ctx.with_durable_listener(listener);
                         }
@@ -1155,6 +1340,24 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
     }
 }
 
+fn combine_cancellation_tokens(
+    existing: Option<CancellationToken>,
+    shutdown: CancellationToken,
+) -> CancellationToken {
+    let Some(existing) = existing else {
+        return shutdown;
+    };
+    let combined = CancellationToken::new();
+    let combined_for_task = combined.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = existing.cancelled() => combined_for_task.cancel(),
+            _ = shutdown.cancelled() => combined_for_task.cancel(),
+        }
+    });
+    combined
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1163,7 +1366,7 @@ mod tests {
 
     use crate::client::Client;
     use crate::transport::InMemoryTransport;
-    use hatchet_core::WorkflowRunId;
+    use another_hatchet_core::WorkflowRunId;
 
     fn test_ids(task_name: &str) -> ContextIds {
         ContextIds {
@@ -1202,7 +1405,10 @@ mod tests {
                 task_name: "ignore-cancel".to_owned(),
                 input: json!(null),
                 ids: test_ids("ignore-cancel"),
-                cancel_token: Some(cancel_token.clone()),
+                context: TaskContextData {
+                    cancel_token: Some(cancel_token.clone()),
+                    ..TaskContextData::default()
+                },
                 reply: reply_tx,
             })
             .await
@@ -1258,7 +1464,10 @@ mod tests {
                 task_name: "cooperative".to_owned(),
                 input: json!(null),
                 ids: test_ids("cooperative"),
-                cancel_token: Some(cancel_token.clone()),
+                context: TaskContextData {
+                    cancel_token: Some(cancel_token.clone()),
+                    ..TaskContextData::default()
+                },
                 reply: reply_tx,
             })
             .await
@@ -1279,5 +1488,55 @@ mod tests {
         );
 
         worker.shutdown().await.expect("worker should shut down");
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_a_handler_after_the_cancellation_grace_period() {
+        let transport = Arc::new(InMemoryTransport::new());
+        let client = Client::new(Arc::clone(&transport));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_for_handler = Arc::clone(&started);
+        let worker = client
+            .worker("bounded-shutdown-worker")
+            .cancellation_grace_period(Duration::from_millis(10))
+            .register_task(
+                &client.task::<(), ()>("never-finishes"),
+                move |_input, _ctx| {
+                    let started = Arc::clone(&started_for_handler);
+                    async move {
+                        started.notify_one();
+                        std::future::pending::<()>().await;
+                        Ok(())
+                    }
+                },
+            )
+            .build()
+            .start()
+            .expect("worker should start");
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        worker
+            .tx
+            .send(WorkItem::RunTask {
+                task_name: "never-finishes".to_owned(),
+                input: json!(null),
+                ids: test_ids("never-finishes"),
+                context: TaskContextData::default(),
+                reply: reply_tx,
+            })
+            .await
+            .expect("dispatch should succeed");
+        tokio::time::timeout(Duration::from_millis(100), started.notified())
+            .await
+            .expect("handler should start");
+
+        tokio::time::timeout(Duration::from_millis(250), worker.shutdown())
+            .await
+            .expect("shutdown should be bounded")
+            .expect("worker should shut down cleanly");
+        assert!(
+            reply_rx.await.is_err(),
+            "aborted task should drop its reply"
+        );
     }
 }

@@ -1,9 +1,17 @@
 [package]
-name = "hatchet-core"
+name = "another-hatchet-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
+description = "Shared types for another-hatchet-sdk"
+readme = "../../README.md"
+keywords = ["hatchet", "workflow", "task-queue"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

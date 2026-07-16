@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use hatchet_sdk::{Client, InMemoryTransport, RateLimitDuration, Result};
+use another_hatchet_sdk::{Client, InMemoryTransport, RateLimitDuration, Result};
 
 /// Demonstrates the same rate-limit client API with `InMemoryTransport`.
 /// This is useful for local/offline checks because it does not require Hatchet
@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     let limits = client.rate_limits().list().await?;
     assert_eq!(limits.get("api-burst").copied(), Some(100));
 
-    client.rate_limits().put("compat-local", 5).await;
+    client.rate_limits().put("compat-local", 5).await?;
     assert_eq!(
         client
             .rate_limits()
@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
         Some(5)
     );
 
-    client.rate_limits().delete("compat-local").await;
+    client.rate_limits().delete("compat-local").await?;
     assert!(
         !client
             .rate_limits()

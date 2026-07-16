@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use another_hatchet_core::{RunOpts, WorkflowRunId};
 use async_trait::async_trait;
-use hatchet_core::{RunOpts, WorkflowRunId};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
@@ -17,15 +17,20 @@ use tonic::transport::Channel;
 use tonic::{Request, Status};
 
 use crate::clients::LogRecord;
-use crate::config::{HatchetConfig, TlsConfig};
-use crate::context::LogLevel;
+use crate::config::{
+    HatchetConfig, apply_namespace, apply_workflow_namespace, normalize_namespace,
+};
+use crate::context::{LogLevel, TriggerData};
 use crate::durable::RenderedConditions;
 use crate::error::{Error, Result};
 use crate::proto;
 use crate::rest_client::RestApiClient;
 use crate::retry::{RetryConfig, retry};
 use crate::transport::{Transport, WorkerStartOpts, WorkflowRegistration};
+use crate::worker::TaskContextData;
 use crate::workflow::{WorkflowDeclaration, workflow_leaf_names};
+
+const MAX_COMPLETED_RUNS: usize = 1_024;
 
 /// gRPC transport that connects to a real Hatchet engine.
 ///
@@ -71,59 +76,9 @@ impl GrpcTransport {
     /// # Errors
     ///
     /// Returns an error if the channel cannot be constructed (e.g. TLS misconfiguration).
-    pub async fn from_config(config: HatchetConfig) -> Result<Self> {
-        let endpoint_url = config.endpoint_url();
-        let mut endpoint = Channel::from_shared(endpoint_url.clone()).map_err(|error| {
-            Error::Transport(format!("invalid endpoint URL '{endpoint_url}': {error}"))
-        })?;
-
-        match &config.tls {
-            TlsConfig::Insecure => {
-                // No TLS configuration needed
-            }
-            TlsConfig::System => {
-                let tls = tonic::transport::ClientTlsConfig::new();
-                endpoint = endpoint.tls_config(tls).map_err(|error| {
-                    Error::Transport(format!("system TLS config failed: {error}"))
-                })?;
-            }
-            TlsConfig::Custom {
-                ca_cert,
-                client_cert,
-                client_key,
-                server_name,
-            } => {
-                let ca_pem: Vec<u8> = tokio::fs::read(ca_cert).await.map_err(|error| {
-                    Error::Transport(format!("failed to read CA cert: {error}"))
-                })?;
-                let ca = tonic::transport::Certificate::from_pem(ca_pem);
-                let mut tls = tonic::transport::ClientTlsConfig::new().ca_certificate(ca);
-
-                if let (Some(cert_path), Some(key_path)) = (client_cert, client_key) {
-                    let cert_pem: Vec<u8> = tokio::fs::read(cert_path).await.map_err(|error| {
-                        Error::Transport(format!("failed to read client cert: {error}"))
-                    })?;
-                    let key_pem: Vec<u8> = tokio::fs::read(key_path).await.map_err(|error| {
-                        Error::Transport(format!("failed to read client key: {error}"))
-                    })?;
-                    let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
-                    tls = tls.identity(identity);
-                }
-
-                if let Some(name) = server_name {
-                    tls = tls.domain_name(name.clone());
-                }
-
-                endpoint = endpoint.tls_config(tls).map_err(|error| {
-                    Error::Transport(format!("custom TLS config failed: {error}"))
-                })?;
-            }
-        }
-
-        let channel = endpoint
-            .connect()
-            .await
-            .map_err(|error| Error::Transport(format!("gRPC connect failed: {error}")))?;
+    pub async fn from_config(mut config: HatchetConfig) -> Result<Self> {
+        config.namespace = config.namespace.as_deref().and_then(normalize_namespace);
+        let channel = config.connect_channel().await?;
 
         let rest_client = build_rest_client(&config)?;
         let rest_base = format!("{}/api/v1", config.server_url.trim_end_matches('/'));
@@ -195,8 +150,8 @@ impl GrpcTransport {
     /// Creates a tonic `Request` with the bearer token attached.
     fn authed_request<T>(&self, payload: T) -> Request<T> {
         let mut request = Request::new(payload);
-        if let Ok(value) =
-            format!("Bearer {}", self.config.token).parse::<MetadataValue<tonic::metadata::Ascii>>()
+        if let Ok(value) = format!("Bearer {}", self.config.token())
+            .parse::<MetadataValue<tonic::metadata::Ascii>>()
         {
             request.metadata_mut().insert("authorization", value);
         }
@@ -423,16 +378,51 @@ impl GrpcTransport {
         )
         .await
     }
+
+    async fn trigger_top_level_v1(
+        &self,
+        workflow_name: &str,
+        input: &Value,
+        opts: &RunOpts,
+    ) -> Result<WorkflowRunId> {
+        self.rest_api_client
+            .trigger_workflow(
+                workflow_name,
+                input,
+                &opts.additional_metadata,
+                opts.priority.map(priority_to_i32),
+            )
+            .await
+            .map(WorkflowRunId)
+    }
 }
 
 #[async_trait]
 impl Transport for GrpcTransport {
+    fn namespace(&self) -> Option<&str> {
+        self.config.namespace.as_deref()
+    }
+
     async fn run_workflow(
         &self,
         workflow_name: &str,
         input: Value,
         opts: RunOpts,
     ) -> Result<WorkflowRunId> {
+        let workflow_name =
+            apply_workflow_namespace(workflow_name, self.config.namespace.as_deref());
+        if opts.parent_workflow_run_id.is_none()
+            && opts.parent_task_run_id.is_none()
+            && opts.desired_worker_labels.is_empty()
+        {
+            let response = self
+                .trigger_top_level_v1(&workflow_name, &input, &opts)
+                .await?;
+            self.remember_run_output_tasks(&workflow_name, &response)
+                .await;
+            return Ok(response);
+        }
+
         let additional_metadata = if opts.additional_metadata.is_empty() {
             None
         } else {
@@ -449,7 +439,7 @@ impl Transport for GrpcTransport {
             .collect();
 
         let trigger = proto::v1::TriggerWorkflowRequest {
-            name: workflow_name.to_owned(),
+            name: workflow_name.clone(),
             input: serde_json::to_string(&input).unwrap_or_default(),
             parent_id: opts.parent_workflow_run_id.clone(),
             parent_task_run_external_id: opts.parent_task_run_id.clone(),
@@ -480,7 +470,7 @@ impl Transport for GrpcTransport {
         )
         .await?;
 
-        self.remember_run_output_tasks(workflow_name, &response)
+        self.remember_run_output_tasks(&workflow_name, &response)
             .await;
 
         Ok(response)
@@ -492,6 +482,8 @@ impl Transport for GrpcTransport {
         inputs: Vec<Value>,
         opts: RunOpts,
     ) -> Result<Vec<WorkflowRunId>> {
+        let workflow_name =
+            apply_workflow_namespace(workflow_name, self.config.namespace.as_deref());
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
@@ -525,7 +517,7 @@ impl Transport for GrpcTransport {
                     opts.child_index.map(|ci| ci as i32)
                 };
                 proto::v1::TriggerWorkflowRequest {
-                    name: workflow_name.to_owned(),
+                    name: workflow_name.clone(),
                     input: serde_json::to_string(&input).unwrap_or_default(),
                     parent_id: opts.parent_workflow_run_id.clone(),
                     parent_task_run_external_id: opts.parent_task_run_id.clone(),
@@ -568,7 +560,7 @@ impl Transport for GrpcTransport {
         )
         .await?;
 
-        self.remember_bulk_run_output_tasks(workflow_name, &response)
+        self.remember_bulk_run_output_tasks(&workflow_name, &response)
             .await;
 
         Ok(response)
@@ -588,21 +580,37 @@ impl Transport for GrpcTransport {
         // TypeScript SDK's WorkflowRunRef, which waits through the run listener
         // rather than an in-process channel.
         let result = self.poll_run_result(run_id).await;
-        self.run_output_tasks.lock().await.remove(run_id);
-        self.completed
-            .lock()
-            .await
-            .insert(run_id.clone(), result.clone());
+        if result.is_ok() {
+            self.run_output_tasks.lock().await.remove(run_id);
+            let mut completed = self.completed.lock().await;
+            if completed.len() >= MAX_COMPLETED_RUNS
+                && !completed.contains_key(run_id)
+                && let Some(oldest) = completed.keys().next().cloned()
+            {
+                completed.remove(&oldest);
+            }
+            completed.insert(run_id.clone(), result.clone());
+        }
         result
     }
 
     async fn resolve_result(&self, run_id: &WorkflowRunId, result: Result<Value>) {
         self.run_output_tasks.lock().await.remove(run_id);
-        self.completed.lock().await.insert(run_id.clone(), result);
+        let mut completed = self.completed.lock().await;
+        if completed.len() >= MAX_COMPLETED_RUNS
+            && !completed.contains_key(run_id)
+            && let Some(oldest) = completed.keys().next().cloned()
+        {
+            completed.remove(&oldest);
+        }
+        completed.insert(run_id.clone(), result);
+    }
+
+    async fn cancel_workflow_run(&self, run_id: &WorkflowRunId) -> Result<()> {
+        self.rest_api_client.cancel_run(&run_id.0).await
     }
 
     async fn start_worker_loop(&self, opts: WorkerStartOpts) -> Result<()> {
-        // Find all actions
         let mut actions = Vec::new();
         for action in opts.task_dispatchers.keys() {
             actions.push(worker_action_id(action));
@@ -610,89 +618,206 @@ impl Transport for GrpcTransport {
         for action in opts.durable_task_dispatchers.keys() {
             actions.push(worker_action_id(action));
         }
+        let mut connected_once = false;
+        let mut reconnect_backoff = std::time::Duration::from_secs(1);
 
-        let response = self
-            .register_worker(
-                &opts.worker_name,
-                actions,
-                opts.labels.clone(),
-                opts.slot_config.clone(),
-            )
-            .await?;
-
-        let worker_id = response.worker_id;
-
-        // Start the durable listener stream (if durable tasks are registered)
-        if !opts.durable_task_dispatchers.is_empty() {
-            match crate::durable_listener::DurableListenerClient::start(
-                self.config.clone(),
-                worker_id.clone(),
-            )
-            .await
-            {
-                Ok(listener) => {
-                    if let Ok(mut guard) = self.durable_listener.write() {
-                        *guard = Some(Arc::new(listener));
-                    }
-                }
-                Err(_error) => {}
-            }
-        }
-
-        // 1. Start heartbeat loop
-        let heartbeat_transport = self.clone();
-        let cancel_token = opts.cancel_token.clone();
-        let heartbeat_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(4));
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let _ = heartbeat_transport.heartbeat().await;
-                    }
-                    _ = cancel_token.cancelled() => {
-                        break;
-                    }
-                }
-            }
-        });
-
-        // 2. Open action stream
-        let mut stream: tonic::Streaming<proto::dispatcher::AssignedAction> = retry(
-            || async { self.listen(&worker_id).await },
-            &self.retry_config,
-        )
-        .await?;
-
-        // 3. Process actions
         loop {
-            tokio::select! {
-                message = stream.message() => {
-                    match message {
-                        Ok(Some(action)) => {
-                            self.handle_assigned_action(action, &opts.worker_name, &worker_id, &opts).await;
+            if opts.cancel_token.is_cancelled() {
+                return Ok(());
+            }
+
+            let response = match self
+                .register_worker(
+                    &opts.worker_name,
+                    actions.clone(),
+                    opts.labels.clone(),
+                    opts.slot_config.clone(),
+                )
+                .await
+            {
+                Ok(response) => response,
+                Err(error) if !connected_once => return Err(error),
+                Err(error) => {
+                    let _ = opts.connection_tx.send(
+                        crate::transport::WorkerConnectionState::Reconnecting(error.to_string()),
+                    );
+                    tokio::select! {
+                        _ = opts.cancel_token.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(reconnect_backoff) => {}
+                    }
+                    reconnect_backoff =
+                        (reconnect_backoff * 2).min(std::time::Duration::from_secs(30));
+                    continue;
+                }
+            };
+            let worker_id = response.worker_id;
+
+            let mut durable_listener = if opts.durable_task_dispatchers.is_empty() {
+                None
+            } else {
+                match crate::durable_listener::DurableListenerClient::start(
+                    self.config.clone(),
+                    worker_id.clone(),
+                )
+                .await
+                {
+                    Ok(listener) => Some(Arc::new(listener)),
+                    Err(error) if !connected_once => return Err(error),
+                    Err(error) => {
+                        let _ = opts.connection_tx.send(
+                            crate::transport::WorkerConnectionState::Reconnecting(
+                                error.to_string(),
+                            ),
+                        );
+                        tokio::select! {
+                            _ = opts.cancel_token.cancelled() => return Ok(()),
+                            _ = tokio::time::sleep(reconnect_backoff) => {}
                         }
-                        Ok(None) => {
-                            // Stream closed by server or disconnect.
-                            // In a full implementation, we should reconnect the listen stream.
-                            break;
-                        }
-                        Err(_error) => break,
+                        reconnect_backoff =
+                            (reconnect_backoff * 2).min(std::time::Duration::from_secs(30));
+                        continue;
                     }
                 }
-                _ = opts.cancel_token.cancelled() => {
-                    break;
-                }
-            }
-        }
+            };
 
-        heartbeat_handle.abort();
-        Ok(())
+            // Tonic waits for response headers before returning a server stream,
+            // while Hatchet's ListenV2 endpoint may not flush those headers until
+            // the first assignment. Start listening and heartbeating together,
+            // and report readiness after the first successful heartbeat. This
+            // mirrors the official TypeScript SDK, whose async iterable starts
+            // ListenV2 without awaiting a response before starting heartbeats.
+            let mut listen = Box::pin(retry(
+                || async { self.listen(&worker_id).await },
+                &self.retry_config,
+            ));
+            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(4));
+            let mut stream = None;
+            let mut ready_sent = false;
+
+            let stream_result = loop {
+                tokio::select! {
+                    _ = opts.cancel_token.cancelled() => return Ok(()),
+                    result = &mut listen, if stream.is_none() => {
+                        match result {
+                            Ok(connected_stream) => {
+                                stream = Some(connected_stream);
+                                if ready_sent {
+                                    break Ok(stream.expect("stream was just stored"));
+                                }
+                            }
+                            Err(error) => break Err(error),
+                        }
+                    }
+                    _ = heartbeat.tick() => {
+                        if let Err(error) = self.heartbeat().await {
+                            break Err(error);
+                        }
+                        if !ready_sent {
+                            if let Ok(mut guard) = self.durable_listener.write() {
+                                *guard = durable_listener.take();
+                            }
+                            connected_once = true;
+                            reconnect_backoff = std::time::Duration::from_secs(1);
+                            let _ = opts
+                                .connection_tx
+                                .send(crate::transport::WorkerConnectionState::Ready);
+                            ready_sent = true;
+                            if let Some(connected_stream) = stream.take() {
+                                break Ok(connected_stream);
+                            }
+                        }
+                    }
+                }
+            };
+
+            let mut stream: tonic::Streaming<proto::dispatcher::AssignedAction> =
+                match stream_result {
+                    Ok(stream) => stream,
+                    Err(error) if !connected_once => return Err(error),
+                    Err(error) => {
+                        if let Ok(mut guard) = self.durable_listener.write() {
+                            *guard = None;
+                        }
+                        let _ = opts.connection_tx.send(
+                            crate::transport::WorkerConnectionState::Reconnecting(
+                                error.to_string(),
+                            ),
+                        );
+                        tokio::select! {
+                            _ = opts.cancel_token.cancelled() => return Ok(()),
+                            _ = tokio::time::sleep(reconnect_backoff) => {}
+                        }
+                        reconnect_backoff =
+                            (reconnect_backoff * 2).min(std::time::Duration::from_secs(30));
+                        continue;
+                    }
+                };
+            let (lifecycle_failure_tx, mut lifecycle_failure_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let disconnect_reason = loop {
+                tokio::select! {
+                    _ = opts.cancel_token.cancelled() => return Ok(()),
+                    failure = lifecycle_failure_rx.recv() => {
+                        break failure.unwrap_or_else(|| {
+                            "worker lifecycle failure channel closed".to_owned()
+                        });
+                    }
+                    _ = heartbeat.tick() => {
+                        if let Err(error) = self.heartbeat().await {
+                            break format!("worker heartbeat failed: {error}");
+                        }
+                    }
+                    message = stream.message() => {
+                        match message {
+                            Ok(Some(action)) => {
+                                if let Err(error) = self.handle_assigned_action(
+                                    action,
+                                    &opts.worker_name,
+                                    &worker_id,
+                                    &opts,
+                                    lifecycle_failure_tx.clone(),
+                                )
+                                .await
+                                {
+                                    break format!("worker action handling failed: {error}");
+                                }
+                            }
+                            Ok(None) => {
+                                break "worker action stream closed by the engine".to_owned();
+                            }
+                            Err(error) => break format!("worker action stream failed: {error}"),
+                        }
+                    }
+                }
+            };
+
+            if let Ok(mut guard) = self.durable_listener.write() {
+                *guard = None;
+            }
+            let _ = opts
+                .connection_tx
+                .send(crate::transport::WorkerConnectionState::Reconnecting(
+                    disconnect_reason,
+                ));
+            tokio::select! {
+                _ = opts.cancel_token.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(reconnect_backoff) => {}
+            }
+            reconnect_backoff = (reconnect_backoff * 2).min(std::time::Duration::from_secs(30));
+        }
     }
 
     async fn register_workflow_definition(
         &self,
-        definition: WorkflowDeclaration<Value, Value>,
+        mut definition: WorkflowDeclaration<Value, Value>,
     ) -> Result<()> {
+        definition.name =
+            apply_workflow_namespace(&definition.name, self.config.namespace.as_deref());
+        definition.on_events = definition
+            .on_events
+            .into_iter()
+            .map(|event| apply_namespace(&event, self.config.namespace.as_deref()))
+            .collect();
         let output_tasks = workflow_leaf_names(&definition.steps);
         let registration =
             WorkflowRegistration::from_declaration(&definition, self.config.namespace.as_deref());
@@ -702,15 +827,28 @@ impl Transport for GrpcTransport {
             .iter()
             .map(|task| rendered_to_proto_task(task, &registration))
             .collect();
-        let on_failure_task = definition
-            .on_failure
-            .as_ref()
-            .and_then(|failure_task_name| {
-                tasks
-                    .iter()
-                    .find(|task| task.readable_id == *failure_task_name)
-                    .cloned()
-            });
+        let on_failure_task = definition.on_failure.as_ref().map(|failure_task_name| {
+            let config = &definition.task_defaults;
+            rendered_to_proto_task(
+                &crate::transport::TaskRegistration {
+                    readable_id: failure_task_name.clone(),
+                    action: worker_action_id(failure_task_name),
+                    timeout: config.execution_timeout,
+                    schedule_timeout: config.schedule_timeout,
+                    parents: Vec::new(),
+                    retries: config.retries,
+                    rate_limits: config.rate_limits.clone(),
+                    worker_labels: config.desired_worker_labels.clone(),
+                    backoff_factor: config.backoff.as_ref().map(|backoff| backoff.factor),
+                    backoff_max_seconds: config.backoff.as_ref().map(|backoff| backoff.max_seconds),
+                    concurrency: config.concurrency.clone(),
+                    slot_requests: config.slot_requests.clone(),
+                    conditions: RenderedConditions::default(),
+                    is_durable: definition.on_failure_is_durable,
+                },
+                &registration,
+            )
+        });
 
         let create_request = proto::v1::CreateWorkflowVersionRequest {
             name: registration.name.clone(),
@@ -732,13 +870,10 @@ impl Transport for GrpcTransport {
                     expression: c.expression.clone(),
                     max_runs: c.max_runs.map(|m| m as i32),
                     limit_strategy: c.limit_strategy.as_ref().map(|s| match s {
-                        crate::task::ConcurrencyLimitStrategy::QueueNewRuns => {
-                            proto::v1::ConcurrencyLimitStrategy::QueueNewest.into()
-                        }
                         crate::task::ConcurrencyLimitStrategy::CancelInProgress => {
                             proto::v1::ConcurrencyLimitStrategy::CancelInProgress.into()
                         }
-                        crate::task::ConcurrencyLimitStrategy::CancelOldest => {
+                        crate::task::ConcurrencyLimitStrategy::CancelNewest => {
                             proto::v1::ConcurrencyLimitStrategy::CancelNewest.into()
                         }
                         crate::task::ConcurrencyLimitStrategy::GroupRoundRobin => {
@@ -925,6 +1060,87 @@ impl Transport for GrpcTransport {
         Err(last_error.unwrap_or_else(|| Error::Transport("REST GET logs failed".to_owned())))
     }
 
+    async fn push_event(&self, key: &str, payload: &Value) -> Result<()> {
+        self.push_event_with_scope(key, payload, None).await
+    }
+
+    async fn push_event_with_scope(
+        &self,
+        key: &str,
+        payload: &Value,
+        scope: Option<&str>,
+    ) -> Result<()> {
+        let key = apply_namespace(key, self.config.namespace.as_deref());
+        let request = proto::events::PushEventRequest {
+            key: key.clone(),
+            payload: serde_json::to_string(payload).map_err(|error| {
+                Error::InputSerialization(format!("event '{key}' payload: {error}"))
+            })?,
+            event_timestamp: Some(prost_now()),
+            additional_metadata: None,
+            priority: None,
+            scope: scope.map(str::to_owned),
+        };
+        let events = self.events.clone();
+        retry(
+            || {
+                let mut client = events.clone();
+                let request = self.authed_request(request.clone());
+                async move { client.push(request).await.map(|_| ()).map_err(grpc_error) }
+            },
+            &self.retry_config,
+        )
+        .await
+    }
+
+    async fn bulk_push_events(&self, event_records: &[(String, Value)]) -> Result<()> {
+        let scoped_records = event_records
+            .iter()
+            .map(|(key, payload)| (key.clone(), payload.clone(), None))
+            .collect::<Vec<_>>();
+        self.bulk_push_events_with_scope(&scoped_records).await
+    }
+
+    async fn bulk_push_events_with_scope(
+        &self,
+        event_records: &[(String, Value, Option<String>)],
+    ) -> Result<()> {
+        let events_payload = event_records
+            .iter()
+            .map(|(key, payload, scope)| {
+                Ok(proto::events::PushEventRequest {
+                    key: apply_namespace(key, self.config.namespace.as_deref()),
+                    payload: serde_json::to_string(payload).map_err(|error| {
+                        Error::InputSerialization(format!("event '{key}' payload: {error}"))
+                    })?,
+                    event_timestamp: Some(prost_now()),
+                    additional_metadata: None,
+                    priority: None,
+                    scope: scope.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let request = proto::events::BulkPushEventRequest {
+            events: events_payload,
+        };
+        let events = self.events.clone();
+        retry(
+            || {
+                let mut client = events.clone();
+                let request = self.authed_request(request.clone());
+                async move {
+                    client
+                        .bulk_push(request)
+                        .await
+                        .map(|_| ())
+                        .map_err(grpc_error)
+                }
+            },
+            &self.retry_config,
+        )
+        .await
+    }
+
     async fn upsert_rate_limit(
         &self,
         key: &str,
@@ -1011,7 +1227,8 @@ impl GrpcTransport {
         _worker_name: &str,
         worker_id: &str,
         opts: &crate::transport::WorkerStartOpts,
-    ) {
+        lifecycle_failure_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<()> {
         if action.action_type == proto::dispatcher::ActionType::CancelStepRun as i32 {
             if let Some(token) = self
                 .running_cancellations
@@ -1021,10 +1238,10 @@ impl GrpcTransport {
             {
                 token.cancel();
             }
-            return;
+            return Ok(());
         }
         if action.action_type != proto::dispatcher::ActionType::StartStepRun as i32 {
-            return;
+            return Ok(());
         }
 
         let task_name = resolve_action_task_name(&action, opts);
@@ -1048,7 +1265,7 @@ impl GrpcTransport {
                 .insert(task_run_id.clone(), cancel_token.clone());
 
             // Send STARTED
-            let _ = transport
+            transport
                 .send_step_action_event(proto::dispatcher::StepActionEvent {
                     worker_id: worker_id_clone.clone(),
                     job_id: action.job_id.clone(),
@@ -1062,7 +1279,7 @@ impl GrpcTransport {
                     retry_count: None,
                     should_not_retry: None,
                 })
-                .await;
+                .await?;
 
             let ids = crate::context::ContextIds {
                 workflow_name: action.job_name.clone(),
@@ -1073,28 +1290,52 @@ impl GrpcTransport {
                 workflow_version_id: action.workflow_version_id.clone(),
             };
 
-            let input = serde_json::from_str(&action.action_payload).unwrap_or(Value::Null);
+            let mut decoded = decode_step_action_payload(&action.action_payload);
+            let run_opts = RunOpts {
+                additional_metadata: action
+                    .additional_metadata
+                    .as_deref()
+                    .and_then(|metadata| serde_json::from_str(metadata).ok())
+                    .unwrap_or_default(),
+                priority: priority_from_i32(action.priority),
+                child_key: action.child_workflow_key.clone(),
+                parent_workflow_run_id: action.parent_workflow_run_id.clone(),
+                child_index: action
+                    .child_workflow_index
+                    .and_then(|index| u64::try_from(index).ok()),
+                ..RunOpts::default()
+            };
+            infer_trigger_data_from_metadata(
+                &mut decoded.trigger_data,
+                &run_opts.additional_metadata,
+            );
+            let input = decoded.input;
+            let context = TaskContextData {
+                parent_outputs: decoded.parent_outputs,
+                cancel_token: Some(cancel_token.clone()),
+                run_opts,
+                retry_count: u32::try_from(action.retry_count).unwrap_or_default(),
+                filter_payload: decoded.filter_payload,
+                worker_id: Some(worker_id_clone.clone()),
+                trigger_data: decoded.trigger_data,
+                errors: decoded.errors,
+            };
 
             // Spawn execution
             tokio::spawn(async move {
                 let result = if is_durable {
                     dispatcher
-                        .run_durable_task_json_with_cancel(
+                        .run_durable_task_json_with_context(
                             &task_name,
                             input,
                             ids,
                             action.durable_task_invocation_count.unwrap_or(1) as u32,
-                            Some(cancel_token.clone()),
+                            context,
                         )
                         .await
                 } else {
                     dispatcher
-                        .run_task_json_with_cancel(
-                            &task_name,
-                            input,
-                            ids,
-                            Some(cancel_token.clone()),
-                        )
+                        .run_task_json_with_context(&task_name, input, ids, context)
                         .await
                 };
 
@@ -1104,34 +1345,43 @@ impl GrpcTransport {
                     .await
                     .remove(&task_run_id);
 
-                let (event_type, payload) =
+                let (event_type, payload, should_not_retry) =
                     completion_event_from_result(result, cancel_token.is_cancelled());
 
-                let _ = transport
+                if let Err(error) = transport
                     .send_step_action_event(proto::dispatcher::StepActionEvent {
                         worker_id: worker_id_clone,
                         job_id: action.job_id,
                         job_run_id: action.job_run_id,
                         task_id: action.task_id,
-                        task_run_external_id: task_run_id,
+                        task_run_external_id: task_run_id.clone(),
                         action_id: action.action_id,
                         event_timestamp: Some(prost_now()),
                         event_type: event_type as i32,
                         event_payload: payload,
                         retry_count: None,
-                        should_not_retry: None,
+                        should_not_retry,
                     })
-                    .await;
+                    .await
+                {
+                    let _ = lifecycle_failure_tx.send(format!(
+                        "failed to report completion for task run '{task_run_id}': {error}"
+                    ));
+                }
             });
+            Ok(())
+        } else {
+            Err(Error::Worker(format!(
+                "engine assigned unregistered task '{task_name}'"
+            )))
         }
     }
 
     /// Polls the engine for run completion by calling `GetRunDetails` repeatedly.
     async fn poll_run_result(&self, run_id: &WorkflowRunId) -> Result<Value> {
         let poll_interval = std::time::Duration::from_millis(500);
-        let max_polls = 600; // 5 minutes at 500ms
 
-        for _ in 0..max_polls {
+        loop {
             let details = self.get_run_details(&run_id.0).await?;
 
             if details.done {
@@ -1160,10 +1410,6 @@ impl GrpcTransport {
 
             tokio::time::sleep(poll_interval).await;
         }
-
-        Err(Error::Transport(format!(
-            "timed out waiting for run {run_id} to complete"
-        )))
     }
 }
 
@@ -1179,6 +1425,103 @@ fn resolve_action_task_name(
         return action.action_id.clone();
     }
     action.task_name.clone()
+}
+
+#[derive(Debug, Default)]
+struct DecodedStepActionPayload {
+    input: Value,
+    parent_outputs: HashMap<String, Value>,
+    trigger_data: TriggerData,
+    filter_payload: Option<Value>,
+    errors: HashMap<String, String>,
+}
+
+fn decode_step_action_payload(payload: &str) -> DecodedStepActionPayload {
+    let decoded = serde_json::from_str::<Value>(payload).unwrap_or(Value::Null);
+    let Some(object) = decoded.as_object() else {
+        return DecodedStepActionPayload {
+            input: decoded,
+            ..DecodedStepActionPayload::default()
+        };
+    };
+    let Some(input) = object.get("input") else {
+        return DecodedStepActionPayload {
+            input: decoded,
+            ..DecodedStepActionPayload::default()
+        };
+    };
+    let parent_outputs = object
+        .get("parents")
+        .and_then(Value::as_object)
+        .map(|parents| {
+            parents
+                .iter()
+                .map(|(name, output)| (name.clone(), output.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let triggered_by = object
+        .get("triggered_by")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let triggers = object.get("triggers").and_then(Value::as_object);
+    let filter_payload = triggers
+        .and_then(|values| values.get("filter_payload"))
+        .cloned();
+    let errors = object
+        .get("step_run_errors")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let trigger_data = TriggerData {
+        triggered_by_cron: triggered_by == "cron",
+        triggered_by_event: triggered_by == "event",
+        cron_expression: nested_trigger_string(triggers, "cron", "expression"),
+        event_key: nested_trigger_string(triggers, "event", "key"),
+        scheduled_at: nested_trigger_string(triggers, "schedule", "trigger_at"),
+    };
+
+    DecodedStepActionPayload {
+        input: input.clone(),
+        parent_outputs,
+        trigger_data,
+        filter_payload,
+        errors,
+    }
+}
+
+fn nested_trigger_string(
+    triggers: Option<&serde_json::Map<String, Value>>,
+    trigger: &str,
+    field: &str,
+) -> Option<String> {
+    triggers?
+        .get(trigger)?
+        .get(field)?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
+fn infer_trigger_data_from_metadata(
+    trigger_data: &mut TriggerData,
+    metadata: &HashMap<String, String>,
+) {
+    // Hatchet v1 engines preserve top-level event/cron origin in internal run metadata, while
+    // some versions serialize `triggered_by: "manual"` in the task action payload. Prefer the
+    // richer payload when present, but recover the public context fields from the canonical
+    // metadata keys used by the engine and official SDKs.
+    if let Some(event_key) = metadata.get("hatchet__event_key") {
+        trigger_data.triggered_by_event = true;
+        trigger_data
+            .event_key
+            .get_or_insert_with(|| event_key.to_owned());
+    }
+    if let Some(cron_expression) = metadata.get("hatchet__cron_expression") {
+        trigger_data.triggered_by_cron = true;
+        trigger_data
+            .cron_expression
+            .get_or_insert_with(|| cron_expression.to_owned());
+    }
 }
 
 fn worker_action_id(task_name: &str) -> String {
@@ -1254,11 +1597,12 @@ fn parse_task_output(task_detail: &proto::v1::TaskRunDetail) -> Option<Value> {
 fn completion_event_from_result(
     result: Result<Value>,
     cancelled: bool,
-) -> (proto::dispatcher::StepActionEventType, String) {
+) -> (proto::dispatcher::StepActionEventType, String, Option<bool>) {
     if cancelled {
         return (
             proto::dispatcher::StepActionEventType::StepEventTypeFailed,
             "task cancelled".to_owned(),
+            Some(true),
         );
     }
 
@@ -1266,43 +1610,50 @@ fn completion_event_from_result(
         Ok(val) => (
             proto::dispatcher::StepActionEventType::StepEventTypeCompleted,
             serde_json::to_string(&val).unwrap_or_default(),
+            None,
         ),
-        Err(error) => (
-            proto::dispatcher::StepActionEventType::StepEventTypeFailed,
-            error.to_string(),
-        ),
+        Err(error) => {
+            let should_not_retry = !error.is_retryable();
+            (
+                proto::dispatcher::StepActionEventType::StepEventTypeFailed,
+                error.to_string(),
+                Some(should_not_retry),
+            )
+        }
     }
 }
 
-fn run_opt_label_to_proto(
-    label: &hatchet_core::DesiredWorkerLabelConfig,
+pub(crate) fn run_opt_label_to_proto(
+    label: &another_hatchet_core::DesiredWorkerLabelConfig,
 ) -> proto::v1::DesiredWorkerLabels {
     match label {
-        hatchet_core::DesiredWorkerLabelConfig::Legacy(value) => proto::v1::DesiredWorkerLabels {
-            str_value: Some(value.clone()),
-            int_value: None,
-            required: None,
-            comparator: None,
-            weight: None,
-        },
-        hatchet_core::DesiredWorkerLabelConfig::Rich(config) => {
+        another_hatchet_core::DesiredWorkerLabelConfig::Legacy(value) => {
+            proto::v1::DesiredWorkerLabels {
+                str_value: Some(value.clone()),
+                int_value: None,
+                required: None,
+                comparator: None,
+                weight: None,
+            }
+        }
+        another_hatchet_core::DesiredWorkerLabelConfig::Rich(config) => {
             let comparator = config.comparator.map(|comparator| match comparator {
-                hatchet_core::WorkerLabelComparator::Equal => {
+                another_hatchet_core::WorkerLabelComparator::Equal => {
                     proto::v1::WorkerLabelComparator::Equal
                 }
-                hatchet_core::WorkerLabelComparator::NotEqual => {
+                another_hatchet_core::WorkerLabelComparator::NotEqual => {
                     proto::v1::WorkerLabelComparator::NotEqual
                 }
-                hatchet_core::WorkerLabelComparator::GreaterThan => {
+                another_hatchet_core::WorkerLabelComparator::GreaterThan => {
                     proto::v1::WorkerLabelComparator::GreaterThan
                 }
-                hatchet_core::WorkerLabelComparator::GreaterThanOrEqual => {
+                another_hatchet_core::WorkerLabelComparator::GreaterThanOrEqual => {
                     proto::v1::WorkerLabelComparator::GreaterThanOrEqual
                 }
-                hatchet_core::WorkerLabelComparator::LessThan => {
+                another_hatchet_core::WorkerLabelComparator::LessThan => {
                     proto::v1::WorkerLabelComparator::LessThan
                 }
-                hatchet_core::WorkerLabelComparator::LessThanOrEqual => {
+                another_hatchet_core::WorkerLabelComparator::LessThanOrEqual => {
                     proto::v1::WorkerLabelComparator::LessThanOrEqual
                 }
             });
@@ -1334,7 +1685,7 @@ fn grpc_error(status: Status) -> Error {
 
 fn build_rest_client(config: &HatchetConfig) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
-    let auth = format!("Bearer {}", config.token);
+    let auth = format!("Bearer {}", config.token());
     let auth_value = HeaderValue::from_str(&auth)
         .map_err(|error| Error::Transport(format!("invalid auth header: {error}")))?;
     headers.insert(AUTHORIZATION, auth_value);
@@ -1374,12 +1725,20 @@ fn prost_now() -> prost_types::Timestamp {
     }
 }
 
-fn priority_to_i32(priority: hatchet_core::Priority) -> i32 {
+pub(crate) fn priority_to_i32(priority: another_hatchet_core::Priority) -> i32 {
     match priority {
-        hatchet_core::Priority::Low => 1,
-        hatchet_core::Priority::Normal => 2,
-        hatchet_core::Priority::High => 3,
-        hatchet_core::Priority::Critical => 4,
+        another_hatchet_core::Priority::Low => 1,
+        another_hatchet_core::Priority::Normal => 2,
+        another_hatchet_core::Priority::High => 3,
+    }
+}
+
+fn priority_from_i32(priority: i32) -> Option<another_hatchet_core::Priority> {
+    match priority {
+        1 => Some(another_hatchet_core::Priority::Low),
+        2 => Some(another_hatchet_core::Priority::Normal),
+        3 => Some(another_hatchet_core::Priority::High),
+        _ => None,
     }
 }
 
@@ -1529,13 +1888,10 @@ fn concurrency_to_proto(concurrency: &crate::task::ConcurrencyConfig) -> proto::
         .limit_strategy
         .as_ref()
         .map(|strategy| match strategy {
-            crate::task::ConcurrencyLimitStrategy::QueueNewRuns => {
-                proto::v1::ConcurrencyLimitStrategy::QueueNewest
-            }
             crate::task::ConcurrencyLimitStrategy::CancelInProgress => {
                 proto::v1::ConcurrencyLimitStrategy::CancelInProgress
             }
-            crate::task::ConcurrencyLimitStrategy::CancelOldest => {
+            crate::task::ConcurrencyLimitStrategy::CancelNewest => {
                 proto::v1::ConcurrencyLimitStrategy::CancelNewest
             }
             crate::task::ConcurrencyLimitStrategy::GroupRoundRobin => {
@@ -1702,6 +2058,7 @@ mod tests {
 
     use super::{
         V1LogLineList, WorkflowRegistration, completion_event_from_result,
+        decode_step_action_payload, infer_trigger_data_from_metadata,
         rate_limit_duration_to_legacy_proto, rate_limit_duration_to_v1_proto,
         rendered_to_proto_task, resolve_action_task_name, run_opt_label_to_proto,
         run_output_from_details, serialize_input_schema, worker_action_id,
@@ -1790,7 +2147,7 @@ mod tests {
             .concurrency(
                 ConcurrencyConfig::new("input.org")
                     .max_runs(3)
-                    .limit_strategy(ConcurrencyLimitStrategy::CancelOldest),
+                    .limit_strategy(ConcurrencyLimitStrategy::CancelNewest),
             )
             .slot_request(SlotType::Default, 6)
             .slot_request(SlotType::Durable, 1)
@@ -1900,6 +2257,82 @@ mod tests {
     }
 
     #[test]
+    fn step_action_payload_exposes_typed_input_and_parent_output() {
+        let payload = serde_json::json!({
+            "input": {"order_id": "ord_1", "total_cents": 2500},
+            "parents": {
+                "process-order": {
+                    "order_id": "ord_1",
+                    "status": "inventory-reserved"
+                },
+                "calculate-tax": {
+                    "tax_cents": 125
+                }
+            },
+            "triggered_by": "event",
+            "triggers": {
+                "event": { "key": "order.created" },
+                "filter_payload": { "region": "us-central" }
+            },
+            "step_run_errors": { "validate": "invalid address" }
+        })
+        .to_string();
+
+        let decoded = decode_step_action_payload(&payload);
+
+        assert_eq!(decoded.input["order_id"], "ord_1");
+        assert_eq!(decoded.input["total_cents"], 2500);
+        assert_eq!(
+            decoded.parent_outputs["process-order"]["status"],
+            "inventory-reserved"
+        );
+        assert_eq!(decoded.parent_outputs["calculate-tax"]["tax_cents"], 125);
+        assert!(decoded.trigger_data.triggered_by_event);
+        assert_eq!(
+            decoded.trigger_data.event_key.as_deref(),
+            Some("order.created")
+        );
+        assert_eq!(
+            decoded.filter_payload.expect("filter")["region"],
+            "us-central"
+        );
+        assert_eq!(decoded.errors["validate"], "invalid address");
+    }
+
+    #[test]
+    fn step_action_payload_preserves_legacy_direct_payloads() {
+        let payload = serde_json::json!({"order_id": "ord_legacy"}).to_string();
+        let decoded = decode_step_action_payload(&payload);
+        assert_eq!(decoded.input["order_id"], "ord_legacy");
+        assert!(decoded.parent_outputs.is_empty());
+    }
+
+    #[test]
+    fn task_trigger_context_recovers_event_and_cron_origin_from_engine_metadata() {
+        let mut event = super::TriggerData::default();
+        infer_trigger_data_from_metadata(
+            &mut event,
+            &HashMap::from([(
+                "hatchet__event_key".to_owned(),
+                "namespace_order.created".to_owned(),
+            )]),
+        );
+        assert!(event.triggered_by_event);
+        assert_eq!(event.event_key.as_deref(), Some("namespace_order.created"));
+
+        let mut cron = super::TriggerData::default();
+        infer_trigger_data_from_metadata(
+            &mut cron,
+            &HashMap::from([(
+                "hatchet__cron_expression".to_owned(),
+                "*/5 * * * *".to_owned(),
+            )]),
+        );
+        assert!(cron.triggered_by_cron);
+        assert_eq!(cron.cron_expression.as_deref(), Some("*/5 * * * *"));
+    }
+
+    #[test]
     fn run_output_from_details_prefers_registered_single_leaf() {
         let task_runs = HashMap::from([
             (
@@ -1954,13 +2387,21 @@ mod tests {
 
     #[test]
     fn completion_event_marks_cancelled_runs_as_failed_even_on_success() {
-        let (event_type, payload) =
+        let (event_type, payload, should_not_retry) =
             completion_event_from_result(Ok(serde_json::json!({"ok":true})), true);
         assert_eq!(
             event_type,
             crate::proto::dispatcher::StepActionEventType::StepEventTypeFailed
         );
         assert_eq!(payload, "task cancelled");
+        assert_eq!(should_not_retry, Some(true));
+    }
+
+    #[test]
+    fn completion_event_preserves_non_retryable_errors() {
+        let (_, _, should_not_retry) =
+            completion_event_from_result(Err(crate::Error::non_retryable("invalid input")), false);
+        assert_eq!(should_not_retry, Some(true));
     }
 
     #[test]
@@ -1974,6 +2415,10 @@ mod tests {
             task_dispatchers: HashMap::new(),
             durable_task_dispatchers: HashMap::new(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            connection_tx: tokio::sync::watch::channel(
+                crate::transport::WorkerConnectionState::Starting,
+            )
+            .0,
         };
         opts.task_dispatchers
             .insert("wf:step".to_owned(), dispatcher.clone());
@@ -2019,12 +2464,14 @@ mod tests {
 
     #[test]
     fn run_opt_label_mapping_supports_rich_config() {
-        let rich = hatchet_core::DesiredWorkerLabelConfig::Rich(hatchet_core::DesiredWorkerLabel {
-            value: "us-east".to_owned(),
-            required: true,
-            weight: Some(42),
-            comparator: Some(hatchet_core::WorkerLabelComparator::Equal),
-        });
+        let rich = another_hatchet_core::DesiredWorkerLabelConfig::Rich(
+            another_hatchet_core::DesiredWorkerLabel {
+                value: "us-east".to_owned(),
+                required: true,
+                weight: Some(42),
+                comparator: Some(another_hatchet_core::WorkerLabelComparator::Equal),
+            },
+        );
         let proto = run_opt_label_to_proto(&rich);
         assert_eq!(proto.str_value.as_deref(), Some("us-east"));
         assert_eq!(proto.required, Some(true));

@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
 
 use crate::config::HatchetConfig;
 use crate::error::{Error, Result};
@@ -78,9 +77,16 @@ enum AckResponse {
 }
 
 type PendingAcks = Arc<Mutex<HashMap<AckKey, oneshot::Sender<Result<AckResponse>>>>>;
-type PendingCallbacks =
-    Arc<Mutex<HashMap<CallbackKey, oneshot::Sender<Result<EntryCompletedResult>>>>>;
+
+#[derive(Debug, Default)]
+struct CallbackRegistry {
+    pending: HashMap<CallbackKey, oneshot::Sender<Result<EntryCompletedResult>>>,
+    completed: HashMap<CallbackKey, EntryCompletedResult>,
+}
+
+type Callbacks = Arc<Mutex<CallbackRegistry>>;
 type InflightRequests = Arc<Mutex<HashMap<AckKey, v1::DurableTaskRequest>>>;
+const MAX_BUFFERED_CALLBACKS: usize = 1_024;
 
 /// Eviction notice: (task_external_id, invocation_count).
 #[derive(Debug, Clone)]
@@ -93,12 +99,21 @@ pub struct EvictionNotice {
 /// The durable listener client manages the bidi stream lifecycle with reconnection.
 #[derive(Debug)]
 pub struct DurableListenerClient {
+    worker_id: String,
     request_tx: Arc<Mutex<Option<mpsc::Sender<v1::DurableTaskRequest>>>>,
     pending_acks: PendingAcks,
-    pending_callbacks: PendingCallbacks,
+    callbacks: Callbacks,
     inflight_requests: InflightRequests,
     evict_tx: broadcast::Sender<EvictionNotice>,
     _reconnect_task: tokio::task::JoinHandle<()>,
+    _status_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for DurableListenerClient {
+    fn drop(&mut self) {
+        self._reconnect_task.abort();
+        self._status_task.abort();
+    }
 }
 
 impl DurableListenerClient {
@@ -109,7 +124,7 @@ impl DurableListenerClient {
     /// Returns an error if the initial stream cannot be opened.
     pub async fn start(config: HatchetConfig, worker_id: String) -> Result<Self> {
         let pending_acks: PendingAcks = Arc::new(Mutex::new(HashMap::new()));
-        let pending_callbacks: PendingCallbacks = Arc::new(Mutex::new(HashMap::new()));
+        let callbacks: Callbacks = Arc::new(Mutex::new(CallbackRegistry::default()));
         let inflight_requests: InflightRequests = Arc::new(Mutex::new(HashMap::new()));
         let request_tx: Arc<Mutex<Option<mpsc::Sender<v1::DurableTaskRequest>>>> =
             Arc::new(Mutex::new(None));
@@ -123,7 +138,7 @@ impl DurableListenerClient {
             let worker_id = worker_id.clone();
             let request_tx = Arc::clone(&request_tx);
             let pending_acks = Arc::clone(&pending_acks);
-            let pending_callbacks = Arc::clone(&pending_callbacks);
+            let callbacks = Arc::clone(&callbacks);
             let inflight_requests = Arc::clone(&inflight_requests);
             let evict_tx = evict_tx.clone();
             async move {
@@ -132,7 +147,7 @@ impl DurableListenerClient {
                     worker_id,
                     request_tx,
                     pending_acks,
-                    pending_callbacks,
+                    callbacks,
                     inflight_requests,
                     evict_tx,
                     inbound,
@@ -141,13 +156,33 @@ impl DurableListenerClient {
             }
         });
 
+        // The engine does not continuously push completed durable entries. Workers report the
+        // exact entries they are awaiting so a completion can be delivered (and redelivered after
+        // a transient disconnect). This mirrors the official TypeScript SDK's one-second status
+        // poll and is required for sleeps, event waits, and durable child results to resume.
+        let status_task = tokio::spawn({
+            let request_tx = Arc::clone(&request_tx);
+            let callbacks = Arc::clone(&callbacks);
+            let worker_id = worker_id.clone();
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let _ = send_worker_status(&request_tx, &callbacks, &worker_id).await;
+                }
+            }
+        });
+
         Ok(Self {
+            worker_id,
             request_tx,
             pending_acks,
-            pending_callbacks,
+            callbacks,
             inflight_requests,
             evict_tx,
             _reconnect_task: reconnect_task,
+            _status_task: status_task,
         })
     }
 
@@ -182,9 +217,13 @@ impl DurableListenerClient {
         self.inflight_requests
             .lock()
             .await
-            .insert(key, request.clone());
+            .insert(key.clone(), request.clone());
 
-        self.send_request(request).await?;
+        if let Err(error) = self.send_request(request).await {
+            self.pending_acks.lock().await.remove(&key);
+            self.inflight_requests.lock().await.remove(&key);
+            return Err(error);
+        }
 
         let response = rx
             .await
@@ -227,9 +266,13 @@ impl DurableListenerClient {
         self.inflight_requests
             .lock()
             .await
-            .insert(key, request.clone());
+            .insert(key.clone(), request.clone());
 
-        self.send_request(request).await?;
+        if let Err(error) = self.send_request(request).await {
+            self.pending_acks.lock().await.remove(&key);
+            self.inflight_requests.lock().await.remove(&key);
+            return Err(error);
+        }
 
         let response = rx
             .await
@@ -274,9 +317,13 @@ impl DurableListenerClient {
         self.inflight_requests
             .lock()
             .await
-            .insert(ack_key, request.clone());
+            .insert(ack_key.clone(), request.clone());
 
-        self.send_request(request).await?;
+        if let Err(error) = self.send_request(request).await {
+            self.pending_acks.lock().await.remove(&ack_key);
+            self.inflight_requests.lock().await.remove(&ack_key);
+            return Err(error);
+        }
 
         let response = rx
             .await
@@ -330,11 +377,18 @@ impl DurableListenerClient {
             node_id,
         };
 
-        let (tx, rx) = oneshot::channel();
-        self.pending_callbacks.lock().await.insert(key, tx);
-
-        rx.await
-            .map_err(|_| Error::Durable("callback channel closed".to_owned()))?
+        match register_callback(&self.callbacks, key).await {
+            CallbackWaiter::Completed(result) => Ok(result),
+            CallbackWaiter::Pending(receiver) => {
+                // Report immediately instead of waiting for the next periodic status tick.
+                // Periodic polling remains active so reconnects cannot strand this callback.
+                let _ =
+                    send_worker_status(&self.request_tx, &self.callbacks, &self.worker_id).await;
+                receiver
+                    .await
+                    .map_err(|_| Error::Durable("callback channel closed".to_owned()))?
+            }
+        }
     }
 
     /// Sends a `evictInvocation` request.
@@ -377,6 +431,73 @@ impl DurableListenerClient {
     }
 }
 
+enum CallbackWaiter {
+    Completed(EntryCompletedResult),
+    Pending(oneshot::Receiver<Result<EntryCompletedResult>>),
+}
+
+async fn register_callback(callbacks: &Callbacks, key: CallbackKey) -> CallbackWaiter {
+    let (tx, rx) = oneshot::channel();
+    let mut callbacks = callbacks.lock().await;
+    if let Some(completed) = callbacks.completed.remove(&key) {
+        return CallbackWaiter::Completed(completed);
+    }
+    callbacks.pending.insert(key, tx);
+    CallbackWaiter::Pending(rx)
+}
+
+#[cfg(test)]
+async fn wait_for_registered_callback(
+    callbacks: &Callbacks,
+    key: CallbackKey,
+) -> Result<EntryCompletedResult> {
+    match register_callback(callbacks, key).await {
+        CallbackWaiter::Completed(result) => Ok(result),
+        CallbackWaiter::Pending(receiver) => receiver
+            .await
+            .map_err(|_| Error::Durable("callback channel closed".to_owned()))?,
+    }
+}
+
+async fn send_worker_status(
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<v1::DurableTaskRequest>>>>,
+    callbacks: &Callbacks,
+    worker_id: &str,
+) -> Result<()> {
+    let waiting_entries = {
+        let callbacks = callbacks.lock().await;
+        callbacks
+            .pending
+            .keys()
+            .map(|key| v1::DurableTaskAwaitedCompletedEntry {
+                durable_task_external_id: key.task_external_id.clone(),
+                branch_id: key.branch_id,
+                node_id: key.node_id,
+                invocation_count: key.invocation_count,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if waiting_entries.is_empty() {
+        return Ok(());
+    }
+
+    let sender = request_tx.lock().await.clone().ok_or_else(|| {
+        Error::Durable("cannot report durable worker status while disconnected".to_owned())
+    })?;
+    sender
+        .send(v1::DurableTaskRequest {
+            message: Some(v1::durable_task_request::Message::WorkerStatus(
+                v1::DurableTaskWorkerStatusRequest {
+                    worker_id: worker_id.to_owned(),
+                    waiting_entries,
+                },
+            )),
+        })
+        .await
+        .map_err(|error| Error::Durable(format!("worker status channel closed: {error}")))
+}
+
 /// Opens a new durable task bidi stream and returns the sender and inbound stream.
 async fn open_durable_stream(
     config: &HatchetConfig,
@@ -385,12 +506,7 @@ async fn open_durable_stream(
     mpsc::Sender<v1::DurableTaskRequest>,
     tonic::Streaming<v1::DurableTaskResponse>,
 )> {
-    let endpoint_url = config.endpoint_url();
-    let channel = Channel::from_shared(endpoint_url.clone())
-        .map_err(|error| Error::Transport(format!("invalid endpoint: {error}")))?
-        .connect()
-        .await
-        .map_err(|error| Error::Transport(format!("connect failed: {error}")))?;
+    let channel = config.connect_channel().await?;
 
     let mut client = v1::v1_dispatcher_client::V1DispatcherClient::new(channel);
     let (tx, rx) = mpsc::channel::<v1::DurableTaskRequest>(256);
@@ -403,7 +519,7 @@ async fn open_durable_stream(
         )),
     };
 
-    let token = config.token.clone();
+    let token = config.token().to_owned();
     let outbound = async_stream::stream! {
         yield register_msg;
         let mut rx = rx;
@@ -456,7 +572,7 @@ async fn reconnect_loop(
     worker_id: String,
     request_tx: Arc<Mutex<Option<mpsc::Sender<v1::DurableTaskRequest>>>>,
     pending_acks: PendingAcks,
-    pending_callbacks: PendingCallbacks,
+    callbacks: Callbacks,
     inflight_requests: InflightRequests,
     evict_tx: broadcast::Sender<EvictionNotice>,
     initial_inbound: tonic::Streaming<v1::DurableTaskResponse>,
@@ -464,7 +580,7 @@ async fn reconnect_loop(
     receive_loop(
         initial_inbound,
         &pending_acks,
-        &pending_callbacks,
+        &callbacks,
         &inflight_requests,
         &evict_tx,
     )
@@ -493,7 +609,7 @@ async fn reconnect_loop(
                 receive_loop(
                     inbound,
                     &pending_acks,
-                    &pending_callbacks,
+                    &callbacks,
                     &inflight_requests,
                     &evict_tx,
                 )
@@ -511,7 +627,7 @@ async fn reconnect_loop(
 async fn receive_loop(
     mut stream: tonic::Streaming<v1::DurableTaskResponse>,
     pending_acks: &PendingAcks,
-    pending_callbacks: &PendingCallbacks,
+    callbacks: &Callbacks,
     inflight_requests: &InflightRequests,
     evict_tx: &broadcast::Sender<EvictionNotice>,
 ) {
@@ -521,7 +637,7 @@ async fn receive_loop(
                 dispatch_response(
                     response,
                     pending_acks,
-                    pending_callbacks,
+                    callbacks,
                     inflight_requests,
                     evict_tx,
                 )
@@ -539,7 +655,7 @@ async fn receive_loop(
 async fn dispatch_response(
     response: v1::DurableTaskResponse,
     pending_acks: &PendingAcks,
-    pending_callbacks: &PendingCallbacks,
+    callbacks: &Callbacks,
     inflight_requests: &InflightRequests,
     evict_tx: &broadcast::Sender<EvictionNotice>,
 ) {
@@ -609,10 +725,21 @@ async fn dispatch_response(
                     branch_id: entry_ref.branch_id,
                     node_id: entry_ref.node_id,
                 };
-                if let Some(tx) = pending_callbacks.lock().await.remove(&key) {
-                    let _ = tx.send(Ok(EntryCompletedResult {
-                        payload: completed.payload,
-                    }));
+                let result = EntryCompletedResult {
+                    payload: completed.payload,
+                };
+                let mut callbacks = callbacks.lock().await;
+                if let Some(tx) = callbacks.pending.remove(&key) {
+                    let _ = tx.send(Ok(result));
+                } else {
+                    // The engine may deliver completion immediately after its ack,
+                    // before the caller installs its waiter. Buffer it atomically.
+                    if callbacks.completed.len() >= MAX_BUFFERED_CALLBACKS
+                        && let Some(oldest) = callbacks.completed.keys().next().cloned()
+                    {
+                        callbacks.completed.remove(&oldest);
+                    }
+                    callbacks.completed.insert(key, result);
                 }
             }
         }
@@ -644,5 +771,91 @@ async fn dispatch_response(
         v1::durable_task_response::Message::RegisterWorker(_) => {
             // Unexpected — registration is handled during startup
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completion_is_buffered_until_waiter_registration() {
+        let callbacks: Callbacks = Arc::new(Mutex::new(CallbackRegistry::default()));
+        let pending_acks: PendingAcks = Arc::new(Mutex::new(HashMap::new()));
+        let inflight: InflightRequests = Arc::new(Mutex::new(HashMap::new()));
+        let (evict_tx, _) = broadcast::channel(1);
+        let entry_ref = v1::DurableEventLogEntryRef {
+            durable_task_external_id: "task-1".to_owned(),
+            invocation_count: 2,
+            branch_id: 3,
+            node_id: 4,
+        };
+        dispatch_response(
+            v1::DurableTaskResponse {
+                message: Some(v1::durable_task_response::Message::EntryCompleted(
+                    v1::DurableTaskEventLogEntryCompletedResponse {
+                        r#ref: Some(entry_ref.clone()),
+                        payload: b"done".to_vec(),
+                    },
+                )),
+            },
+            &pending_acks,
+            &callbacks,
+            &inflight,
+            &evict_tx,
+        )
+        .await;
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            wait_for_registered_callback(
+                &callbacks,
+                CallbackKey {
+                    task_external_id: entry_ref.durable_task_external_id,
+                    invocation_count: entry_ref.invocation_count,
+                    branch_id: entry_ref.branch_id,
+                    node_id: entry_ref.node_id,
+                },
+            ),
+        )
+        .await
+        .expect("buffered callback resolves without waiting")
+        .expect("callback succeeds");
+
+        assert_eq!(result.payload, b"done");
+    }
+
+    #[tokio::test]
+    async fn worker_status_reports_every_pending_callback_key() {
+        let callbacks: Callbacks = Arc::new(Mutex::new(CallbackRegistry::default()));
+        let key = CallbackKey {
+            task_external_id: "1ee6b921-8a37-4be1-833c-2987736eec9d".to_owned(),
+            invocation_count: 4,
+            branch_id: 5,
+            node_id: 6,
+        };
+        let _waiter = register_callback(&callbacks, key.clone()).await;
+        let (tx, mut rx) = mpsc::channel(1);
+        let request_tx = Arc::new(Mutex::new(Some(tx)));
+
+        send_worker_status(
+            &request_tx,
+            &callbacks,
+            "0d53333a-c7a2-49c6-8942-fd9fc647979c",
+        )
+        .await
+        .expect("worker status should send");
+
+        let request = rx.recv().await.expect("worker status request");
+        let Some(v1::durable_task_request::Message::WorkerStatus(status)) = request.message else {
+            panic!("expected worker status request");
+        };
+        assert_eq!(status.worker_id, "0d53333a-c7a2-49c6-8942-fd9fc647979c");
+        assert_eq!(status.waiting_entries.len(), 1);
+        let waiting = &status.waiting_entries[0];
+        assert_eq!(waiting.durable_task_external_id, key.task_external_id);
+        assert_eq!(waiting.invocation_count, key.invocation_count);
+        assert_eq!(waiting.branch_id, key.branch_id);
+        assert_eq!(waiting.node_id, key.node_id);
     }
 }

@@ -1,7 +1,7 @@
 //! Re-exports of protobuf-generated types from the Hatchet API contracts.
 //!
-//! These types are generated at build time by `tonic-build` from the `.proto`
-//! files under `sources/hatchet-main/api-contracts/`.
+//! These types are generated at build time by `tonic-build` from the vendored
+//! `.proto` files under `crates/hatchet-sdk/proto/`.
 
 /// v1 API types — the primary API surface for the Rust SDK.
 ///

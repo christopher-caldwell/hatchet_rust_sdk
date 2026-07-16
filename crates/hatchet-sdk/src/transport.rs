@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use another_hatchet_core::{RunOpts, WorkflowRunId};
 use async_trait::async_trait;
-use hatchet_core::{RunOpts, WorkflowRunId};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock, oneshot};
@@ -15,9 +15,11 @@ use crate::durable_listener::DurableListenerClient;
 use crate::error::{Error, Result};
 use crate::rest_client::RestApiClient;
 use crate::task::{ConcurrencyConfig, DesiredLabelConfig, RateLimit, RateLimitDuration, SlotType};
-use crate::worker::WorkerDispatcher;
+use crate::worker::{TaskContextData, WorkerDispatcher};
 use crate::workflow::{WorkflowDeclaration, WorkflowStep};
 use tokio_util::sync::CancellationToken;
+
+const MAX_COMPLETED_RUNS: usize = 1_024;
 
 /// The shape of a single task during workflow registration.
 ///
@@ -106,10 +108,23 @@ pub struct WorkerStartOpts {
     pub task_dispatchers: std::collections::HashMap<String, WorkerDispatcher>,
     pub durable_task_dispatchers: std::collections::HashMap<String, WorkerDispatcher>,
     pub cancel_token: CancellationToken,
+    pub connection_tx: tokio::sync::watch::Sender<WorkerConnectionState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerConnectionState {
+    Starting,
+    Ready,
+    Reconnecting(String),
 }
 
 #[async_trait]
 pub trait Transport: Send + Sync {
+    /// Returns the workflow/event namespace configured by this transport.
+    fn namespace(&self) -> Option<&str> {
+        None
+    }
+
     async fn run_workflow(
         &self,
         workflow_name: &str,
@@ -147,7 +162,59 @@ pub trait Transport: Send + Sync {
 
     async fn release_slot(&self, task_run_id: &str) -> Result<()>;
 
+    async fn cancel_workflow_run(&self, _run_id: &WorkflowRunId) -> Result<()> {
+        Err(Error::UnsupportedOperation(
+            "workflow cancellation is not supported by this transport".to_owned(),
+        ))
+    }
+
     async fn list_logs(&self, task_run_id: &str) -> Result<Vec<LogRecord>>;
+
+    async fn push_event(&self, _key: &str, _payload: &Value) -> Result<()> {
+        Err(Error::UnsupportedOperation(
+            "event push is not supported by this transport".to_owned(),
+        ))
+    }
+
+    /// Pushes an event with an optional Hatchet scope.
+    ///
+    /// Custom transports that support scoped events should override this
+    /// method. The default preserves compatibility for unscoped event pushes.
+    async fn push_event_with_scope(
+        &self,
+        key: &str,
+        payload: &Value,
+        scope: Option<&str>,
+    ) -> Result<()> {
+        if scope.is_some() {
+            return Err(Error::UnsupportedOperation(
+                "scoped event push is not supported by this transport".to_owned(),
+            ));
+        }
+        self.push_event(key, payload).await
+    }
+
+    async fn bulk_push_events(&self, events: &[(String, Value)]) -> Result<()> {
+        for (key, payload) in events {
+            self.push_event(key, payload).await?;
+        }
+        Ok(())
+    }
+
+    /// Pushes events that may each carry a Hatchet scope.
+    ///
+    /// The default implementation delegates one-by-one so existing custom
+    /// transports continue to work for unscoped records.
+    async fn bulk_push_events_with_scope(
+        &self,
+        events: &[(String, Value, Option<String>)],
+    ) -> Result<()> {
+        for (key, payload, scope) in events {
+            self.push_event_with_scope(key, payload, scope.as_deref())
+                .await?;
+        }
+        Ok(())
+    }
 
     async fn upsert_rate_limit(
         &self,
@@ -313,14 +380,88 @@ impl InMemoryTransport {
         input: Value,
         run_id: WorkflowRunId,
     ) -> Result<Value> {
-        let ordered = workflow_steps_in_execution_order(&definition.steps)?;
-        let mut last_output = input.clone();
-        for step in ordered {
-            last_output = self
-                .execute_step(&definition.name, &step, input.clone(), run_id.clone())
-                .await?;
+        let leaf_names = workflow_leaf_names(&definition.steps);
+        let mut remaining = definition.steps;
+        let mut outputs = HashMap::<String, Value>::new();
+
+        while !remaining.is_empty() {
+            let mut ready = Vec::new();
+            let mut waiting = Vec::new();
+            for step in remaining {
+                if step
+                    .parents
+                    .iter()
+                    .all(|parent| outputs.contains_key(parent))
+                {
+                    ready.push(step);
+                } else {
+                    waiting.push(step);
+                }
+            }
+
+            if ready.is_empty() {
+                return Err(Error::Worker(
+                    "workflow declaration contains unresolved or cyclic step dependencies"
+                        .to_owned(),
+                ));
+            }
+
+            let mut join_set = tokio::task::JoinSet::new();
+            for step in ready {
+                let transport = self.clone();
+                let workflow_name = definition.name.clone();
+                let workflow_input = input.clone();
+                let workflow_run_id = run_id.clone();
+                let parent_outputs = step
+                    .parents
+                    .iter()
+                    .filter_map(|parent| {
+                        outputs
+                            .get(parent)
+                            .cloned()
+                            .map(|output| (parent.clone(), output))
+                    })
+                    .collect();
+                join_set.spawn(async move {
+                    let task_name = step.task_name.clone();
+                    let output = transport
+                        .execute_step(
+                            &workflow_name,
+                            &step,
+                            workflow_input,
+                            parent_outputs,
+                            workflow_run_id,
+                        )
+                        .await?;
+                    Ok::<_, Error>((task_name, output))
+                });
+            }
+
+            while let Some(joined) = join_set.join_next().await {
+                let (task_name, output) = joined.map_err(|error| {
+                    Error::Worker(format!("workflow task join failed: {error}"))
+                })??;
+                outputs.insert(task_name, output);
+            }
+            remaining = waiting;
         }
-        Ok(last_output)
+
+        if leaf_names.len() == 1 {
+            return outputs.remove(&leaf_names[0]).ok_or_else(|| {
+                Error::Worker(format!(
+                    "workflow leaf '{}' did not produce output",
+                    leaf_names[0]
+                ))
+            });
+        }
+
+        let mut leaf_outputs = serde_json::Map::new();
+        for leaf_name in leaf_names {
+            if let Some(output) = outputs.remove(&leaf_name) {
+                leaf_outputs.insert(leaf_name, output);
+            }
+        }
+        Ok(Value::Object(leaf_outputs))
     }
 
     async fn execute_step(
@@ -328,6 +469,7 @@ impl InMemoryTransport {
         workflow_name: &str,
         step: &WorkflowStep,
         input: Value,
+        parent_outputs: HashMap<String, Value>,
         run_id: WorkflowRunId,
     ) -> Result<Value> {
         let ids = crate::context::ContextIds {
@@ -349,7 +491,16 @@ impl InMemoryTransport {
                 .cloned()
             {
                 return dispatcher
-                    .run_durable_task_json(&step.task_name, input, ids, 1)
+                    .run_durable_task_json_with_context(
+                        &step.task_name,
+                        input,
+                        ids,
+                        1,
+                        TaskContextData {
+                            parent_outputs,
+                            ..TaskContextData::default()
+                        },
+                    )
                     .await;
             }
         } else if let Some(dispatcher) = self
@@ -360,7 +511,17 @@ impl InMemoryTransport {
             .and_then(|dispatchers| dispatchers.first())
             .cloned()
         {
-            return dispatcher.run_task_json(&step.task_name, input, ids).await;
+            return dispatcher
+                .run_task_json_with_context(
+                    &step.task_name,
+                    input,
+                    ids,
+                    TaskContextData {
+                        parent_outputs,
+                        ..TaskContextData::default()
+                    },
+                )
+                .await;
         }
 
         Err(Error::Worker(format!(
@@ -443,9 +604,16 @@ impl Transport for InMemoryTransport {
     }
 
     async fn register_result_channel(&self, run_id: &WorkflowRunId) -> Result<()> {
+        // Use the same lock order as `resolve_result` so completion cannot land
+        // between the completed check and channel registration.
+        let mut pending = self.pending.lock().await;
+        let mut receivers = self.receivers.lock().await;
+        if self.completed.lock().await.contains_key(run_id) {
+            return Ok(());
+        }
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(run_id.clone(), tx);
-        self.receivers.lock().await.insert(run_id.clone(), rx);
+        pending.insert(run_id.clone(), tx);
+        receivers.insert(run_id.clone(), rx);
         Ok(())
     }
 
@@ -473,24 +641,69 @@ impl Transport for InMemoryTransport {
         if let Some(sender) = self.pending.lock().await.remove(run_id) {
             let _ = sender.send(result.clone());
         }
-        self.completed.lock().await.insert(run_id.clone(), result);
+        let mut completed = self.completed.lock().await;
+        if completed.len() >= MAX_COMPLETED_RUNS
+            && !completed.contains_key(run_id)
+            && let Some(oldest) = completed.keys().next().cloned()
+        {
+            completed.remove(&oldest);
+        }
+        completed.insert(run_id.clone(), result);
+    }
+
+    async fn cancel_workflow_run(&self, run_id: &WorkflowRunId) -> Result<()> {
+        self.resolve_result(
+            run_id,
+            Err(Error::Worker("workflow run was cancelled".to_owned())),
+        )
+        .await;
+        Ok(())
     }
 
     async fn start_worker_loop(&self, opts: WorkerStartOpts) -> Result<()> {
+        let task_dispatchers = opts.task_dispatchers;
+        let durable_task_dispatchers = opts.durable_task_dispatchers;
         let mut t_map = self.task_dispatchers.write().await;
-        for (task_name, dispatcher) in opts.task_dispatchers {
-            t_map.entry(task_name).or_default().push(dispatcher);
+        for (task_name, dispatcher) in &task_dispatchers {
+            t_map
+                .entry(task_name.clone())
+                .or_default()
+                .push(dispatcher.clone());
         }
         let mut d_map = self.durable_task_dispatchers.write().await;
-        for (task_name, dispatcher) in opts.durable_task_dispatchers {
-            d_map.entry(task_name).or_default().push(dispatcher);
+        for (task_name, dispatcher) in &durable_task_dispatchers {
+            d_map
+                .entry(task_name.clone())
+                .or_default()
+                .push(dispatcher.clone());
         }
         drop(t_map);
         drop(d_map);
+        let _ = opts.connection_tx.send(WorkerConnectionState::Ready);
 
         // For in-memory, we just block here until cancelled, as workflow runs
         // fetch the dispatchers directly.
         opts.cancel_token.cancelled().await;
+
+        let mut t_map = self.task_dispatchers.write().await;
+        for (task_name, dispatcher) in &task_dispatchers {
+            if let Some(registered) = t_map.get_mut(task_name) {
+                registered.retain(|candidate| !candidate.same_channel(dispatcher));
+                if registered.is_empty() {
+                    t_map.remove(task_name);
+                }
+            }
+        }
+        drop(t_map);
+        let mut d_map = self.durable_task_dispatchers.write().await;
+        for (task_name, dispatcher) in &durable_task_dispatchers {
+            if let Some(registered) = d_map.get_mut(task_name) {
+                registered.retain(|candidate| !candidate.same_channel(dispatcher));
+                if registered.is_empty() {
+                    d_map.remove(task_name);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -585,31 +798,16 @@ impl From<tokio::sync::AcquireError> for Error {
     }
 }
 
-fn workflow_steps_in_execution_order(steps: &[WorkflowStep]) -> Result<Vec<WorkflowStep>> {
-    let mut remaining = steps.to_vec();
-    let mut completed = Vec::<String>::new();
-    let mut ordered = Vec::with_capacity(remaining.len());
-
-    while !remaining.is_empty() {
-        let mut progressed = false;
-        let mut index = 0;
-        while index < remaining.len() {
-            let step = &remaining[index];
-            if step.parents.iter().all(|parent| completed.contains(parent)) {
-                completed.push(step.task_name.clone());
-                ordered.push(remaining.remove(index));
-                progressed = true;
-            } else {
-                index += 1;
-            }
-        }
-
-        if !progressed {
-            return Err(Error::Worker(
-                "workflow declaration contains unresolved or cyclic step dependencies".to_owned(),
-            ));
-        }
-    }
-
-    Ok(ordered)
+fn workflow_leaf_names(steps: &[WorkflowStep]) -> Vec<String> {
+    let parents: HashSet<_> = steps
+        .iter()
+        .flat_map(|step| step.parents.iter().cloned())
+        .collect();
+    let mut leaves: Vec<_> = steps
+        .iter()
+        .filter(|step| !parents.contains(&step.task_name))
+        .map(|step| step.task_name.clone())
+        .collect();
+    leaves.sort();
+    leaves
 }

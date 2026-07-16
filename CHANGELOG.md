@@ -1,37 +1,52 @@
 # Changelog
 
-## [0.1.0] - 2026-04-20
+All notable changes to this project will be documented in this file.
 
-Initial SDK foundation release.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project uses [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-07-16
+
+First public release of the unofficial Rust Hatchet SDK.
 
 ### Added
 
-- Workspace crates:
-  - `hatchet-core`
-  - `hatchet-sdk`
-  - `hatchet-macros`
-- Typed client declaration and run APIs:
-  - `Client::workflow`, `Client::task`, `Client::durable_task`
-  - `WorkflowHandle::run`, `run_no_wait`, `run_many`
-- Child workflow execution support in context:
-  - `InMemoryContext::run_child`, `run_child_no_wait`
-  - `bulk_run_children`, `bulk_run_children_no_wait`
-- Durable context primitives:
-  - invocation counting, event waiting, sleep/time helpers, child spawning
-- Worker runtime:
-  - task/durable task registration
-  - typed dispatch APIs and lifecycle (`start`, `shutdown`, `wait`)
-- Feature clients:
-  - runs, workflows, schedules, crons, workers, metrics, rate limits, events, logs, filters, webhooks, cel
-- Proc macro sugar:
-  - `#[workflow(name = "...")]`, `#[task]`, `#[durable_task]`
-  - generated task handles and module-level `register_all`
-- Validation and integration coverage:
-  - Phase 6 validation test suite
-  - Phase 7 proc-macro integration test
-  - runnable checkpoint examples in `examples/src/bin`
+- Typed workflow, task, durable-task, child-run, and run-reference APIs.
+- In-memory workflow transport with concurrent DAG scheduling and named parent outputs.
+- Authenticated gRPC/REST transport, supervised worker reconnects, health/readiness,
+  cancellation, events, rate limits, logs, and selected management clients.
+- Durable waits, event callbacks, memoization, engine-backed child runs, and
+  eviction-aware cancellation.
+- Scoped event publication and scoped historical-event lookback.
+- Re-exported `#[workflow]`, `#[task]`, and `#[durable_task]` macros.
+- Vendored Hatchet `v0.94.14` protocol definitions and vendored `protoc`.
+- Standalone examples, including the two-worker Hatchet Lite/PostgreSQL Railway proof.
+- MSRV, feature-matrix, strict lint, rustdoc, security-advisory, and clean-package CI.
+- Guarded multi-crate publishing in dependency order.
 
-### Notes
+### Fixed
 
-- Current transport/runtime is in-memory oriented for API iteration speed.
-- Engine wire-protocol parity remains future work.
+- Propagate workflow registration and worker lifecycle failures instead of
+  reporting false success.
+- Preserve namespaces, multi-parent task outputs, live context metadata,
+  non-retryable completion flags, and supported run options.
+- Buffer early durable completions and propagate durable listener failures.
+- Report awaited durable callbacks to the engine, use UUID condition groups,
+  and resume engine-backed memo/sleep operations reliably.
+- Recover event/cron trigger context from canonical engine metadata on Hatchet
+  versions whose v1 action envelope reports a manual trigger.
+- Normalize workflow/event namespaces to Hatchet's underscore wire convention
+  and avoid worker-readiness deadlocks while opening action streams.
+- Reject invalid unscoped durable lookback before it can hang, and normalize
+  Hatchet callback match envelopes to bare event payloads and the matched branch.
+- Register workflow failure handlers as distinct engine tasks.
+- Align concurrency strategy names with Hatchet wire semantics.
+- Bound result caches and worker shutdown; remove stale in-memory dispatchers.
+- Redact client tokens from debug output.
+- Return explicit unsupported-operation errors for unimplemented live management calls.
+- Correct workflow-specific cron and scheduled-run REST routes.
+
+[Unreleased]: https://github.com/christopher-caldwell/hatchet_rust_sdk/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/christopher-caldwell/hatchet_rust_sdk/releases/tag/v0.1.0

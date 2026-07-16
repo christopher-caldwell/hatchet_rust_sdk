@@ -1,0 +1,15 @@
+# Upload only the Rust crates and standalone worker build inputs.
+.git
+target
+**/target
+**/.env
+**/.env.*
+RAILWAY_COMPARISON_PROMPT.md
+README.md
+docs
+examples/src
+examples/Cargo.toml
+crates/hatchet-sdk/tests
+crates/hatchet-sdk/benches
+# Protocol inputs are vendored in crates/hatchet-sdk/proto.
+sources

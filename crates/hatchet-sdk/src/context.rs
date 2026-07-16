@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use another_hatchet_core::{Priority, RunOpts, WorkflowRunId};
 use async_trait::async_trait;
-use hatchet_core::{Priority, RunOpts, WorkflowRunId};
 use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -89,7 +89,7 @@ pub trait Context {
         opts: RunOpts,
     ) -> Result<Vec<WorkflowRunId>>;
 
-    async fn parent_output_json(&self) -> Result<Option<Value>>;
+    async fn parent_output_json(&self, parent_task_name: &str) -> Result<Value>;
 
     async fn log(&self, level: LogLevel, message: impl Into<String> + Send) -> Result<()>;
 
@@ -120,7 +120,7 @@ pub struct InMemoryContext<T: Transport> {
     current_child_index: Option<u64>,
     retry_count: u32,
     filter_payload: Option<Value>,
-    parent_output: Option<Value>,
+    parent_outputs: std::collections::HashMap<String, Value>,
     worker_labels: std::sync::RwLock<std::collections::BTreeMap<String, LabelValue>>,
     worker_id: Option<String>,
     trigger_data: TriggerData,
@@ -144,7 +144,7 @@ impl<T: Transport> InMemoryContext<T> {
             current_child_index: None,
             retry_count: 0,
             filter_payload: None,
-            parent_output: None,
+            parent_outputs: std::collections::HashMap::new(),
             worker_labels: std::sync::RwLock::new(std::collections::BTreeMap::new()),
             worker_id: None,
             trigger_data: TriggerData::default(),
@@ -153,6 +153,10 @@ impl<T: Transport> InMemoryContext<T> {
             logs: tokio::sync::Mutex::new(Vec::new()),
             stream: tokio::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn transport_namespace(&self) -> Option<&str> {
+        self.transport.namespace()
     }
 
     #[must_use]
@@ -172,8 +176,22 @@ impl<T: Transport> InMemoryContext<T> {
     }
 
     #[must_use]
-    pub fn with_parent_output(mut self, parent_output: Value) -> Self {
-        self.parent_output = Some(parent_output);
+    pub fn with_parent_output(
+        mut self,
+        parent_task_name: impl Into<String>,
+        parent_output: Value,
+    ) -> Self {
+        self.parent_outputs
+            .insert(parent_task_name.into(), parent_output);
+        self
+    }
+
+    #[must_use]
+    pub fn with_parent_outputs(
+        mut self,
+        parent_outputs: std::collections::HashMap<String, Value>,
+    ) -> Self {
+        self.parent_outputs = parent_outputs;
         self
     }
 
@@ -384,7 +402,7 @@ impl<T: Transport> InMemoryContext<T> {
             .collect())
     }
 
-    fn child_run_opts(&self, mut opts: RunOpts) -> RunOpts {
+    pub(crate) fn child_run_opts(&self, mut opts: RunOpts) -> RunOpts {
         let child_index = self.child_index.fetch_add(1, Ordering::Relaxed);
         opts.parent_workflow_run_id = Some(self.ids.workflow_run_id.0.clone());
         opts.parent_task_run_id = Some(self.ids.task_run_id.clone());
@@ -392,7 +410,7 @@ impl<T: Transport> InMemoryContext<T> {
         opts
     }
 
-    fn bulk_child_run_opts(&self, mut opts: RunOpts, child_count: usize) -> RunOpts {
+    pub(crate) fn bulk_child_run_opts(&self, mut opts: RunOpts, child_count: usize) -> RunOpts {
         let first_child_index = self
             .child_index
             .fetch_add(child_count as u64, Ordering::Relaxed);
@@ -400,6 +418,10 @@ impl<T: Transport> InMemoryContext<T> {
         opts.parent_task_run_id = Some(self.ids.task_run_id.clone());
         opts.child_index = Some(first_child_index);
         opts
+    }
+
+    pub(crate) async fn cache_run_result(&self, run_id: &WorkflowRunId, result: Result<Value>) {
+        self.transport.resolve_result(run_id, result).await;
     }
 }
 
@@ -534,8 +556,15 @@ impl<T: Transport> Context for InMemoryContext<T> {
             .await
     }
 
-    async fn parent_output_json(&self) -> Result<Option<Value>> {
-        Ok(self.parent_output.clone())
+    async fn parent_output_json(&self, parent_task_name: &str) -> Result<Value> {
+        self.parent_outputs
+            .get(parent_task_name)
+            .cloned()
+            .ok_or_else(|| {
+                Error::Worker(format!(
+                    "output for parent task '{parent_task_name}' was not found"
+                ))
+            })
     }
 
     async fn log(&self, level: LogLevel, message: impl Into<String> + Send) -> Result<()> {
@@ -579,7 +608,9 @@ impl<T: Transport> Context for InMemoryContext<T> {
 
     async fn cancel(&self) -> Result<()> {
         self.cancel_token.cancel();
-        Ok(())
+        self.transport
+            .cancel_workflow_run(&self.ids.workflow_run_id)
+            .await
     }
 }
 
@@ -596,7 +627,10 @@ pub trait ContextExt: Context {
         I: Serialize + Send,
         O: serde::de::DeserializeOwned + Send + 'static,
     {
-        workflow.run(input, opts).await
+        self.run_child_no_wait(workflow, input, opts)
+            .await?
+            .output()
+            .await
     }
 
     async fn run_child_no_wait<I, O, T>(
@@ -675,12 +709,12 @@ pub trait ContextExt: Context {
             .collect())
     }
 
-    async fn parent_output<O: serde::de::DeserializeOwned>(&self) -> Result<Option<O>> {
-        self.parent_output_json().await?.map_or(Ok(None), |value| {
-            serde_json::from_value(value)
-                .map(Some)
-                .map_err(|error| Error::OutputDeserialization(error.to_string()))
-        })
+    async fn parent_output<O: serde::de::DeserializeOwned>(
+        &self,
+        parent_task_name: &str,
+    ) -> Result<O> {
+        serde_json::from_value(self.parent_output_json(parent_task_name).await?)
+            .map_err(|error| Error::OutputDeserialization(error.to_string()))
     }
 }
 

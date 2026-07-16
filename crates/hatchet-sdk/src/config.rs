@@ -4,6 +4,7 @@
 //! Reads `HATCHET_CLIENT_TOKEN`, `HATCHET_CLIENT_HOST_PORT`, `HATCHET_CLIENT_TLS_*`
 //! environment variables and parses the JWT to extract `server_url` and `tenant_id`.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
@@ -40,7 +41,7 @@ pub enum SdkLogLevel {
 ///
 /// Constructed from environment variables via [`HatchetConfig::from_env`] or
 /// directly via [`HatchetConfigBuilder`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HatchetConfig {
     /// The gRPC server address, e.g. `localhost:7077`.
     pub host_port: String,
@@ -48,10 +49,14 @@ pub struct HatchetConfig {
     /// Defaults to the same address as host_port if not set from JWT.
     pub server_url: String,
     /// JWT bearer token for authentication.
-    pub token: String,
+    token: String,
     /// TLS configuration.
     pub tls: TlsConfig,
     /// Optional namespace prefix for workflow names and event triggers.
+    ///
+    /// The SDK normalizes a non-empty value to lowercase with a trailing
+    /// underscore, matching the official TypeScript SDK (for example,
+    /// `Acme` becomes `acme_`).
     pub namespace: Option<String>,
     /// Tenant ID extracted from the JWT payload.
     pub tenant_id: String,
@@ -116,7 +121,9 @@ impl HatchetConfig {
 
         let tls = parse_tls_config()?;
 
-        let namespace = env_var("HATCHET_CLIENT_NAMESPACE").ok();
+        let namespace = env_var("HATCHET_CLIENT_NAMESPACE")
+            .ok()
+            .and_then(|namespace| normalize_namespace(&namespace));
 
         let log_level = env_var("HATCHET_CLIENT_LOG_LEVEL")
             .ok()
@@ -150,10 +157,83 @@ impl HatchetConfig {
             }
         }
     }
+
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub(crate) async fn connect_channel(&self) -> Result<tonic::transport::Channel> {
+        let endpoint_url = self.endpoint_url();
+        let mut endpoint =
+            tonic::transport::Channel::from_shared(endpoint_url.clone()).map_err(|error| {
+                Error::Transport(format!("invalid endpoint URL '{endpoint_url}': {error}"))
+            })?;
+
+        match &self.tls {
+            TlsConfig::Insecure => {}
+            TlsConfig::System => {
+                endpoint = endpoint
+                    .tls_config(tonic::transport::ClientTlsConfig::new())
+                    .map_err(|error| {
+                        Error::Transport(format!("system TLS config failed: {error}"))
+                    })?;
+            }
+            TlsConfig::Custom {
+                ca_cert,
+                client_cert,
+                client_key,
+                server_name,
+            } => {
+                let ca_pem = tokio::fs::read(ca_cert).await.map_err(|error| {
+                    Error::Transport(format!("failed to read CA cert: {error}"))
+                })?;
+                let ca = tonic::transport::Certificate::from_pem(ca_pem);
+                let mut tls = tonic::transport::ClientTlsConfig::new().ca_certificate(ca);
+
+                if let (Some(cert_path), Some(key_path)) = (client_cert, client_key) {
+                    let cert_pem = tokio::fs::read(cert_path).await.map_err(|error| {
+                        Error::Transport(format!("failed to read client cert: {error}"))
+                    })?;
+                    let key_pem = tokio::fs::read(key_path).await.map_err(|error| {
+                        Error::Transport(format!("failed to read client key: {error}"))
+                    })?;
+                    tls = tls.identity(tonic::transport::Identity::from_pem(cert_pem, key_pem));
+                }
+
+                if let Some(name) = server_name {
+                    tls = tls.domain_name(name.clone());
+                }
+
+                endpoint = endpoint.tls_config(tls).map_err(|error| {
+                    Error::Transport(format!("custom TLS config failed: {error}"))
+                })?;
+            }
+        }
+
+        endpoint
+            .connect()
+            .await
+            .map_err(|error| Error::Transport(format!("gRPC connect failed: {error}")))
+    }
+}
+
+impl fmt::Debug for HatchetConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HatchetConfig")
+            .field("host_port", &self.host_port)
+            .field("server_url", &self.server_url)
+            .field("token", &"[REDACTED]")
+            .field("tls", &self.tls)
+            .field("namespace", &self.namespace)
+            .field("tenant_id", &self.tenant_id)
+            .field("log_level", &self.log_level)
+            .finish()
+    }
 }
 
 /// Builder for constructing `HatchetConfig` programmatically.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct HatchetConfigBuilder {
     host_port: Option<String>,
     server_url: Option<String>,
@@ -162,6 +242,21 @@ pub struct HatchetConfigBuilder {
     namespace: Option<String>,
     tenant_id: Option<String>,
     log_level: Option<SdkLogLevel>,
+}
+
+impl fmt::Debug for HatchetConfigBuilder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HatchetConfigBuilder")
+            .field("host_port", &self.host_port)
+            .field("server_url", &self.server_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("tls", &self.tls)
+            .field("namespace", &self.namespace)
+            .field("tenant_id", &self.tenant_id)
+            .field("log_level", &self.log_level)
+            .finish()
+    }
 }
 
 impl HatchetConfigBuilder {
@@ -246,11 +341,40 @@ impl HatchetConfigBuilder {
             server_url,
             token,
             tls: self.tls.unwrap_or(TlsConfig::System),
-            namespace: self.namespace,
+            namespace: self.namespace.as_deref().and_then(normalize_namespace),
             tenant_id,
             log_level: self.log_level.unwrap_or_default(),
         })
     }
+}
+
+pub(crate) fn normalize_namespace(namespace: &str) -> Option<String> {
+    let namespace = namespace.trim();
+    if namespace.is_empty() {
+        return None;
+    }
+
+    let mut normalized = namespace.to_lowercase();
+    if !normalized.ends_with('_') {
+        normalized.push('_');
+    }
+    Some(normalized)
+}
+
+pub(crate) fn apply_namespace(name: &str, namespace: Option<&str>) -> String {
+    let Some(namespace) = namespace.and_then(normalize_namespace) else {
+        return name.to_owned();
+    };
+
+    if name.starts_with(&namespace) {
+        name.to_owned()
+    } else {
+        format!("{namespace}{name}")
+    }
+}
+
+pub(crate) fn apply_workflow_namespace(name: &str, namespace: Option<&str>) -> String {
+    apply_namespace(name, namespace).to_lowercase()
 }
 
 // --- JWT decoding (no signature verification, same approach as TS SDK) ---
@@ -418,6 +542,33 @@ mod tests {
     }
 
     #[test]
+    fn builder_normalizes_namespace_like_typescript_sdk() {
+        let config = HatchetConfig::builder()
+            .host_port("localhost:7077")
+            .tenant_id("tenant-1")
+            .token("synthetic-token")
+            .tls(TlsConfig::Insecure)
+            .namespace("Acme")
+            .build()
+            .expect("valid config");
+
+        assert_eq!(config.namespace.as_deref(), Some("acme_"));
+        assert_eq!(
+            apply_namespace("User:Created", config.namespace.as_deref()),
+            "acme_User:Created"
+        );
+        assert_eq!(
+            apply_workflow_namespace("Order-Flow", config.namespace.as_deref()),
+            "acme_order-flow"
+        );
+        assert_eq!(
+            apply_workflow_namespace("acme_order-flow", config.namespace.as_deref()),
+            "acme_order-flow"
+        );
+        assert_eq!(normalize_namespace("  "), None);
+    }
+
+    #[test]
     fn endpoint_url_uses_https_for_tls() {
         use base64::Engine;
         let payload = serde_json::json!({ "sub": "t" });
@@ -433,5 +584,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.endpoint_url(), "https://engine:443");
+    }
+
+    #[test]
+    fn debug_output_redacts_tokens() {
+        let secret = "super-secret-token";
+        let builder = HatchetConfig::builder()
+            .host_port("localhost:7077")
+            .tenant_id("tenant-1")
+            .token(secret)
+            .tls(TlsConfig::Insecure);
+
+        assert!(!format!("{builder:?}").contains(secret));
+        let config = builder.build().expect("valid config");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(secret));
+        assert!(debug.contains("[REDACTED]"));
     }
 }

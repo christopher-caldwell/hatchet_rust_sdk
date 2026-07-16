@@ -1,4 +1,4 @@
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, Context, GrpcTransport, InMemoryContext, InMemoryDurableContext, Result,
     config::HatchetConfig, durable_task, task, workflow,
 };
@@ -12,20 +12,20 @@ mod user_signup_workflow {
 
     // 2. The `#[task]` macro automatically implements the `ErasedTaskFn` mapping to the handler
     #[task]
-    pub async fn validate_data<T: hatchet_sdk::Transport>(
+    pub async fn validate_data<T: another_hatchet_sdk::Transport>(
         input: serde_json::Value,
         ctx: InMemoryContext<T>,
-    ) -> hatchet_sdk::Result<bool> {
+    ) -> another_hatchet_sdk::Result<bool> {
         println!("[{}] Validating data...", ctx.task_name());
         Ok(input.get("email").is_some())
     }
 
     // 3. The `#[durable_task]` macro allows access to the expansive feature-set of DurableContext
     #[durable_task]
-    pub async fn notify_admin<T: hatchet_sdk::Transport>(
+    pub async fn notify_admin<T: another_hatchet_sdk::Transport>(
         input: serde_json::Value,
         ctx: InMemoryDurableContext<T>,
-    ) -> hatchet_sdk::Result<String> {
+    ) -> another_hatchet_sdk::Result<String> {
         println!(
             "[{}] Sent admin notification for {:?}",
             ctx.task_name(),

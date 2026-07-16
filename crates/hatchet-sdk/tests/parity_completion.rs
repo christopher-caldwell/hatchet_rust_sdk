@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hatchet_sdk::*;
+use another_hatchet_sdk::*;
 
 fn test_ids(task_name: &str) -> ContextIds {
     ContextIds {
@@ -70,11 +70,11 @@ fn task_conditions_to_pb_applies_namespace_to_event_keys() {
     assert_eq!(rendered.user_event_conditions.len(), 2);
     assert_eq!(
         rendered.user_event_conditions[0].event_key,
-        "tenant-a/user:created"
+        "tenant-a_user:created"
     );
     assert_eq!(
         rendered.user_event_conditions[1].event_key,
-        "tenant-a/order:cancelled"
+        "tenant-a_order:cancelled"
     );
 }
 
@@ -110,7 +110,10 @@ async fn registration_payload_includes_rendered_conditions() {
                 .cancel_if(Condition::event("abort").build()),
         );
 
-    let _ = client.register_workflow(declaration).await;
+    client
+        .register_workflow(declaration)
+        .await
+        .expect("workflow registration succeeds");
 
     let registrations = transport.workflow_registrations().await;
     assert_eq!(registrations.len(), 1);
@@ -188,9 +191,9 @@ async fn durable_now_returns_same_value() {
     let transport = Arc::new(InMemoryTransport::new());
     let ctx = InMemoryDurableContext::new(test_ids("durable-task"), transport, 1);
 
-    let first = ctx.now().await;
+    let first = ctx.now().await.expect("durable now");
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let second = ctx.now().await;
+    let second = ctx.now().await.expect("durable now");
 
     // Both calls should return the exact same memoized value
     assert_eq!(first, second);
@@ -237,12 +240,15 @@ async fn namespace_applied_to_workflow_name_and_events() {
         .on_event("user:created")
         .on_event("order:placed");
 
-    let registered = client.register_workflow(declaration).await;
+    let registered = client
+        .register_workflow(declaration)
+        .await
+        .expect("workflow registration succeeds");
 
-    assert_eq!(registered.name, "acme/my-flow");
+    assert_eq!(registered.name, "acme_my-flow");
     assert_eq!(
         registered.on_events,
-        vec!["acme/user:created", "acme/order:placed"]
+        vec!["acme_user:created", "acme_order:placed"]
     );
 }
 
@@ -254,7 +260,10 @@ async fn no_namespace_leaves_names_unchanged() {
     let declaration = WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("my-flow")
         .on_event("user:created");
 
-    let registered = client.register_workflow(declaration).await;
+    let registered = client
+        .register_workflow(declaration)
+        .await
+        .expect("workflow registration succeeds");
 
     assert_eq!(registered.name, "my-flow");
     assert_eq!(registered.on_events, vec!["user:created"]);
@@ -301,7 +310,10 @@ async fn lifecycle_hooks_serialized_in_registration() {
         .on_failure_task(&failure_handler)
         .description("With hooks");
 
-    let registered = client.register_workflow(decl).await;
+    let registered = client
+        .register_workflow(decl)
+        .await
+        .expect("workflow registration succeeds");
     assert_eq!(registered.on_failure.as_deref(), Some("on-fail"));
 }
 
@@ -379,7 +391,9 @@ async fn worker_wait_until_ready_and_health_server() {
 
     let handle = match start_result {
         Ok(handle) => handle,
-        Err(hatchet_sdk::Error::Worker(message)) if message.contains("Operation not permitted") => {
+        Err(another_hatchet_sdk::Error::Worker(message))
+            if message.contains("Operation not permitted") =>
+        {
             return;
         }
         Err(error) => panic!("worker start should succeed: {error}"),
@@ -463,7 +477,10 @@ async fn durable_steps_register_and_execute_in_workflow_graph() {
     let declaration =
         WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("durable-wf")
             .durable_step(&durable, TaskConfig::default());
-    client.register_workflow(declaration).await;
+    client
+        .register_workflow(declaration)
+        .await
+        .expect("workflow registration succeeds");
 
     let registrations = transport.workflow_registrations().await;
     assert!(registrations[0].tasks[0].is_durable);
@@ -497,7 +514,10 @@ async fn on_success_hook_is_materialized_as_terminal_step() {
     let declaration = WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("hook-wf")
         .step(&leaf, TaskConfig::default())
         .on_success_task(&on_success);
-    client.register_workflow(declaration).await;
+    client
+        .register_workflow(declaration)
+        .await
+        .expect("workflow registration succeeds");
 
     let registrations = transport.workflow_registrations().await;
     assert_eq!(registrations[0].tasks.len(), 2);
@@ -524,7 +544,8 @@ async fn workers_client_pause_lifecycle_helpers() {
             paused: false,
             labels: Default::default(),
         })
-        .await;
+        .await
+        .unwrap();
 
     assert!(!client.workers().is_paused("worker-a").await.unwrap());
     client.workers().pause("worker-a").await.unwrap();

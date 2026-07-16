@@ -1,4 +1,4 @@
-//! Minimal Rust-first Hatchet SDK surface for personal use.
+//! An unofficial Rust-first Hatchet SDK.
 //!
 //! This crate is intentionally scoped around:
 //! - typed workflow declaration and run APIs
@@ -22,19 +22,19 @@ mod transport;
 mod worker;
 mod workflow;
 
-// New modules for production-ready infrastructure
-#[cfg(feature = "grpc")]
 pub mod config;
-#[cfg(feature = "grpc")]
 pub mod durable_listener;
 pub mod eviction;
-#[cfg(feature = "grpc")]
 pub mod grpc_transport;
 pub mod health;
-#[cfg(feature = "grpc")]
 pub mod proto;
 pub mod retry;
 
+pub use another_hatchet_core::{
+    DesiredWorkerLabel, DesiredWorkerLabelConfig, Priority, RunOpts,
+    WorkerLabelComparator as RunWorkerLabelComparator, WorkflowRunId,
+};
+pub use another_hatchet_macros::{durable_task, task, workflow};
 pub use client::{Client, DurableTaskHandle, TaskHandle, WorkflowHandle};
 pub use clients::{
     CelClient, CelDebugResult, Cron, CronsClient, EventRecord, EventsClient, FilterDefinition,
@@ -53,11 +53,6 @@ pub use durable::{
     render_conditions, task_conditions_to_pb,
 };
 pub use error::{Error, Result};
-pub use hatchet_core::{
-    DesiredWorkerLabel, DesiredWorkerLabelConfig, Priority, RunOpts,
-    WorkerLabelComparator as RunWorkerLabelComparator, WorkflowRunId,
-};
-pub use hatchet_macros::{durable_task, task, workflow};
 pub use run_ref::{RunControl, WorkflowRunRef};
 pub use task::{
     BackoffConfig, ConcurrencyConfig, ConcurrencyLimitStrategy, DesiredLabelConfig, LabelValue,
@@ -65,20 +60,17 @@ pub use task::{
     WorkerLabelComparator,
 };
 pub use transport::{
-    InMemoryTransport, SubmittedRun, TaskRegistration, Transport, WorkflowRegistration,
+    InMemoryTransport, SubmittedRun, TaskRegistration, Transport, WorkerConnectionState,
+    WorkerStartOpts, WorkflowRegistration,
 };
 pub use worker::{Worker, WorkerBuilder, WorkerHandle};
 pub use workflow::{
     DefaultFilterExpression, StepConditions, StickyStrategy, WorkflowDeclaration, WorkflowStep,
 };
 
-// Conditional gRPC exports
-#[cfg(feature = "grpc")]
 pub use config::{HatchetConfig, HatchetConfigBuilder, SdkLogLevel, TlsConfig};
-#[cfg(feature = "grpc")]
 pub use durable_listener::DurableListenerClient;
 pub use eviction::{ActionKey, EvictionConfig, EvictionManager, TaskState};
-#[cfg(feature = "grpc")]
 pub use grpc_transport::GrpcTransport;
 pub use health::{HealthServer, HealthState};
 pub use retry::RetryConfig;

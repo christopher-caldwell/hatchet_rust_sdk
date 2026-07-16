@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::client::{DurableTaskHandle, TaskHandle};
 use crate::durable::Conditions;
 use crate::task::{ConcurrencyConfig, TaskConfig};
-use hatchet_core::Priority;
+use another_hatchet_core::Priority;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowDeclaration<I, O> {

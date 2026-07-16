@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
+use another_hatchet_core::{RunOpts, WorkflowRunId};
 use async_trait::async_trait;
-use hatchet_core::{RunOpts, WorkflowRunId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -14,6 +14,8 @@ use crate::clients::{
     MetricsClient, RateLimitsClient, RunsClient, Schedule, SchedulesClient, TenantClient,
     WebhooksClient, WorkersClient, WorkflowsClient, record_run,
 };
+use crate::config::{apply_namespace, apply_workflow_namespace, normalize_namespace};
+use crate::durable::condition_validation_errors;
 use crate::error::{Error, Result};
 use crate::run_ref::{RunControl, WorkflowRunRef};
 use crate::task::TaskConfig;
@@ -71,6 +73,7 @@ impl<T: Transport + 'static> Client<T> {
     #[must_use]
     pub fn new(transport: Arc<T>) -> Self {
         let state = Arc::new(RwLock::new(FeatureState::default()));
+        let namespace = transport.namespace().and_then(normalize_namespace);
         Self {
             runs: RunsClient::new(Arc::clone(&transport), Arc::clone(&state)),
             workflows: WorkflowsClient::new(Arc::clone(&transport), Arc::clone(&state)),
@@ -85,7 +88,7 @@ impl<T: Transport + 'static> Client<T> {
             webhooks: WebhooksClient::new(Arc::clone(&transport), Arc::clone(&state)),
             cel: CelClient::new(Arc::clone(&transport)),
             tenant: TenantClient::new(Arc::clone(&transport)),
-            namespace: None,
+            namespace,
             transport,
             state,
         }
@@ -96,7 +99,7 @@ impl<T: Transport + 'static> Client<T> {
     /// during run dispatch.
     #[must_use]
     pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
-        self.namespace = Some(namespace.into());
+        self.namespace = normalize_namespace(&namespace.into());
         self
     }
 
@@ -109,7 +112,7 @@ impl<T: Transport + 'static> Client<T> {
     #[must_use]
     pub fn workflow<I, O>(&self, workflow_name: impl Into<String>) -> WorkflowHandle<T, I, O> {
         WorkflowHandle {
-            workflow_name: workflow_name.into(),
+            workflow_name: self.qualify_workflow_name(&workflow_name.into()),
             transport: Arc::clone(&self.transport),
             state: Arc::clone(&self.state),
             run_control: Arc::new((*self).clone()),
@@ -215,36 +218,97 @@ impl<T: Transport + 'static> Client<T> {
         &self.tenant
     }
 
+    /// Registers a workflow with the configured transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns serialization, management, or engine-registration failures.
     pub async fn register_workflow<I, O>(
         &self,
         mut declaration: WorkflowDeclaration<I, O>,
-    ) -> WorkflowDeclaration<I, O> {
+    ) -> Result<WorkflowDeclaration<I, O>> {
+        self.register_workflow_inner(&mut declaration).await?;
+        Ok(declaration)
+    }
+
+    /// Registers a workflow and propagates management or engine failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first workflow-management or engine-registration error.
+    #[deprecated(note = "use register_workflow; it now propagates registration failures")]
+    pub async fn register_workflow_checked<I, O>(
+        &self,
+        declaration: WorkflowDeclaration<I, O>,
+    ) -> Result<WorkflowDeclaration<I, O>> {
+        self.register_workflow(declaration).await
+    }
+
+    async fn register_workflow_inner<I, O>(
+        &self,
+        declaration: &mut WorkflowDeclaration<I, O>,
+    ) -> Result<()> {
         // Apply namespace to workflow name and triggers
-        if let Some(ns) = &self.namespace {
-            declaration.name = format!("{ns}/{}", declaration.name).to_lowercase();
-            declaration.on_events = declaration
-                .on_events
+        if self.namespace.is_some() {
+            declaration.name = self.qualify_workflow_name(&declaration.name);
+            declaration.on_events = std::mem::take(&mut declaration.on_events)
                 .into_iter()
-                .map(|event| format!("{ns}/{event}"))
+                .map(|event| self.qualify_event_key(&event))
                 .collect();
         }
-        let serialized = serde_json::to_value(&declaration).unwrap_or(Value::Null);
-        let materialized =
-            serde_json::from_value::<WorkflowDeclaration<Value, Value>>(serialized.clone())
-                .map(WorkflowDeclaration::materialized)
-                .unwrap_or_else(|_| WorkflowDeclaration::<Value, Value>::new(&declaration.name));
-        let _ = self
-            .workflows
-            .put(
-                &declaration.name,
-                serde_json::to_value(&materialized).unwrap_or(Value::Null),
-            )
-            .await;
-        let _ = self
-            .transport
+        let serialized = serde_json::to_value(&declaration).map_err(|error| {
+            Error::InputSerialization(format!(
+                "workflow declaration '{}': {error}",
+                declaration.name
+            ))
+        })?;
+        let materialized = serde_json::from_value::<WorkflowDeclaration<Value, Value>>(serialized)
+            .map(WorkflowDeclaration::materialized)
+            .map_err(|error| {
+                Error::InputSerialization(format!(
+                    "workflow declaration '{}': {error}",
+                    declaration.name
+                ))
+            })?;
+        let validation_errors = materialized
+            .steps
+            .iter()
+            .flat_map(|step| {
+                step.wait_for
+                    .iter()
+                    .chain(&step.cancel_if)
+                    .chain(&step.skip_if)
+                    .flat_map(|conditions| {
+                        condition_validation_errors(conditions)
+                            .into_iter()
+                            .map(|error| format!("workflow step '{}': {error}", step.task_name))
+                    })
+            })
+            .collect::<Vec<_>>();
+        if !validation_errors.is_empty() {
+            return Err(Error::InputValidation(validation_errors));
+        }
+        let definition = serde_json::to_value(&materialized).map_err(|error| {
+            Error::InputSerialization(format!(
+                "materialized workflow declaration '{}': {error}",
+                declaration.name
+            ))
+        })?;
+        self.transport
             .register_workflow_definition(materialized)
+            .await?;
+        self.workflows
+            .record_put(&declaration.name, definition)
             .await;
-        declaration
+        Ok(())
+    }
+
+    fn qualify_workflow_name(&self, name: &str) -> String {
+        apply_workflow_namespace(name, self.namespace.as_deref())
+    }
+
+    fn qualify_event_key(&self, key: &str) -> String {
+        apply_namespace(key, self.namespace.as_deref())
     }
 
     /// Returns a typed `WorkflowRunRef` for an existing run ID.

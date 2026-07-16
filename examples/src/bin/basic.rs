@@ -1,4 +1,4 @@
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, Context, InMemoryContext, InMemoryTransport, Result, TaskConfig, WorkflowDeclaration,
 };
 use std::sync::Arc;
@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
             .step(&my_task, TaskConfig::default());
 
     // Register the workflow to the hatchet engine
-    let _ = client.register_workflow(workflow_decl).await;
+    client.register_workflow(workflow_decl).await?;
 
     // 6. trigger the workflow run
     println!("Triggering workflow run...");
@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         .workflow::<serde_json::Value, String>("basic-workflow")
         .run_no_wait(
             serde_json::json!({"test": "data"}),
-            hatchet_sdk::RunOpts::default(),
+            another_hatchet_sdk::RunOpts::default(),
         )
         .await?;
 

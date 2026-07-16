@@ -3,16 +3,19 @@
 Run any example with:
 
 ```bash
-cargo run -p example --bin <name>
+cargo run -p another-hatchet-sdk-examples --bin <name>
 ```
 
 Available binaries:
 
-- `declare_and_run`
-- `context_child_runs`
-- `durable_context`
-- `worker_runtime`
-- `feature_clients`
-- `validation_suite`
-- `proc_macros`
-- `quickstart_child_workflow`
+- `basic`
+- `child_workflows`
+- `children_workflows`
+- `concurrency`
+- `conditions`
+- `dag`
+- `durable_execution`
+- `macros`
+- `rate_limits`
+- `rate_limits_in_memory`
+- `standalone_functions`

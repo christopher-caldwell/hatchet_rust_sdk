@@ -1,17 +1,17 @@
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 
+use another_hatchet_core::{RunOpts, WorkflowRunId};
 use async_trait::async_trait;
-use hatchet_core::{RunOpts, WorkflowRunId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex, broadcast};
 use tokio::time::{sleep, timeout};
 
 use crate::client::WorkflowHandle;
-use crate::context::{Context, ContextExt, ContextIds, InMemoryContext};
+use crate::config::apply_namespace;
+use crate::context::{Context, ContextIds, InMemoryContext, TriggerData};
 use crate::durable_listener::DurableListenerClient;
 use crate::error::{Error, Result};
 use crate::proto::v1;
@@ -346,6 +346,11 @@ impl EventConditionBuilder {
         self
     }
 
+    /// Includes matching events published before the wait was established.
+    ///
+    /// Hatchet requires a matching [`Self::scope`] when lookback is enabled.
+    /// Engine-backed workflow registration and runtime waits reject an
+    /// unscoped lookback instead of silently waiting only for future events.
     #[must_use]
     pub fn lookback(mut self, lookback_window: Duration) -> Self {
         self.lookback_window = Some(lookback_window);
@@ -390,6 +395,34 @@ impl EventConditionBuilder {
 pub enum Conditions {
     Single(Condition),
     Or(Vec<Condition>),
+}
+
+pub(crate) fn condition_validation_errors(conditions: &Conditions) -> Vec<String> {
+    let conditions = match conditions {
+        Conditions::Single(condition) => std::slice::from_ref(condition),
+        Conditions::Or(conditions) => conditions.as_slice(),
+    };
+
+    let mut errors = Vec::new();
+    if conditions.is_empty() {
+        errors.push("durable wait requires at least one condition".to_owned());
+    }
+    errors.extend(
+        conditions
+        .iter()
+        .filter_map(|condition| match condition {
+            Condition::Event(event)
+                if event.lookback_window.is_some() && event.scope.is_none() =>
+            {
+                Some(format!(
+                    "event condition '{}' uses lookback without a scope; call .scope(...) when using .lookback(...)",
+                    event.event_key
+                ))
+            }
+            _ => None,
+        })
+    );
+    errors
 }
 
 impl From<Condition> for Conditions {
@@ -554,7 +587,7 @@ pub fn task_conditions_to_pb(step: &WorkflowStep, namespace: Option<&str>) -> Re
 /// Applies a namespace prefix to all event keys in rendered conditions.
 fn apply_namespace_to_conditions(rendered: &mut RenderedConditions, namespace: &str) {
     for event in &mut rendered.user_event_conditions {
-        event.event_key = format!("{namespace}/{}", event.event_key);
+        event.event_key = apply_namespace(&event.event_key, Some(namespace));
     }
 }
 
@@ -575,11 +608,11 @@ pub trait DurableContext: Context {
     fn invocation_count(&self) -> u32;
     fn supports_eviction(&self) -> bool;
 
-    async fn now(&self) -> SystemTime;
+    async fn now(&self) -> Result<SystemTime>;
 
-    async fn sleep_for(&self, duration: Duration);
+    async fn sleep_for(&self, duration: Duration) -> Result<()>;
 
-    async fn sleep_until(&self, at: SystemTime);
+    async fn sleep_until(&self, at: SystemTime) -> Result<()>;
 
     async fn wait_for_event(
         &self,
@@ -647,6 +680,70 @@ impl<T: Transport> InMemoryDurableContext<T> {
         self
     }
 
+    #[must_use]
+    pub fn with_run_opts(mut self, opts: &RunOpts) -> Self {
+        self.base = self.base.with_run_opts(opts);
+        self
+    }
+
+    #[must_use]
+    pub fn with_retry_count(mut self, retry_count: u32) -> Self {
+        self.base = self.base.with_retry_count(retry_count);
+        self
+    }
+
+    #[must_use]
+    pub fn with_filter_payload(mut self, filter_payload: Value) -> Self {
+        self.base = self.base.with_filter_payload(filter_payload);
+        self
+    }
+
+    #[must_use]
+    pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
+        self.base = self.base.with_worker_id(worker_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_trigger_data(mut self, trigger_data: TriggerData) -> Self {
+        self.base = self.base.with_trigger_data(trigger_data);
+        self
+    }
+
+    #[must_use]
+    pub fn with_errors(mut self, errors: std::collections::HashMap<String, String>) -> Self {
+        self.base = self.base.with_errors(errors);
+        self
+    }
+
+    #[must_use]
+    pub fn with_parent_output(
+        mut self,
+        parent_task_name: impl Into<String>,
+        parent_output: Value,
+    ) -> Self {
+        self.base = self
+            .base
+            .with_parent_output(parent_task_name, parent_output);
+        self
+    }
+
+    #[must_use]
+    pub fn with_parent_outputs(
+        mut self,
+        parent_outputs: std::collections::HashMap<String, Value>,
+    ) -> Self {
+        self.base = self.base.with_parent_outputs(parent_outputs);
+        self
+    }
+
+    /// Installs the engine/worker cancellation token in the durable context.
+    #[must_use]
+    pub fn with_cancel_token(mut self, cancel_token: tokio_util::sync::CancellationToken) -> Self {
+        self.base = self.base.with_cancel_token(cancel_token);
+        self
+    }
+
     /// Emits a test event into this in-memory durable context.
     ///
     /// # Errors
@@ -681,7 +778,17 @@ impl<T: Transport> InMemoryDurableContext<T> {
     where
         I: Serialize,
     {
-        self.base.run_child(workflow, input, opts).await
+        let workflow_name = workflow.workflow_name_owned();
+        let run_id = DurableContext::spawn_child_json(
+            self,
+            &workflow_name,
+            serde_json::to_value(input).map_err(|error| {
+                Error::InputSerialization(format!("workflow {workflow_name}: {error}"))
+            })?,
+            opts,
+        )
+        .await?;
+        Ok(WorkflowRunRef::new(run_id, workflow.run_control()))
     }
 
     /// Spawns many child workflows from durable context.
@@ -699,7 +806,21 @@ impl<T: Transport> InMemoryDurableContext<T> {
     where
         I: Serialize,
     {
-        self.base.bulk_run_children(workflow, inputs, opts).await
+        let workflow_name = workflow.workflow_name_owned();
+        let values = inputs
+            .into_iter()
+            .map(|input| {
+                serde_json::to_value(input).map_err(|error| {
+                    Error::InputSerialization(format!("workflow {workflow_name}: {error}"))
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let run_ids =
+            DurableContext::spawn_children_json(self, &workflow_name, values, opts).await?;
+        Ok(run_ids
+            .into_iter()
+            .map(|run_id| WorkflowRunRef::new(run_id, workflow.run_control()))
+            .collect())
     }
 
     fn emit_observed_event(
@@ -725,11 +846,11 @@ impl<T: Transport> InMemoryDurableContext<T> {
     async fn wait_for_condition(&self, condition: &Condition) -> Result<Option<Value>> {
         match condition {
             Condition::SleepFor(sleep) => {
-                self.sleep_for(sleep.duration).await;
+                self.sleep_for(sleep.duration).await?;
                 Ok(None)
             }
             Condition::SleepUntil(sleep) => {
-                self.sleep_until(sleep.at).await;
+                self.sleep_until(sleep.at).await?;
                 Ok(None)
             }
             Condition::Event(event) => Ok(Some(self.wait_for_event_condition(event).await?)),
@@ -963,7 +1084,10 @@ impl<T: Transport> InMemoryDurableContext<T> {
                     });
                     event_conds.push(v1::UserEventMatchCondition {
                         base: Some(condition_base_to_proto(&base)),
-                        user_event_key: event.event_key.clone(),
+                        user_event_key: apply_namespace(
+                            &event.event_key,
+                            self.base.transport_namespace(),
+                        ),
                         event_scope: event.scope.clone(),
                         consider_events_since,
                     });
@@ -1000,18 +1124,7 @@ impl<T: Transport> InMemoryDurableContext<T> {
             .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
             .await?;
 
-        let payload = if result.payload.is_empty() {
-            None
-        } else {
-            serde_json::from_slice::<Value>(&result.payload).ok()
-        };
-
-        let (matched_index, matched_condition) = match &conditions {
-            Conditions::Single(c) => (0, c),
-            Conditions::Or(cs) => (0, &cs[0]),
-        };
-
-        Ok(condition_output(matched_index, matched_condition, payload))
+        condition_output_from_engine(&raw_conditions, &result.payload)
     }
 }
 
@@ -1060,7 +1173,7 @@ impl<T: Transport> Context for InMemoryDurableContext<T> {
         self.base.additional_metadata()
     }
 
-    fn priority(&self) -> Option<hatchet_core::Priority> {
+    fn priority(&self) -> Option<another_hatchet_core::Priority> {
         self.base.priority()
     }
 
@@ -1138,8 +1251,8 @@ impl<T: Transport> Context for InMemoryDurableContext<T> {
             .await
     }
 
-    async fn parent_output_json(&self) -> Result<Option<Value>> {
-        self.base.parent_output_json().await
+    async fn parent_output_json(&self, parent_task_name: &str) -> Result<Value> {
+        self.base.parent_output_json(parent_task_name).await
     }
 
     async fn log(
@@ -1184,64 +1297,76 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
         self.durable_listener.is_some()
     }
 
-    async fn now(&self) -> SystemTime {
-        let mut now = self.memoized_now.lock().await;
-        if let Some(existing) = *now {
-            return existing;
+    async fn now(&self) -> Result<SystemTime> {
+        if let Some(existing) = *self.memoized_now.lock().await {
+            return Ok(existing);
         }
-        let current = SystemTime::now();
-        *now = Some(current);
-        current
+
+        let millis = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|error| Error::Durable(format!("system clock before Unix epoch: {error}")))?
+            .as_millis();
+        let memoized = self
+            .memo(
+                "__another_hatchet_sdk_now",
+                serde_json::json!({ "unix_millis": millis.to_string() }),
+            )
+            .await?;
+        let millis = memoized
+            .get("unix_millis")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Durable("memoized clock payload is invalid".to_owned()))?
+            .parse::<u64>()
+            .map_err(|error| Error::Durable(format!("memoized clock decode: {error}")))?;
+        let current = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_millis(millis))
+            .ok_or_else(|| Error::Durable("memoized clock is out of range".to_owned()))?;
+        *self.memoized_now.lock().await = Some(current);
+        Ok(current)
     }
 
-    async fn sleep_for(&self, duration: Duration) {
+    async fn sleep_for(&self, duration: Duration) -> Result<()> {
         if let Some(listener) = &self.durable_listener {
             let task_id = self.base.task_run_id();
             let inv = self.invocation_count as i32;
-            let conditions =
-                condition_to_durable_listener_proto(&Condition::SleepFor(SleepCondition {
+            let conditions = condition_to_durable_listener_proto(
+                &Condition::SleepFor(SleepCondition {
                     duration,
                     metadata: ConditionMetadata::default(),
-                }));
-            match listener.send_wait_for(task_id, inv, conditions).await {
-                Ok(ack) => {
-                    let _ = listener
-                        .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
-                        .await;
-                    return;
-                }
-                Err(error) => {
-                    eprintln!("durable sleep_for engine call failed, falling back: {error}");
-                }
-            }
+                }),
+                self.base.transport_namespace(),
+            );
+            let ack = listener.send_wait_for(task_id, inv, conditions).await?;
+            listener
+                .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
+                .await?;
+            return Ok(());
         }
         sleep(duration).await;
+        Ok(())
     }
 
-    async fn sleep_until(&self, at: SystemTime) {
+    async fn sleep_until(&self, at: SystemTime) -> Result<()> {
         if let Some(listener) = &self.durable_listener {
             let task_id = self.base.task_run_id();
             let inv = self.invocation_count as i32;
-            let conditions =
-                condition_to_durable_listener_proto(&Condition::SleepUntil(SleepUntilCondition {
+            let conditions = condition_to_durable_listener_proto(
+                &Condition::SleepUntil(SleepUntilCondition {
                     at,
                     metadata: ConditionMetadata::default(),
-                }));
-            match listener.send_wait_for(task_id, inv, conditions).await {
-                Ok(ack) => {
-                    let _ = listener
-                        .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
-                        .await;
-                    return;
-                }
-                Err(error) => {
-                    eprintln!("durable sleep_until engine call failed, falling back: {error}");
-                }
-            }
+                }),
+                self.base.transport_namespace(),
+            );
+            let ack = listener.send_wait_for(task_id, inv, conditions).await?;
+            listener
+                .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
+                .await?;
+            return Ok(());
         }
         if let Ok(duration) = at.duration_since(SystemTime::now()) {
             sleep(duration).await;
         }
+        Ok(())
     }
 
     async fn wait_for_event(
@@ -1252,36 +1377,40 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
         if let Some(listener) = &self.durable_listener {
             let task_id = self.base.task_run_id();
             let inv = self.invocation_count as i32;
-            let conditions =
-                condition_to_durable_listener_proto(&Condition::Event(EventCondition {
+            let conditions = condition_to_durable_listener_proto(
+                &Condition::Event(EventCondition {
                     event_key: event_key.to_owned(),
                     expression: None,
                     scope: None,
                     lookback_window: None,
                     metadata: ConditionMetadata::default(),
-                }));
-            match listener.send_wait_for(task_id, inv, conditions).await {
-                Ok(ack) => {
-                    match tokio::time::timeout(
-                        timeout_after,
-                        listener.wait_for_callback(task_id, inv, ack.branch_id, ack.node_id),
-                    )
-                    .await
-                    {
-                        Ok(Ok(result)) => {
-                            return serde_json::from_slice(&result.payload)
-                                .map(Some)
-                                .map_err(|e| Error::Durable(format!("payload decode: {e}")));
-                        }
-                        Ok(Err(error)) => {
-                            return Err(error);
-                        }
-                        Err(_) => return Ok(None),
-                    }
+                }),
+                self.base.transport_namespace(),
+            );
+            let ack = listener.send_wait_for(task_id, inv, conditions).await?;
+            match tokio::time::timeout(
+                timeout_after,
+                listener.wait_for_callback(task_id, inv, ack.branch_id, ack.node_id),
+            )
+            .await
+            {
+                Ok(Ok(result)) => {
+                    let output = condition_output_from_engine(
+                        &[Condition::Event(EventCondition {
+                            event_key: event_key.to_owned(),
+                            expression: None,
+                            scope: None,
+                            lookback_window: None,
+                            metadata: ConditionMetadata::default(),
+                        })],
+                        &result.payload,
+                    )?;
+                    return Ok(output.payload);
                 }
-                Err(error) => {
-                    eprintln!("durable wait_for_event engine call failed, falling back: {error}");
+                Ok(Err(error)) => {
+                    return Err(error);
                 }
+                Err(_) => return Ok(None),
             }
         }
 
@@ -1322,6 +1451,10 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
     }
 
     async fn wait_for(&self, conditions: Conditions) -> Result<ConditionOutput> {
+        let validation_errors = condition_validation_errors(&conditions);
+        if !validation_errors.is_empty() {
+            return Err(Error::InputValidation(validation_errors));
+        }
         if let Some(listener) = &self.durable_listener {
             return self.wait_for_engine(listener, conditions).await;
         }
@@ -1350,7 +1483,9 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
                     return serde_json::from_slice::<Value>(&cached)
                         .map_err(|e| Error::Durable(format!("memo cached decode: {e}")));
                 }
-                return Ok(value);
+                return Err(Error::Durable(
+                    "memo entry exists but its cached payload is missing".to_owned(),
+                ));
             }
             let entry_ref = v1::DurableEventLogEntryRef {
                 durable_task_external_id: task_id.to_owned(),
@@ -1373,6 +1508,36 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
         input: Value,
         opts: RunOpts,
     ) -> Result<WorkflowRunId> {
+        if let Some(listener) = &self.durable_listener {
+            let opts = self.base.child_run_opts(opts);
+            let ack = listener
+                .send_trigger_runs(
+                    self.base.task_run_id(),
+                    self.invocation_count as i32,
+                    vec![durable_child_trigger(workflow_name, input, &opts)?],
+                )
+                .await?;
+            let mut entries = ack.run_entries;
+            if entries.len() != 1 {
+                return Err(Error::Durable(format!(
+                    "durable child trigger returned {} run entries; expected 1",
+                    entries.len()
+                )));
+            }
+            let entry = entries.remove(0);
+            let completion = listener
+                .wait_for_callback(
+                    self.base.task_run_id(),
+                    self.invocation_count as i32,
+                    entry.branch_id,
+                    entry.node_id,
+                )
+                .await?;
+            let output = durable_callback_payload(&completion.payload)?;
+            let run_id = WorkflowRunId(entry.workflow_run_external_id);
+            self.base.cache_run_result(&run_id, Ok(output)).await;
+            return Ok(run_id);
+        }
         self.base.run_child_json(workflow_name, input, opts).await
     }
 
@@ -1382,10 +1547,101 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
         inputs: Vec<Value>,
         opts: RunOpts,
     ) -> Result<Vec<WorkflowRunId>> {
+        if let Some(listener) = &self.durable_listener {
+            if inputs.is_empty() {
+                return Ok(Vec::new());
+            }
+            let opts = self.base.bulk_child_run_opts(opts, inputs.len());
+            let first_child_index = opts.child_index;
+            let triggers = inputs
+                .into_iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    let mut child_opts = opts.clone();
+                    child_opts.child_index =
+                        first_child_index.map(|first| first.saturating_add(index as u64));
+                    durable_child_trigger(workflow_name, input, &child_opts)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let ack = listener
+                .send_trigger_runs(
+                    self.base.task_run_id(),
+                    self.invocation_count as i32,
+                    triggers,
+                )
+                .await?;
+            let mut run_ids = Vec::with_capacity(ack.run_entries.len());
+            for entry in ack.run_entries {
+                let completion = listener
+                    .wait_for_callback(
+                        self.base.task_run_id(),
+                        self.invocation_count as i32,
+                        entry.branch_id,
+                        entry.node_id,
+                    )
+                    .await?;
+                let output = durable_callback_payload(&completion.payload)?;
+                let run_id = WorkflowRunId(entry.workflow_run_external_id);
+                self.base.cache_run_result(&run_id, Ok(output)).await;
+                run_ids.push(run_id);
+            }
+            return Ok(run_ids);
+        }
         self.base
             .bulk_run_children_json(workflow_name, inputs, opts)
             .await
     }
+}
+
+fn durable_child_trigger(
+    workflow_name: &str,
+    input: Value,
+    opts: &RunOpts,
+) -> Result<v1::TriggerWorkflowRequest> {
+    let additional_metadata = if opts.additional_metadata.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&opts.additional_metadata).map_err(|error| {
+                Error::InputSerialization(format!("child workflow metadata: {error}"))
+            })?,
+        )
+    };
+    let desired_worker_labels = opts
+        .desired_worker_labels
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                crate::grpc_transport::run_opt_label_to_proto(value),
+            )
+        })
+        .collect();
+
+    Ok(v1::TriggerWorkflowRequest {
+        name: workflow_name.to_owned(),
+        input: serde_json::to_string(&input).map_err(|error| {
+            Error::InputSerialization(format!("child workflow {workflow_name}: {error}"))
+        })?,
+        parent_id: opts.parent_workflow_run_id.clone(),
+        parent_task_run_external_id: opts.parent_task_run_id.clone(),
+        child_index: opts
+            .child_index
+            .map(|index| index.min(i32::MAX as u64) as i32),
+        child_key: opts.child_key.clone(),
+        additional_metadata,
+        desired_worker_id: opts.sticky.clone(),
+        priority: opts.priority.map(crate::grpc_transport::priority_to_i32),
+        desired_worker_labels,
+    })
+}
+
+fn durable_callback_payload(payload: &[u8]) -> Result<Value> {
+    if payload.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(payload)
+        .map_err(|error| Error::Durable(format!("child output decode: {error}")))
 }
 
 fn resolve_event_payload(event: &EventCondition, observed: &ObservedDurableEvent) -> Option<Value> {
@@ -1521,8 +1777,7 @@ fn format_duration_key(duration: Duration) -> String {
 }
 
 fn next_or_group_id() -> String {
-    static NEXT_OR_GROUP_ID: AtomicU64 = AtomicU64::new(1);
-    format!("or-{}", NEXT_OR_GROUP_ID.fetch_add(1, Ordering::Relaxed))
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn sleep_deadline(condition: &Condition, started_at: SystemTime) -> Option<SystemTime> {
@@ -1566,6 +1821,64 @@ fn condition_output(
     }
 }
 
+fn condition_output_from_engine(
+    conditions: &[Condition],
+    payload: &[u8],
+) -> Result<ConditionOutput> {
+    let first_condition = conditions.first().ok_or_else(|| {
+        Error::InputValidation(vec![
+            "durable wait requires at least one condition".to_owned(),
+        ])
+    })?;
+
+    if payload.is_empty() {
+        return Ok(condition_output(0, first_condition, None));
+    }
+
+    let decoded = serde_json::from_slice::<Value>(payload)
+        .map_err(|error| Error::Durable(format!("wait callback payload decode: {error}")))?;
+
+    // Hatchet wraps match data as
+    // {"CREATE":{"readable-key":[<event payload>]}}. Resolve the key back to
+    // its condition so OR waits report the actual branch and engine-backed
+    // event waits match the bare-payload behavior of the in-memory runtime.
+    for (index, condition) in conditions.iter().enumerate() {
+        let action = condition_action_key(
+            condition
+                .metadata()
+                .action
+                .unwrap_or(ConditionAction::Create),
+        );
+        let readable_key = proto_readable_data_key(condition);
+        let Some(first_match) = decoded
+            .get(action)
+            .and_then(Value::as_object)
+            .and_then(|matches| matches.get(&readable_key))
+            .and_then(Value::as_array)
+            .and_then(|matches| matches.first())
+        else {
+            continue;
+        };
+
+        let event_payload = matches!(condition, Condition::Event(_)).then(|| first_match.clone());
+        return Ok(condition_output(index, condition, event_payload));
+    }
+
+    // Older engines may return a bare payload for a single event condition.
+    // Preserve that shape while keeping sleep callbacks payload-free.
+    let event_payload = matches!(first_condition, Condition::Event(_)).then_some(decoded);
+    Ok(condition_output(0, first_condition, event_payload))
+}
+
+fn condition_action_key(action: ConditionAction) -> &'static str {
+    match action {
+        ConditionAction::Create => "CREATE",
+        ConditionAction::Queue => "QUEUE",
+        ConditionAction::Cancel => "CANCEL",
+        ConditionAction::Skip => "SKIP",
+    }
+}
+
 fn condition_readable_data_key(condition: &Condition) -> Option<String> {
     match condition {
         Condition::Event(event) => Some(
@@ -1589,6 +1902,7 @@ fn condition_readable_data_key(condition: &Condition) -> Option<String> {
 
 fn condition_to_durable_listener_proto(
     condition: &Condition,
+    namespace: Option<&str>,
 ) -> v1::DurableEventListenerConditions {
     let base = base_match_condition(condition);
     let proto_base = condition_base_to_proto(&base);
@@ -1611,7 +1925,7 @@ fn condition_to_durable_listener_proto(
             sleep_conditions: vec![],
             user_event_conditions: vec![v1::UserEventMatchCondition {
                 base: Some(proto_base),
-                user_event_key: event.event_key.clone(),
+                user_event_key: apply_namespace(&event.event_key, namespace),
                 event_scope: event.scope.clone(),
                 consider_events_since: event.lookback_window.map(|window| {
                     let since = SystemTime::now()
@@ -1725,7 +2039,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap_year(year: u64) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 #[async_trait]
@@ -1741,7 +2055,19 @@ pub trait DurableContextExt: DurableContext {
         I: Serialize + Send,
         O: serde::de::DeserializeOwned + Send + 'static,
     {
-        ContextExt::run_child(self, workflow, input, opts).await
+        let workflow_name = workflow.workflow_name_owned();
+        let run_id = self
+            .spawn_child_json(
+                &workflow_name,
+                serde_json::to_value(input).map_err(|error| {
+                    Error::InputSerialization(format!("workflow {workflow_name}: {error}"))
+                })?,
+                opts,
+            )
+            .await?;
+        WorkflowRunRef::new(run_id, workflow.run_control())
+            .output()
+            .await
     }
 
     async fn spawn_children<I, O, T>(
@@ -1755,8 +2081,149 @@ pub trait DurableContextExt: DurableContext {
         I: Serialize + Send,
         O: serde::de::DeserializeOwned + Send + 'static,
     {
-        ContextExt::bulk_run_children(self, workflow, inputs, opts).await
+        let workflow_name = workflow.workflow_name_owned();
+        let values = inputs
+            .into_iter()
+            .map(|input| {
+                serde_json::to_value(input).map_err(|error| {
+                    Error::InputSerialization(format!("workflow {workflow_name}: {error}"))
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let run_ids = self
+            .spawn_children_json(&workflow_name, values, opts)
+            .await?;
+        let mut outputs = Vec::with_capacity(run_ids.len());
+        for run_id in run_ids {
+            outputs.push(
+                WorkflowRunRef::new(run_id, workflow.run_control())
+                    .output()
+                    .await?,
+            );
+        }
+        Ok(outputs)
     }
 }
 
 impl<T: DurableContext + ?Sized> DurableContextExt for T {}
+
+#[cfg(test)]
+mod tests {
+    use another_hatchet_core::{DesiredWorkerLabel, Priority};
+
+    use super::*;
+
+    #[test]
+    fn generated_condition_group_ids_are_unique_uuids() {
+        let first = next_or_group_id();
+        let second = next_or_group_id();
+
+        uuid::Uuid::parse_str(&first).expect("Hatchet requires condition group UUIDs");
+        uuid::Uuid::parse_str(&second).expect("Hatchet requires condition group UUIDs");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn durable_event_listener_conditions_apply_the_transport_namespace() {
+        let condition = Condition::event("approval.received").build();
+        let proto = condition_to_durable_listener_proto(&condition, Some("Acme"));
+
+        assert_eq!(
+            proto.user_event_conditions[0].user_event_key,
+            "acme_approval.received"
+        );
+    }
+
+    #[test]
+    fn durable_event_lookback_requires_scope() {
+        let invalid = Condition::event("approval.received")
+            .lookback(Duration::from_secs(30))
+            .build()
+            .into();
+        assert_eq!(condition_validation_errors(&invalid).len(), 1);
+
+        let valid = Condition::event("approval.received")
+            .scope("tenant-a")
+            .lookback(Duration::from_secs(30))
+            .build()
+            .into();
+        assert!(condition_validation_errors(&valid).is_empty());
+        assert_eq!(condition_validation_errors(&or([])).len(), 1);
+    }
+
+    #[test]
+    fn durable_event_callback_unwraps_match_data_and_identifies_or_branch() {
+        let conditions = vec![
+            Condition::sleep_for(Duration::from_secs(30)),
+            Condition::event("approval.received")
+                .readable_data_key("approval-hit")
+                .build(),
+        ];
+        let output = condition_output_from_engine(
+            &conditions,
+            br#"{"CREATE":{"approval-hit":[{"message":"approved"}]}}"#,
+        )
+        .expect("callback payload should decode");
+
+        assert_eq!(output.matched_condition_index, 1);
+        assert_eq!(
+            output.matched_readable_data_key.as_deref(),
+            Some("approval-hit")
+        );
+        assert_eq!(
+            output.payload,
+            Some(serde_json::json!({"message": "approved"}))
+        );
+    }
+
+    #[test]
+    fn durable_event_callback_accepts_legacy_bare_payload() {
+        let conditions = vec![Condition::event("approval.received").build()];
+        let output = condition_output_from_engine(&conditions, br#"{"message":"approved"}"#)
+            .expect("callback payload should decode");
+
+        assert_eq!(output.matched_condition_index, 0);
+        assert_eq!(
+            output.payload,
+            Some(serde_json::json!({"message": "approved"}))
+        );
+    }
+
+    #[test]
+    fn durable_child_trigger_preserves_lineage_and_run_options() {
+        let mut opts = RunOpts {
+            parent_workflow_run_id: Some("parent-run".to_owned()),
+            parent_task_run_id: Some("parent-task".to_owned()),
+            child_index: Some(7),
+            child_key: Some("invoice-42".to_owned()),
+            priority: Some(Priority::High),
+            ..RunOpts::default()
+        };
+        opts.additional_metadata
+            .insert("source".to_owned(), "durable".to_owned());
+        opts.desired_worker_labels.insert(
+            "region".to_owned(),
+            DesiredWorkerLabel::new("us-central").into(),
+        );
+
+        let trigger = durable_child_trigger("billing/charge", serde_json::json!({"id": 42}), &opts)
+            .expect("trigger should serialize");
+
+        assert_eq!(trigger.name, "billing/charge");
+        assert_eq!(trigger.parent_id.as_deref(), Some("parent-run"));
+        assert_eq!(
+            trigger.parent_task_run_external_id.as_deref(),
+            Some("parent-task")
+        );
+        assert_eq!(trigger.child_index, Some(7));
+        assert_eq!(trigger.child_key.as_deref(), Some("invoice-42"));
+        assert_eq!(trigger.priority, Some(3));
+        assert_eq!(
+            trigger
+                .desired_worker_labels
+                .get("region")
+                .and_then(|label| label.str_value.as_deref()),
+            Some("us-central")
+        );
+    }
+}

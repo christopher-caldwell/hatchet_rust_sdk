@@ -5,9 +5,9 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
+rust-version = "1.85"
+authors = ["Christopher Caldwell"]
 license = "MIT"
-publish = false
-
-[workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+repository = "https://github.com/christopher-caldwell/hatchet_rust_sdk"
+homepage = "https://github.com/christopher-caldwell/hatchet_rust_sdk"
+publish = true

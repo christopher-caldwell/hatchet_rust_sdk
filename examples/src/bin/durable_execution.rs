@@ -1,4 +1,4 @@
-use hatchet_sdk::{
+use another_hatchet_sdk::{
     Client, DurableContext, GrpcTransport, InMemoryDurableContext, Result, TaskConfig,
     WorkflowDeclaration, config::HatchetConfig,
 };
@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
                 println!("Going to sleep for 2 seconds (passively evicted from memory)");
 
                 // This is not a thread sleep. It instructs Hatchet backend to wake the task up after 2s.
-                ctx.sleep_for(Duration::from_secs(2)).await;
+                ctx.sleep_for(Duration::from_secs(2)).await?;
 
                 println!("Task woke up!");
 
@@ -46,12 +46,15 @@ async fn main() -> Result<()> {
         WorkflowDeclaration::new("durable-sleep-workflow")
             .durable_step(&durable_sleep_task, TaskConfig::default());
 
-    let _ = client.register_workflow(decl).await;
+    client.register_workflow(decl).await?;
 
     println!("Starting durable sleep workflow...");
     let result = client
         .workflow::<serde_json::Value, String>("durable-sleep-workflow")
-        .run(serde_json::json!({}), hatchet_sdk::RunOpts::default())
+        .run(
+            serde_json::json!({}),
+            another_hatchet_sdk::RunOpts::default(),
+        )
         .await?;
 
     println!("Result: {}", result);
