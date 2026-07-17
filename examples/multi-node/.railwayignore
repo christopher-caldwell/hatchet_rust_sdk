@@ -4,11 +4,10 @@ target
 **/target
 **/.env
 **/.env.*
-RAILWAY_COMPARISON_PROMPT.md
+examples/multi-node/RAILWAY_COMPARISON_PROMPT.md
 README.md
 docs
-examples/src
-examples/Cargo.toml
+examples/features
 crates/hatchet-sdk/tests
 crates/hatchet-sdk/benches
 # Protocol inputs are vendored in crates/hatchet-sdk/proto.

@@ -1,21 +1,9 @@
 # Examples
 
-Run any example with:
+The SDK examples are organized into two intentional groups:
 
-```bash
-cargo run -p another-hatchet-sdk-examples --bin <name>
-```
-
-Available binaries:
-
-- `basic`
-- `child_workflows`
-- `children_workflows`
-- `concurrency`
-- `conditions`
-- `dag`
-- `durable_execution`
-- `macros`
-- `rate_limits`
-- `rate_limits_in_memory`
-- `standalone_functions`
+- [`features`](features/README.md) contains focused demonstrations of individual
+  SDK capabilities, including basic workflows, DAGs, concurrency, durable
+  execution, conditions, macros, child workflows, and rate limits.
+- [`multi-node`](multi-node/README.md) is a standalone two-worker topology with
+  local Hatchet testing and Railway hosting verification.

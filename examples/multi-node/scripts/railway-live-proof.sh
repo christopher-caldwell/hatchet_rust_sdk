@@ -7,7 +7,7 @@ set -euo pipefail
 : "${NOTIFICATIONS_SERVICE_ID:?set NOTIFICATIONS_SERVICE_ID}"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-OUT="$ROOT/examples/railway-multi-node/target/railway"
+OUT="$ROOT/examples/multi-node/target/railway"
 SESSION=${RAILWAY_AGENT_SESSION:-hatchet-rust-sdk-comparison-20260715}
 mkdir -p "$OUT"
 

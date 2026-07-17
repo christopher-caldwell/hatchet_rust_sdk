@@ -22,7 +22,7 @@ PostgreSQL container. The SDK vendors both its protocol definitions and
 `protoc`. Run the complete isolated proof from the repository root:
 
 ```sh
-./examples/railway-multi-node/scripts/local-smoke.sh
+./examples/multi-node/scripts/local-smoke.sh
 ```
 
 The script starts PostgreSQL 16, official Hatchet Lite
@@ -43,8 +43,8 @@ directory.
 Focused offline checks:
 
 ```sh
-cargo test --locked --manifest-path examples/railway-multi-node/Cargo.toml
-cargo clippy --locked --manifest-path examples/railway-multi-node/Cargo.toml \
+cargo test --locked --manifest-path examples/multi-node/Cargo.toml
+cargo clippy --locked --manifest-path examples/multi-node/Cargo.toml \
   --all-targets --all-features -- -D warnings
 ```
 
@@ -53,19 +53,19 @@ values, and choose one role:
 
 ```sh
 HATCHET_NODE=orders PORT=19081 cargo run --locked \
-  --manifest-path examples/railway-multi-node/Cargo.toml
+  --manifest-path examples/multi-node/Cargo.toml
 HATCHET_NODE=notifications PORT=19082 cargo run --locked \
-  --manifest-path examples/railway-multi-node/Cargo.toml
+  --manifest-path examples/multi-node/Cargo.toml
 ```
 
 Submit without waiting, or observe at a three-second interval with a finite
 timeout:
 
 ```sh
-cargo run --locked --manifest-path examples/railway-multi-node/Cargo.toml \
+cargo run --locked --manifest-path examples/multi-node/Cargo.toml \
   --bin trigger -- --order-id ord_local_002 --email buyer@example.test \
   --total-cents 4299
-cargo run --locked --manifest-path examples/railway-multi-node/Cargo.toml \
+cargo run --locked --manifest-path examples/multi-node/Cargo.toml \
   --bin trigger -- --wait --interval-seconds 3 --timeout-seconds 180 \
   --order-id ord_local_003 --email buyer@example.test --total-cents 4299
 ```
@@ -94,13 +94,15 @@ high-availability production layout.
 Prepare the auditable worker upload (about 1 MB) before deploying either role.
 It includes the SDK's pinned protocol snapshot, uses normal ignore rules, and
 excludes repository history, local environments, tests, documentation, and
-build output:
+build output. The Railway configuration and upload ignore rules live only in
+this example directory; the preparation script copies them to the generated
+context root that Railway receives:
 
 ```sh
-./examples/railway-multi-node/scripts/prepare-railway-context.sh
-railway up examples/railway-multi-node/target/railway/build-context \
+./examples/multi-node/scripts/prepare-railway-context.sh
+railway up examples/multi-node/target/railway/build-context \
   --path-as-root --service rust-orders-worker --environment production --detach
-railway up examples/railway-multi-node/target/railway/build-context \
+railway up examples/multi-node/target/railway/build-context \
   --path-as-root --service rust-notifications-worker --environment production --detach
 ```
 
@@ -154,15 +156,15 @@ runs and capture the official defaults before applying the experimental profile:
 ```sh
 RAILWAY_PROJECT_ID=<PROJECT_ID> RAILWAY_ENVIRONMENT_ID=<ENVIRONMENT_ID> \
 POSTGRES_SERVICE_ID=<POSTGRES_SERVICE_ID> \
-./examples/railway-multi-node/scripts/railway-measure-profile.sh baseline
+./examples/multi-node/scripts/railway-measure-profile.sh baseline
 
 RAILWAY_PROJECT_ID=<PROJECT_ID> RAILWAY_ENVIRONMENT_ID=<ENVIRONMENT_ID> \
 ORCHESTRATOR_SERVICE_ID=<ORCHESTRATOR_SERVICE_ID> \
-./examples/railway-multi-node/scripts/apply-low-load-profile.sh
+./examples/multi-node/scripts/apply-low-load-profile.sh
 
 RAILWAY_PROJECT_ID=<PROJECT_ID> RAILWAY_ENVIRONMENT_ID=<ENVIRONMENT_ID> \
 POSTGRES_SERVICE_ID=<POSTGRES_SERVICE_ID> \
-./examples/railway-multi-node/scripts/railway-measure-profile.sh low-load
+./examples/multi-node/scripts/railway-measure-profile.sh low-load
 ```
 
 The final profile is deliberately conservative and source-version-specific:

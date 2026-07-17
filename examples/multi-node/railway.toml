@@ -1,0 +1,12 @@
+# Source of truth for the generated Railway upload context. The preparation
+# script copies this file to that context's root before deployment.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "examples/multi-node/Dockerfile"
+
+[deploy]
+startCommand = "/app/hatchet-multi-node"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ALWAYS"
+sleepApplication = false

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hatchet_railway_multi_node::{OrderInput, Receipt, WORKFLOW_NAME, WaitConfig};
-use another_hatchet_sdk::{Client, GrpcTransport, RunOpts, config::HatchetConfig, proto::v1::RunStatus};
+use another_hatchet_sdk::{
+    Client, GrpcTransport, RunOpts, config::HatchetConfig, proto::v1::RunStatus,
+};
+use hatchet_multi_node::{OrderInput, Receipt, WORKFLOW_NAME, WaitConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

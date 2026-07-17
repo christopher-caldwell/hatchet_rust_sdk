@@ -125,8 +125,9 @@ let condition = Condition::event("payment.received")
     .build();
 ```
 
-The complete live topology is in
-[examples/railway-multi-node](examples/railway-multi-node/README.md): an official
+The focused SDK demonstrations are collected in
+[examples/features](examples/features/README.md). The complete live topology is
+in [examples/multi-node](examples/multi-node/README.md): an official
 Hatchet Lite `v0.94.14` service, PostgreSQL, two independent Rust workers,
 health checks, a trigger utility, and local/Railway smoke scripts.
 
@@ -183,7 +184,7 @@ cargo test -p another-hatchet-sdk --features integration \
 For a credential-free, isolated local proof, Docker users can run:
 
 ```sh
-./examples/railway-multi-node/scripts/local-smoke.sh
+./examples/multi-node/scripts/local-smoke.sh
 ```
 
 That command starts the pinned official Hatchet Lite `v0.94.14` image and

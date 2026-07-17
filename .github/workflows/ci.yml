@@ -31,9 +31,9 @@ jobs:
         run: cargo doc --workspace --all-features --no-deps
       - name: Check standalone Railway example
         run: |
-          cargo check --locked --manifest-path examples/railway-multi-node/Cargo.toml --all-targets
-          cargo clippy --locked --manifest-path examples/railway-multi-node/Cargo.toml --all-targets -- -D warnings
-          cargo test --locked --manifest-path examples/railway-multi-node/Cargo.toml
+          cargo check --locked --manifest-path examples/multi-node/Cargo.toml --all-targets
+          cargo clippy --locked --manifest-path examples/multi-node/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path examples/multi-node/Cargo.toml
       - name: Verify release archives and clean consumer build
         run: scripts/publish-crates.sh --check-only
 
@@ -49,7 +49,7 @@ jobs:
       - name: Check minimum Rust version
         run: |
           cargo check --workspace --all-targets --all-features --locked
-          cargo check --locked --manifest-path examples/railway-multi-node/Cargo.toml --all-targets
+          cargo check --locked --manifest-path examples/multi-node/Cargo.toml --all-targets
 
   advisories:
     runs-on: ubuntu-latest
@@ -60,4 +60,4 @@ jobs:
       - name: Check RustSec advisories
         run: |
           cargo audit
-          cargo audit --file examples/railway-multi-node/Cargo.lock
+          cargo audit --file examples/multi-node/Cargo.lock

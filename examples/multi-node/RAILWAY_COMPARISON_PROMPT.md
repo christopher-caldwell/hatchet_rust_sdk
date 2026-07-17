@@ -1,6 +1,6 @@
 # Hatchet Rust SDK: one orchestrator, two Rust workers, local and Railway proof
 
-Execute this prompt from the Hatchet Rust SDK repository:
+Execute this prompt from the Hatchet Rust SDK repository root:
 
 ```text
 /Users/christophercaldwell/Code/projects/rust/hatchet_rust_sdk
@@ -66,7 +66,7 @@ Verify these against the current checkout rather than assuming they remain true:
 - `docs/todo/4/TODO.md` says P0-P5 and P6.1 were complete, but also says P6.2 remained. Current files include a parity matrix, so verify the executable state and update stale status documents only if the evidence justifies it.
 - The documented logs integration has a known `403` fallback to an SDK-local buffer. Do not represent that fallback as proof of engine-backed logs.
 - `protoc` is required by the current build.
-- `examples/.env` is ignored and may contain a local secret. Never read it into logs, commit it, or reuse its token against a new server without confirming that it belongs to that exact Hatchet instance.
+- `examples/features/.env` is ignored and may contain a local secret. Never read it into logs, commit it, or reuse its token against a new server without confirming that it belongs to that exact Hatchet instance.
 
 ## Phase 1: audit actual SDK progress
 
@@ -115,7 +115,7 @@ Railway currently has marketplace entries with template codes `hatchet-lite` and
 Create a self-contained example under:
 
 ```text
-examples/railway-multi-node/
+examples/multi-node/
 ```
 
 Mirror the useful packaging qualities of the Inngest comparison and the locally published Rust AI SDK examples:
@@ -194,8 +194,8 @@ Add focused tests for:
 Run at least:
 
 ```sh
-cargo test --locked --manifest-path examples/railway-multi-node/Cargo.toml
-cargo clippy --locked --manifest-path examples/railway-multi-node/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --locked --manifest-path examples/multi-node/Cargo.toml
+cargo clippy --locked --manifest-path examples/multi-node/Cargo.toml --all-targets --all-features -- -D warnings
 ```
 
 ## Phase 4: local full-stack proof
@@ -437,7 +437,7 @@ Use placeholders or discovery commands for IDs and secrets. Do not bake the agen
 
 Update the root README only where needed to correct demonstrably stale example instructions and link the new standalone example. Keep broad SDK parity claims aligned with actual tests.
 
-Add a sanitized `examples/railway-multi-node/railway-evidence.json` only after the live proof passes. It should include:
+Add a sanitized `examples/multi-node/railway-evidence.json` only after the live proof passes. It should include:
 
 - schema version and timestamp;
 - SDK Git commit;
@@ -461,7 +461,7 @@ This task is complete only when all of the following are true:
 
 - Existing SDK progress was audited from code/tests, not copied from status prose.
 - Offline workspace checks pass or any unrelated pre-existing failure is clearly isolated with evidence.
-- A standalone path-dependent example exists at `examples/railway-multi-node`.
+- A standalone path-dependent example exists at `examples/multi-node`.
 - One official pinned Hatchet Lite plus Postgres and two separate Rust workers pass locally.
 - No live test was counted if it skipped due to missing credentials.
 - Railway has one dedicated Hatchet orchestrator, one private Postgres, and two independent Rust worker services.

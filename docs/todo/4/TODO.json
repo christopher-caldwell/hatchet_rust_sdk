@@ -15,7 +15,7 @@
   "verified_against_real_engine": {
     "integration_suite": {
       "status": "done",
-      "command": "set -a && source examples/.env && set +a && cargo test -p hatchet-sdk --features integration --test integration -- --nocapture",
+      "command": "set -a && source examples/features/.env && set +a && cargo test -p hatchet-sdk --features integration --test integration -- --nocapture",
       "result": "5 passed, 0 failed"
     },
     "coverage": [
@@ -103,7 +103,7 @@
     "Remove the remaining warnings/dead helpers once the branch is stable."
   ],
   "test_commands": {
-    "integration": "set -a && source examples/.env && set +a && cargo test -p hatchet-sdk --features integration --test integration -- --nocapture",
+    "integration": "set -a && source examples/features/.env && set +a && cargo test -p hatchet-sdk --features integration --test integration -- --nocapture",
     "unit": "cargo test -p hatchet-sdk --lib",
     "parity": "cargo test -p hatchet-sdk --test parity_completion -- --nocapture"
   }

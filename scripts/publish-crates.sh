@@ -158,7 +158,7 @@ run_quality_gates() {
   rustup run "$rust_version" cargo check --workspace --all-targets --all-features --locked
   printf '==> Minimum Rust %s standalone Railway check\n' "$rust_version"
   rustup run "$rust_version" cargo check --locked \
-    --manifest-path examples/railway-multi-node/Cargo.toml --all-targets
+    --manifest-path examples/multi-node/Cargo.toml --all-targets
 }
 
 create_package_archives() {

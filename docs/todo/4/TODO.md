@@ -6,7 +6,7 @@
 **P6.1: Complete and verified against the live engine**  
 **P6.2: Remaining**
 
-The live integration suite now passes against the local Hatchet instance using `examples/.env`. The worker registration issue is resolved, and the SDK can register workers, run workflows, handle cancellation, and return run outputs.
+The live integration suite now passes against the local Hatchet instance using `examples/features/.env`. The worker registration issue is resolved, and the SDK can register workers, run workflows, handle cancellation, and return run outputs.
 
 One caveat remains: `logs().list()` currently falls back to the SDK-local log buffer when the engine REST logs endpoint returns `403 Forbidden`. That keeps the integration test green, but it is still a contract gap rather than a clean engine-backed logs implementation.
 
@@ -25,7 +25,7 @@ One caveat remains: `logs().list()` currently falls back to the SDK-local log bu
 The following command passed against the live Hatchet engine:
 
 ```bash
-set -a && source examples/.env && set +a && cargo test -p hatchet-sdk --features integration --test integration -- --nocapture
+set -a && source examples/features/.env && set +a && cargo test -p hatchet-sdk --features integration --test integration -- --nocapture
 ```
 
 Result: `5 passed, 0 failed`

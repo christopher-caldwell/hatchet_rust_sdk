@@ -15,7 +15,7 @@ if ((WINDOW_SECONDS < 60)); then
 fi
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-OUT="$ROOT/examples/railway-multi-node/target/railway/metrics/$PROFILE"
+OUT="$ROOT/examples/multi-node/target/railway/metrics/$PROFILE"
 SESSION=hatchet-rust-sdk-comparison-20260715
 mkdir -p "$OUT"
 

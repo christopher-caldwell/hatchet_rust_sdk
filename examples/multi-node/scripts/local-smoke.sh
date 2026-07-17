@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-EXAMPLE="$ROOT/examples/railway-multi-node"
+EXAMPLE="$ROOT/examples/multi-node"
 RUN_KEY="hatchet-rust-smoke-$$"
 NETWORK="$RUN_KEY"
 POSTGRES="$RUN_KEY-postgres"

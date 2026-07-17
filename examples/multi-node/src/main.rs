@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hatchet_railway_multi_node::{
-    NOTIFICATIONS_WORKER, ORDERS_WORKER, OrderInput, PROCESS_ORDER, ProcessedOrder, Role,
-    SEND_ORDER_RECEIPT, declaration, labels, make_receipt, parse_port, process_order,
-};
 use another_hatchet_sdk::{
     Client, Context, ContextExt, GrpcTransport, InMemoryContext, config::HatchetConfig,
+};
+use hatchet_multi_node::{
+    NOTIFICATIONS_WORKER, ORDERS_WORKER, OrderInput, PROCESS_ORDER, ProcessedOrder, Role,
+    SEND_ORDER_RECEIPT, declaration, labels, make_receipt, parse_port, process_order,
 };
 
 #[tokio::main]
@@ -42,14 +42,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(result)
                 })
                 .build();
-            client
-                .register_workflow(declaration(&client))
-                .await?;
+            client.register_workflow(declaration(&client)).await?;
             worker.start()?
         }
         Role::Notifications => {
             let receipt =
-                client.task::<OrderInput, hatchet_railway_multi_node::Receipt>(SEND_ORDER_RECEIPT);
+                client.task::<OrderInput, hatchet_multi_node::Receipt>(SEND_ORDER_RECEIPT);
             client
                 .worker(NOTIFICATIONS_WORKER)
                 .slots(2)
@@ -57,8 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .labels(labels("notifications"))
                 .health_port(port)
                 .register_task(&receipt, |_input, ctx: InMemoryContext<_>| async move {
-                    let processed: ProcessedOrder =
-                        ctx.parent_output("process-order").await?;
+                    let processed: ProcessedOrder = ctx.parent_output("process-order").await?;
                     let receipt = make_receipt(&processed);
                     println!(
                         "{}",

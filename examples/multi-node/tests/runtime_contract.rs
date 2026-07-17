@@ -2,10 +2,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hatchet_railway_multi_node::{
-    ORDERS_WORKER, OrderInput, PROCESS_ORDER, ProcessedOrder, labels,
-};
 use another_hatchet_sdk::{Client, InMemoryContext, InMemoryTransport};
+use hatchet_multi_node::{ORDERS_WORKER, OrderInput, PROCESS_ORDER, ProcessedOrder, labels};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
@@ -23,7 +21,7 @@ async fn health_response_identifies_only_the_orders_action() {
         .labels(labels("orders"))
         .health_port(port)
         .register_task(&task, |input, _ctx: InMemoryContext<_>| async move {
-            Ok(hatchet_railway_multi_node::process_order(input))
+            Ok(hatchet_multi_node::process_order(input))
         })
         .build()
         .start()

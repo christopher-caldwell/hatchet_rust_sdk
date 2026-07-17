@@ -25,8 +25,8 @@ check-features:
 
 check-examples:
     cargo check -p another-hatchet-sdk-examples --all-targets
-    cargo check --locked --manifest-path examples/railway-multi-node/Cargo.toml --all-targets
-    cargo test --locked --manifest-path examples/railway-multi-node/Cargo.toml
+    cargo check --locked --manifest-path examples/multi-node/Cargo.toml --all-targets
+    cargo test --locked --manifest-path examples/multi-node/Cargo.toml
 
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
