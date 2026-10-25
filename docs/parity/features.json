@@ -1196,14 +1196,37 @@
         "source": "errors.go"
       },
       "rust": {
-        "status": "missing",
+        "status": "supported",
         "sources": [
-          "crates/hatchet-sdk/src/error.rs"
+          "crates/hatchet-sdk/src/retry_after.rs",
+          "crates/hatchet-sdk/src/error.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
         ],
-        "tests": []
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/retry_after_contracts.rs",
+            "name": "retry_after_failure_preserves_wire_delay_and_old_engine_falls_back_to_static_policy"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/retry_after_contracts.rs",
+            "name": "stalled_version_probe_still_reports_retryable_failure_with_bounded_fallback"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "retry_after_delays_normal_and_durable_attempts_without_overriding_retry_limits",
+            "engines": [
+              "v0.111.0",
+              "v0.114.0"
+            ]
+          }
+        ]
       },
-      "engine": "Official Go floor v0.111.0",
-      "notes": "Version detection exists; no RetryAfter error/completion encoding yet."
+      "engine": "Requires engine >= v0.111.0; explicit static-policy fallback on older/unknown engines",
+      "notes": "Typed retryable error with exact whole-millisecond delay; normal/durable and batch failure wire fields. Full version probe bounded to two seconds; omitted override/warning on older or unknown engines. Does not add attempts; engine may cap delay. In-memory transport does not simulate retry scheduling. See retry-after.md.",
+      "engine_requirement": {
+        "feature": "RetryAfter",
+        "version": "0.111.0"
+      }
     },
     {
       "id": "N5",

@@ -47,3 +47,34 @@ The completed N2 workspace suite passes **149** tests; no-default SDK tests pass
 doctests and all six matrix guard tests pass. Engine requirements are checked
 against the runtime feature gates by the matrix renderer.
 Rust **1.85.1** checks pass for both workspace and standalone targets.
+
+## N3: per-error retry delay
+
+`RetryAfterError` preserves the message and exact whole-millisecond delay, and
+remains retryable. Step and batch-member failure events retain the official
+`retry_after_ms` field numbers. Success/non-retryable failures do not acquire an
+override. Engine retry counts and delay caps remain authoritative; preview batch
+retries stay zero. See [retry-after.md](retry-after.md).
+
+Three protocol tests cover current/floor releases, older/unrecognized releases,
+zero delay, rejected failure reporting and a stalled capability lookup. Boundary
+unit tests reject fractional/overflowing durations. The live case proves normal
+and durable requested delays replace a configured 60-second backoff, retry count
+advances once, and a task with no retries left runs only once. It passes on both
+**v0.111.0** and **v0.114.0**. The current-engine full suite passes **29** live
+executions; a separate support-floor run passes the focused retry test, alongside
+the two-worker example and complete cleanup. Batch failure with `RetryAfterError`
+still fails all members without granting additional attempts.
+
+Independent review found one P2 reliability issue: a hung `GetVersion` could
+block reporting the task failure indefinitely. The complete capability probe,
+including its retries, is now bounded to two seconds. A controlled HTTP/2 peer
+holds version discovery for 60 seconds but accepts failure events; the regression
+proves a normal retryable failure is sent within the bound, with no override.
+The reviewer independently ran this regression and cleared the change with no
+remaining actionable findings. The live support-floor run also passes after this
+fix. No production load or engine delay-cap exhaustion test is claimed.
+
+Final N3 checks pass **154** workspace tests, **151** SDK tests without default
+features and **7** standalone tests. All ten quality/compatibility checks pass,
+including strict Clippy/rustdoc and Rust 1.85.1; six matrix guard tests also pass.

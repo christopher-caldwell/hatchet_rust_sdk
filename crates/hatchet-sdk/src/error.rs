@@ -25,6 +25,8 @@ pub enum Error {
     #[error("non-retryable error: {0}")]
     NonRetryable(String),
     #[error(transparent)]
+    RetryAfter(#[from] crate::RetryAfterError),
+    #[error(transparent)]
     IdempotencyCollision(crate::IdempotencyCollision),
     #[error(transparent)]
     BulkIdempotencyCollision(crate::BulkIdempotencyCollision),

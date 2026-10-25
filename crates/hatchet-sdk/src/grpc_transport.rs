@@ -263,8 +263,9 @@ impl GrpcTransport {
     /// Returns an error if the gRPC call fails.
     pub async fn send_step_action_event(
         &self,
-        event: proto::dispatcher::StepActionEvent,
+        mut event: proto::dispatcher::StepActionEvent,
     ) -> Result<()> {
+        event.retry_after_ms = self.supported_retry_after(event.retry_after_ms).await;
         let dispatcher = self.dispatcher.clone();
         let request = self.authed_request(event);
 
@@ -1318,6 +1319,7 @@ impl GrpcTransport {
                     event_payload: String::new(),
                     retry_count: None,
                     should_not_retry: None,
+                    retry_after_ms: None,
                 })
                 .await?;
 
@@ -1390,7 +1392,7 @@ impl GrpcTransport {
                     }
                 }
 
-                let Some((event_type, payload, should_not_retry)) =
+                let Some((event_type, payload, should_not_retry, retry_after_ms)) =
                     completion_event_from_result(result, cancel_token.is_cancelled())
                 else {
                     // Hatchet already owns the cancellation outcome. Reporting
@@ -1411,6 +1413,7 @@ impl GrpcTransport {
                         event_payload: payload,
                         retry_count: None,
                         should_not_retry,
+                        retry_after_ms,
                     })
                     .await
                 {
@@ -1427,13 +1430,35 @@ impl GrpcTransport {
         }
     }
 
+    async fn supported_retry_after(&self, delay: Option<i64>) -> Option<i64> {
+        let delay = delay?;
+        // Version discovery must never prevent the failure from reaching the
+        // engine. Bound the entire retrying probe, including a stalled RPC.
+        match tokio::time::timeout(std::time::Duration::from_secs(2), self.engine_version()).await {
+            Ok(Ok(version)) if version.supports(crate::EngineFeature::RetryAfter) => Some(delay),
+            version => {
+                eprintln!(
+                    "RetryAfterError requires engine >= 0.111.0 (connected: {version:?}); using the configured retry policy instead of the requested delay"
+                );
+                None
+            }
+        }
+    }
+
     async fn batch_event(
         &self,
         action: &proto::dispatcher::AssignedAction,
         worker_id: &str,
         event: proto::dispatcher::StepActionEventType,
-        items: Vec<proto::dispatcher::BatchActionEventItem>,
+        mut items: Vec<proto::dispatcher::BatchActionEventItem>,
     ) -> Result<()> {
+        if let Some(delay) = items.iter().find_map(|item| item.retry_after_ms) {
+            if self.supported_retry_after(Some(delay)).await.is_none() {
+                for item in &mut items {
+                    item.retry_after_ms = None;
+                }
+            }
+        }
         self.dispatcher
             .clone()
             .send_batch_action_event(self.authed_request(proto::dispatcher::BatchActionEvent {
@@ -1563,6 +1588,10 @@ impl GrpcTransport {
                             event_payload: serde_json::json!({"message":error.to_string()})
                                 .to_string(),
                             should_not_retry: Some(!error.is_retryable()),
+                            retry_after_ms: match error {
+                                Error::RetryAfter(e) => Some(e.milliseconds()),
+                                _ => None,
+                            },
                             ..Default::default()
                         }),
                     }
@@ -1853,7 +1882,12 @@ fn parse_task_output(task_detail: &proto::v1::TaskRunDetail) -> Option<Value> {
 fn completion_event_from_result(
     result: Result<Value>,
     cancelled: bool,
-) -> Option<(proto::dispatcher::StepActionEventType, String, Option<bool>)> {
+) -> Option<(
+    proto::dispatcher::StepActionEventType,
+    String,
+    Option<bool>,
+    Option<i64>,
+)> {
     if cancelled {
         return None;
     }
@@ -1863,6 +1897,7 @@ fn completion_event_from_result(
             proto::dispatcher::StepActionEventType::StepEventTypeCompleted,
             serde_json::to_string(&val).unwrap_or_default(),
             None,
+            None,
         ),
         Err(error) => {
             let should_not_retry = !error.is_retryable();
@@ -1870,6 +1905,10 @@ fn completion_event_from_result(
                 proto::dispatcher::StepActionEventType::StepEventTypeFailed,
                 error.to_string(),
                 Some(should_not_retry),
+                match error {
+                    Error::RetryAfter(e) => Some(e.milliseconds()),
+                    _ => None,
+                },
             )
         }
     })
@@ -2718,11 +2757,30 @@ mod tests {
     }
 
     #[test]
+    fn completion_event_encodes_retry_after_only_on_retryable_failure() {
+        let error =
+            crate::RetryAfterError::new(std::time::Duration::from_millis(1250), "busy").unwrap();
+        let (event, payload, should_not_retry, delay) =
+            completion_event_from_result(Err(error.into()), false).unwrap();
+        assert_eq!(
+            event,
+            crate::proto::dispatcher::StepActionEventType::StepEventTypeFailed
+        );
+        assert_eq!(payload, "busy");
+        assert_eq!(should_not_retry, Some(false));
+        assert_eq!(delay, Some(1250));
+        let (_, _, flag, delay) =
+            completion_event_from_result(Ok(serde_json::json!(true)), false).unwrap();
+        assert_eq!((flag, delay), (None, None));
+    }
+
+    #[test]
     fn completion_event_preserves_non_retryable_errors() {
-        let (_, _, should_not_retry) =
+        let (_, _, should_not_retry, retry_after_ms) =
             completion_event_from_result(Err(crate::Error::non_retryable("invalid input")), false)
                 .unwrap();
         assert_eq!(should_not_retry, Some(true));
+        assert_eq!(retry_after_ms, None);
     }
 
     #[test]

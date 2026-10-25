@@ -490,7 +490,10 @@ async fn server_batch_broadcast_and_whole_batch_failure_preserve_member_outcomes
                 count.fetch_add(1, Ordering::SeqCst);
                 async move {
                     if input.values().any(|v| v["group"] == "failure") {
-                        Err(Error::Worker("whole batch failed".into()))
+                        Err(
+                            RetryAfterError::new(Duration::from_millis(500), "whole batch failed")?
+                                .into(),
+                        )
                     } else {
                         Ok(json!({"shared":true}))
                     }
@@ -681,4 +684,146 @@ async fn server_batch_handler_cancel_then_return_keeps_every_member_cancelled() 
     }
     worker.shutdown().await.unwrap();
     client.workflows().delete(name).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a live Hatchet engine v0.111.0 or later"]
+async fn retry_after_delays_normal_and_durable_attempts_without_overriding_retry_limits() {
+    let client = real_client().await;
+    let cfg = TaskConfig::builder()
+        .retries(1)
+        .backoff(BackoffConfig {
+            factor: 60.0,
+            max_seconds: 60,
+        })
+        .build();
+    let normal = client
+        .task::<Value, Value>("modern-retry-after-normal")
+        .with_config(cfg.clone());
+    let durable = client
+        .durable_task::<Value, Value>("modern-retry-after-durable")
+        .with_config(cfg.clone());
+    let exhausted = client.task::<Value, Value>("modern-retry-after-exhausted");
+    for declaration in [
+        WorkflowDeclaration::<Value, Value>::new("modern-retry-after-normal-wf")
+            .step(&normal, cfg.clone()),
+        WorkflowDeclaration::<Value, Value>::new("modern-retry-after-durable-wf")
+            .durable_step(&durable, cfg),
+        WorkflowDeclaration::<Value, Value>::new("modern-retry-after-exhausted-wf")
+            .step(&exhausted, TaskConfig::default()),
+    ] {
+        client.register_workflow(declaration).await.unwrap();
+    }
+    let normal_times = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let times = Arc::clone(&normal_times);
+    let durable_times = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let dtimes = Arc::clone(&durable_times);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&calls);
+    let worker = client
+        .worker("modern-retry-after-worker")
+        .register_task(
+            &normal,
+            move |input, ctx: InMemoryContext<GrpcTransport>| {
+                times
+                    .lock()
+                    .unwrap()
+                    .push((std::time::Instant::now(), ctx.retry_count()));
+                async move {
+                    if ctx.retry_count() == 0 {
+                        Err(RetryAfterError::new(Duration::from_secs(2), "normal busy")?.into())
+                    } else {
+                        Ok(input)
+                    }
+                }
+            },
+        )
+        .register_durable_task(
+            &durable,
+            move |input, ctx: InMemoryDurableContext<GrpcTransport>| {
+                dtimes
+                    .lock()
+                    .unwrap()
+                    .push((std::time::Instant::now(), ctx.retry_count()));
+                async move {
+                    if ctx.retry_count() == 0 {
+                        Err(
+                            RetryAfterError::new(Duration::from_millis(1250), "durable busy")?
+                                .into(),
+                        )
+                    } else {
+                        Ok(input)
+                    }
+                }
+            },
+        )
+        .register_task(&exhausted, move |_, _: InMemoryContext<GrpcTransport>| {
+            count.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(RetryAfterError::new(Duration::from_millis(100), "no retries left")?.into())
+            }
+        })
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(15))
+        .await
+        .unwrap();
+    let normal_run = client
+        .workflow::<Value, Value>("modern-retry-after-normal-wf")
+        .run_no_wait(json!({"normal":true}), RunOpts::default())
+        .await
+        .unwrap();
+    let durable_run = client
+        .workflow::<Value, Value>("modern-retry-after-durable-wf")
+        .run_no_wait(json!({"durable":true}), RunOpts::default())
+        .await
+        .unwrap();
+    let failed = client
+        .workflow::<Value, Value>("modern-retry-after-exhausted-wf")
+        .run_no_wait(json!({}), RunOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(output(&normal_run).await, json!({"normal":true}));
+    assert_eq!(output(&durable_run).await, json!({"durable":true}));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(15), failed.output())
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("no retries left")
+    );
+    for (times, minimum) in [
+        (&normal_times, Duration::from_millis(1800)),
+        (&durable_times, Duration::from_millis(1100)),
+    ] {
+        let entries = times.lock().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].1, 0);
+        assert_eq!(entries[1].1, 1);
+        let elapsed = entries[1].0.duration_since(entries[0].0);
+        assert!(
+            elapsed >= minimum,
+            "requested retry delay was shortened: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "static 60s backoff was used: {elapsed:?}"
+        );
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "retry-after must not create extra retries"
+    );
+    worker.shutdown().await.unwrap();
+    for name in [
+        "modern-retry-after-normal-wf",
+        "modern-retry-after-durable-wf",
+        "modern-retry-after-exhausted-wf",
+    ] {
+        client.workflows().delete(name).await.unwrap();
+    }
 }

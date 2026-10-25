@@ -30,6 +30,9 @@ impl Reply {
 type CapturedRequests = Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 pub struct Harness {
     pub client: Client<GrpcTransport>,
+    // Used by lifecycle-event contract tests; other consumers use the client.
+    #[allow(dead_code)]
+    pub transport: Arc<GrpcTransport>,
     pub requests: CapturedRequests,
     server: tokio::task::JoinHandle<()>,
 }
@@ -39,6 +42,15 @@ impl Drop for Harness {
     }
 }
 pub async fn harness(version: &str, replies: Vec<Reply>) -> Harness {
+    harness_with_version_delay(version, replies, Duration::ZERO).await
+}
+// Only retry capability tests delay version discovery.
+#[allow(dead_code)]
+pub async fn harness_with_version_delay(
+    version: &str,
+    replies: Vec<Reply>,
+    version_delay: Duration,
+) -> Harness {
     let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(tokio::sync::Mutex::new(vec![]));
@@ -79,6 +91,7 @@ pub async fn harness(version: &str, replies: Vec<Reply>) -> Harness {
                             .await
                             .push((path.clone(), body[5..].to_vec()));
                         let reply = if path.ends_with("/GetVersion") {
+                            tokio::time::sleep(version_delay).await;
                             Reply::ok(proto::dispatcher::GetVersionResponse { version })
                         } else {
                             replies
@@ -133,8 +146,10 @@ pub async fn harness(version: &str, replies: Vec<Reply>) -> Harness {
         max_backoff: Duration::from_millis(1),
         ..Default::default()
     });
+    let transport = Arc::new(transport);
     Harness {
-        client: Client::new(Arc::new(transport)),
+        client: Client::new(Arc::clone(&transport)),
+        transport,
         requests,
         server,
     }

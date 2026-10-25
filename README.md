@@ -335,3 +335,6 @@ creates any package archive.
 
 Server-coalesced batch tasks (preview, engine >= v0.114.0) use `BatchConfig`;
 see the [configuration and handler contract](docs/parity/batch-tasks.md).
+
+Normal and durable tasks can return `RetryAfterError` to request a per-failure
+delay (engine >= v0.111.0); see [retry scheduling and fallback](docs/parity/retry-after.md).

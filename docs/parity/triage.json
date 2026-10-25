@@ -6,7 +6,7 @@
     "official_go_revision": "aef20b00755da5b1e7e69197e7189848309afb20",
     "official_ts_release": "1.43.0"
   },
-  "scope": "Batches 1\u20133 and batch 4 N2 are implemented with explicit support/evidence limits in feature-support.md. Remaining batch 4 gaps continue in order with a separate code review after each.",
+  "scope": "Batches 1\u20133 and batch 4 N2/N3 are implemented with explicit support/evidence limits in feature-support.md. Remaining batch 4 gaps continue in order with a separate code review after each.",
   "batch_rationale": {
     "1": "Correct existing public contracts that can replay the wrong work or truncate data; all are supported by the pinned engine.",
     "2": "Complete operational controls and run discovery; negotiate engine capabilities before enabling newer controls.",
@@ -537,8 +537,8 @@
       "area": "Per-error retry delay",
       "batch": 4,
       "order": 2,
-      "status": "pending",
-      "acceptance": "No RetryAfterError equivalent or completion-event retry-after encoding. Static retry counts and backoff exist. Go gates this feature at engine v0.111.0, above Rust v0.94.14.",
+      "status": "complete",
+      "acceptance": "Typed per-failure retry delay on normal/durable and batch failure events; verified normal/durable scheduling and retry limits on v0.111.0/v0.114.0. Bounded version check falls back explicitly to static policy for older/unknown engines. See retry-after.md.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/task.ts",
@@ -553,7 +553,13 @@
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/engine_version.go"
         }
       ],
-      "priority": "P3"
+      "priority": "P3",
+      "original_gap": "No RetryAfterError equivalent or completion-event retry-after encoding. Static retry counts and backoff exist. Go gates this feature at engine v0.111.0, above Rust v0.94.14.",
+      "validation": [
+        "retry_after_failure_preserves_wire_delay_and_old_engine_falls_back_to_static_policy",
+        "stalled_version_probe_still_reports_retryable_failure_with_bounded_fallback",
+        "retry_after_delays_normal_and_durable_attempts_without_overriding_retry_limits"
+      ]
     },
     {
       "id": "N5",
@@ -672,10 +678,10 @@
   },
   "batch_4_progress": {
     "completed": [
-      "N2"
+      "N2",
+      "N3"
     ],
     "remaining": [
-      "N3",
       "N5",
       "N4",
       "O2",
@@ -684,13 +690,16 @@
     "review_policy": "A separate read-only code review is required after each gap before the next begins."
   },
   "batch_4_validation_summary": {
-    "verified_at_utc": "2026-10-25T16:03:26.498597+00:00",
-    "workspace_tests": 149,
-    "no_default_tests": 146,
+    "verified_at_utc": "2026-10-25T16:14:17.143235+00:00",
+    "workspace_tests": 154,
+    "no_default_tests": 151,
     "standalone_tests": 7,
     "live_engine": "v0.114.0",
-    "live_tests": 28,
-    "code_review": "N2 cleared after fixing synchronous batch cancellation propagation",
-    "quality_gates": "All ten workspace/standalone format, Clippy, rustdoc, doctest and Rust 1.85.1 checks passed; matrix guard tests passed."
+    "live_tests": 29,
+    "code_review": "N2 and N3 cleared; synchronous cancellation and bounded capability-probe findings fixed",
+    "quality_gates": "All ten workspace/standalone format, Clippy, rustdoc, doctest and Rust 1.85.1 checks passed; matrix guard tests passed.",
+    "live_support_floor": {
+      "v0.111.0": 1
+    }
   }
 }
