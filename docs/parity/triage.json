@@ -1,9 +1,12 @@
 {
   "baseline": {
     "rust_engine": "v0.94.14",
-    "official_revision": "af128ec1672adaf8e3cc4afd339ce5c2c6f08c35"
+    "official_revision": "af128ec1672adaf8e3cc4afd339ce5c2c6f08c35",
+    "official_go_release": "v0.114.0",
+    "official_go_revision": "aef20b00755da5b1e7e69197e7189848309afb20",
+    "official_ts_release": "1.43.0"
   },
-  "scope": "Batches 1 and 2 are implemented and validated. Batches 3 and 4 remain prioritized follow-up work.",
+  "scope": "Batches 1\u20133 are implemented with explicit support/evidence limits in feature-support.md. Batch 4 remains follow-up work.",
   "batch_rationale": {
     "1": "Correct existing public contracts that can replay the wrong work or truncate data; all are supported by the pinned engine.",
     "2": "Complete operational controls and run discovery; negotiate engine capabilities before enabling newer controls.",
@@ -24,7 +27,6 @@
       "batch": 1,
       "order": 1,
       "status": "complete",
-      "acceptance": "Rust runs().get_task_external_id reads only local FeatureState instead of querying engine run details. Official TS resolves it from engine data.",
       "official_evidence": [
         {
           "path": "typescript/src/clients/rest/runs.ts",
@@ -36,7 +38,9 @@
         "integration_durable_recovery_branch_preserves_prior_memos",
         "integration_durable_recovery_restore_preserves_task_and_memo"
       ],
-      "priority": "P1"
+      "priority": "P1",
+      "original_gap": "Rust runs().get_task_external_id reads only local FeatureState instead of querying engine run details. Official TS resolves it from engine data.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "R1",
@@ -44,7 +48,6 @@
       "batch": 1,
       "order": 2,
       "status": "complete",
-      "acceptance": "Rust branch_durable_task replays the whole run and has no nodeId or branchId selection. Official APIs branch a durable task at a specific checkpoint.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/runs.ts",
@@ -60,7 +63,9 @@
         "integration_durable_recovery_branch_preserves_prior_memos",
         "integration_durable_recovery_restore_preserves_task_and_memo"
       ],
-      "priority": "P1"
+      "priority": "P1",
+      "original_gap": "Rust branch_durable_task replays the whole run and has no nodeId or branchId selection. Official APIs branch a durable task at a specific checkpoint.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "R2",
@@ -68,7 +73,6 @@
       "batch": 1,
       "order": 3,
       "status": "complete",
-      "acceptance": "Rust restore_task replays a run and ignores the task selector. Official restore operations re-enqueue an evicted task.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/runs.ts",
@@ -84,7 +88,9 @@
         "integration_durable_recovery_branch_preserves_prior_memos",
         "integration_durable_recovery_restore_preserves_task_and_memo"
       ],
-      "priority": "P1"
+      "priority": "P1",
+      "original_gap": "Rust restore_task replays a run and ignores the task selector. Official restore operations re-enqueue an evicted task.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "R3",
@@ -92,7 +98,6 @@
       "batch": 1,
       "order": 4,
       "status": "complete",
-      "acceptance": "Rust returns Vec<Value> after collecting for at most five seconds and can stop on a short idle interval after receiving an event. It does not expose a continuous consumer stream/channel.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/runs.ts",
@@ -110,7 +115,9 @@
       ],
       "remaining_limitations": [
         "Engine workflow subscriptions are live-only, without cursor replay or automatic resubscription. Transport errors are surfaced to the consumer."
-      ]
+      ],
+      "original_gap": "Rust returns Vec<Value> after collecting for at most five seconds and can stop on a short idle interval after receiving an event. It does not expose a continuous consumer stream/channel.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "O3",
@@ -118,7 +125,6 @@
       "batch": 2,
       "order": 1,
       "status": "complete",
-      "acceptance": "Rust has no engine-version fetch and capability-gating layer for eviction/newer features; protocol files and live tests remain pinned to v0.94.14.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/worker/worker.ts",
@@ -135,7 +141,9 @@
         "engine_release_is_fetched_and_capabilities_are_available_on_the_feature_client",
         "unknown_and_older_engine_versions_cannot_silently_start_a_worker",
         "integration_management_search_bulk_controls_and_resources"
-      ]
+      ],
+      "original_gap": "Rust has no engine-version fetch and capability-gating layer for eviction/newer features; protocol files and live tests remain pinned to v0.94.14.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "R4",
@@ -143,7 +151,6 @@
       "batch": 2,
       "order": 2,
       "status": "complete",
-      "acceptance": "Rust RunFilter has one workflow name and one status. List requests have fixed limit 200, fixed time window and no pagination controls. Missing time ranges, metadata/worker/parent/event filters and richer task details on the feature client. Low-level gRPC get_run_details is available.",
       "official_evidence": [
         {
           "path": "typescript/src/clients/rest/runs.ts",
@@ -158,7 +165,9 @@
       "validation": [
         "searches_resolve_names_and_preserve_pagination_and_all_filters",
         "integration_management_search_bulk_controls_and_resources"
-      ]
+      ],
+      "original_gap": "Rust RunFilter has one workflow name and one status. List requests have fixed limit 200, fixed time window and no pagination controls. Missing time ranges, metadata/worker/parent/event filters and richer task details on the feature client. Low-level gRPC get_run_details is available.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "R5",
@@ -166,7 +175,6 @@
       "batch": 2,
       "order": 3,
       "status": "complete",
-      "acceptance": "Rust exposes one-run cancellation and replay; official clients accept multiple IDs or filter-based selections.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/runs.ts",
@@ -182,7 +190,9 @@
         "bulk_selections_and_replay_use_task_ids_and_never_retry_writes",
         "legacy_replay_preserves_the_workflow_id_and_rejects_an_empty_acknowledgment",
         "integration_management_search_bulk_controls_and_resources"
-      ]
+      ],
+      "original_gap": "Rust exposes one-run cancellation and replay; official clients accept multiple IDs or filter-based selections.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "M1",
@@ -190,7 +200,6 @@
       "batch": 2,
       "order": 4,
       "status": "complete",
-      "acceptance": "Engine-backed deletion is unsupported. Workflow-level pause/unpause is absent; pausing a worker is a separate capability. Workflow pause is newer than the Rust engine baseline. Raw workflow put is not counted as missing because register_workflow is the supported Rust equivalent.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/workflows.ts",
@@ -209,7 +218,9 @@
       ],
       "remaining_limitations": [
         "Workflow pause/unpause uses a conservative SDK support floor of v0.111.0, verified against that release. Earlier releases are rejected; this is not a claim about the first engine release implementing pause."
-      ]
+      ],
+      "original_gap": "Engine-backed deletion is unsupported. Workflow-level pause/unpause is absent; pausing a worker is a separate capability. Workflow pause is newer than the Rust engine baseline. Raw workflow put is not counted as missing because register_workflow is the supported Rust equivalent.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "M2",
@@ -217,7 +228,6 @@
       "batch": 2,
       "order": 5,
       "status": "complete",
-      "acceptance": "Engine-backed get/update return UnsupportedOperation; create/list/delete exist.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/filters.ts",
@@ -232,7 +242,9 @@
       "validation": [
         "filter_crud_uses_workflow_id_scope_and_optional_patch_fields",
         "integration_management_search_bulk_controls_and_resources"
-      ]
+      ],
+      "original_gap": "Engine-backed get/update return UnsupportedOperation; create/list/delete exist.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "M3",
@@ -240,7 +252,6 @@
       "batch": 2,
       "order": 6,
       "status": "complete",
-      "acceptance": "CEL debugging is unsupported against the engine; the in-memory evaluator is only a placeholder. TenantClient has no public operation; official clients expose tenant Get. This is not a claim that official tenant clients offer arbitrary API-key management.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/cel.ts",
@@ -263,7 +274,9 @@
       "validation": [
         "cel_evaluates_on_the_engine_and_tenant_details_preserve_settings",
         "integration_management_search_bulk_controls_and_resources"
-      ]
+      ],
+      "original_gap": "CEL debugging is unsupported against the engine; the in-memory evaluator is only a placeholder. TenantClient has no public operation; official clients expose tenant Get. This is not a claim that official tenant clients offer arbitrary API-key management.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "M4",
@@ -271,7 +284,6 @@
       "batch": 2,
       "order": 7,
       "status": "complete",
-      "acceptance": "Rust exposes name/url create and list/delete with reduced output. It lacks get/update and the typed source/authentication configurations exposed by official clients.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/webhooks.ts",
@@ -286,7 +298,9 @@
       "validation": [
         "inbound_webhooks_have_typed_auth_and_escaped_names_separate_from_workers",
         "integration_management_search_bulk_controls_and_resources"
-      ]
+      ],
+      "original_gap": "Rust exposes name/url create and list/delete with reduced output. It lacks get/update and the typed source/authentication configurations exposed by official clients.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "M5",
@@ -294,7 +308,6 @@
       "batch": 2,
       "order": 8,
       "status": "complete",
-      "acceptance": "Rust update returns UnsupportedOperation and bulk_update delegates to it; bulk_delete is sequential. TypeScript exposes actual update/bulk endpoints. Current Go schedules client does not expose these update methods, so this is a TS parity gap.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/schedules.ts",
@@ -309,7 +322,9 @@
       "validation": [
         "bulk_schedule_operations_return_partial_success_without_sequential_writes",
         "integration_management_search_bulk_controls_and_resources"
-      ]
+      ],
+      "original_gap": "Rust update returns UnsupportedOperation and bulk_update delegates to it; bulk_delete is sequential. TypeScript exposes actual update/bulk endpoints. Current Go schedules client does not expose these update methods, so this is a TS parity gap.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "M7",
@@ -317,7 +332,6 @@
       "batch": 2,
       "order": 9,
       "status": "complete",
-      "acceptance": "Rust exposes reduced workflow/queue counts and hardcodes live cancelled_runs to zero. Missing Go task-queue metrics and richer query parameters; TS additionally exposes status aggregation, task stats and Prometheus scraping.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/metrics.ts",
@@ -336,15 +350,16 @@
       "remaining_limitations": [
         "Pinned-engine legacy workflow and tenant queue metrics handlers are deprecated; their old SDK methods explicitly return UnsupportedOperation. Supported task metrics, task queues and task stats use current endpoints.",
         "Prometheus text decoding is protocol-tested; the local live engine verifies the disabled-configuration error. A production Prometheus federation server and tenant entitlement are not configured in these tests."
-      ]
+      ],
+      "original_gap": "Rust exposes reduced workflow/queue counts and hardcodes live cancelled_runs to zero. Missing Go task-queue metrics and richer query parameters; TS additionally exposes status aggregation, task stats and Prometheus scraping.",
+      "acceptance": "Implemented contract and evidence are maintained in the feature support matrix."
     },
     {
       "id": "O1",
       "area": "Tracing and task middleware",
       "batch": 3,
       "order": 1,
-      "status": "pending",
-      "acceptance": "No native OTel spans/context propagation or public middleware pipeline. User-written handler wrappers are possible but not equivalent built-in SDK support.",
+      "status": "complete",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/client.ts",
@@ -363,15 +378,25 @@
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/client.go"
         }
       ],
-      "priority": "P2"
+      "priority": "P2",
+      "original_gap": "No native OTel spans/context propagation or public middleware pipeline. User-written handler wrappers are possible but not equivalent built-in SDK support.",
+      "acceptance": "Implement the stated operational contract and supply matching local/protocol/live evidence.",
+      "validation": [
+        "middleware_wraps_both_task_kinds_in_registration_order_and_can_transform_input",
+        "middleware_can_reject_without_invoking_the_handler_and_preserves_error_kind",
+        "spans_propagate_across_awaits_and_children_without_cross_task_leaks_and_end_on_abort",
+        "integration_native_tracing_and_middleware_propagate_across_child_runs"
+      ],
+      "remaining_limitations": [
+        "Native tracing requires the default-enabled opentelemetry feature and an application-managed 0.32 provider/exporter. Hatchet collector auth, deterministic engine reparenting and automatic propagation of Hatchet attributes onto every application span are not configured by this SDK."
+      ]
     },
     {
       "id": "N1",
       "area": "Engine idempotency configuration",
       "batch": 3,
       "order": 2,
-      "status": "pending",
-      "acceptance": "No workflow/task idempotency key expression, TTL/status-based policy or collision-result handling. Error::DedupeViolation alone does not implement this behavior.",
+      "status": "complete",
       "official_evidence": [
         {
           "path": "typescript/src/v1/task.ts",
@@ -386,15 +411,25 @@
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/errors.go"
         }
       ],
-      "priority": "P2"
+      "priority": "P2",
+      "original_gap": "No workflow/task idempotency key expression, TTL/status-based policy or collision-result handling. Error::DedupeViolation alone does not implement this behavior.",
+      "acceptance": "Implement the stated operational contract and supply matching local/protocol/live evidence.",
+      "validation": [
+        "registration_sends_engine_owned_idempotency_with_exact_ttl_and_method",
+        "collision_errors_keep_existing_and_successful_ids_and_are_never_retried",
+        "idempotency_ttl_and_bulk_collisions_preserve_partial_success",
+        "status_idempotency_releases_the_key_after_terminal_completion"
+      ],
+      "remaining_limitations": [
+        "The conservative verified SDK support floor is v0.111.0. In-memory idempotency is explicitly unsupported; policy belongs to workflow registration, including one-task workflows."
+      ]
     },
     {
       "id": "M6",
       "area": "Rate-limit pause",
       "batch": 3,
       "order": 3,
-      "status": "pending",
-      "acceptance": "List/upsert exist, but there is no pause-until API for holding queued runs behind a rate-limit key.",
+      "status": "complete",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/ratelimits.ts",
@@ -405,15 +440,23 @@
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/ratelimits.go"
         }
       ],
-      "priority": "P2"
+      "priority": "P2",
+      "original_gap": "List/upsert exist, but there is no pause-until API for holding queued runs behind a rate-limit key.",
+      "acceptance": "Implement the stated operational contract and supply matching local/protocol/live evidence.",
+      "validation": [
+        "rate_pause_preserves_the_engine_time_and_never_shortens_or_fakes_the_ack",
+        "rate_limit_pause_holds_queued_work_and_earlier_pauses_do_not_shorten_it"
+      ],
+      "remaining_limitations": [
+        "The verified SDK support floor is v0.114.0."
+      ]
     },
     {
       "id": "S1",
       "area": "Per-run sticky routing",
       "batch": 3,
       "order": 4,
-      "status": "pending",
-      "acceptance": "Workflow sticky policy is rendered and durable child request uses opts.sticky as desired_worker_id. Normal gRPC run dispatch does not consume opts.sticky and explicitly sends desired_worker_id=None.",
+      "status": "complete",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/admin.ts",
@@ -424,17 +467,34 @@
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/workflow.go"
         }
       ],
-      "priority": "P2"
+      "priority": "P2",
+      "original_gap": "Workflow sticky policy is rendered and durable child request uses opts.sticky as desired_worker_id. Normal gRPC run dispatch does not consume opts.sticky and explicitly sends desired_worker_id=None.",
+      "acceptance": "Implement the stated operational contract and supply matching local/protocol/live evidence.",
+      "validation": [
+        "normal_and_bulk_dispatch_preserve_explicit_sticky_worker_routing",
+        "explicit_sticky_worker_routing_reaches_the_selected_worker_for_single_and_bulk_runs"
+      ]
     },
     {
       "id": "V1",
       "area": "Parity and recovery evidence",
       "batch": 3,
       "order": 5,
-      "status": "pending",
-      "acceptance": "There is no CI-enforced mapping from official SDK operations to real-engine behavior tests. Twelve live tests cover core cases; durable eviction/restore/branch, engine restart recovery, large fanout, broad management APIs and full scheduling/concurrency/condition semantics do not have equivalent live coverage. This does not classify implemented but untested primitives as absent.",
+      "status": "complete",
       "official_evidence": [],
-      "priority": "P2"
+      "priority": "P2",
+      "original_gap": "There is no CI-enforced mapping from official SDK operations to real-engine behavior tests. Twelve live tests cover core cases; durable eviction/restore/branch, engine restart recovery, large fanout, broad management APIs and full scheduling/concurrency/condition semantics do not have equivalent live coverage. This does not classify implemented but untested primitives as absent.",
+      "acceptance": "Implement the stated operational contract and supply matching local/protocol/live evidence.",
+      "validation": [
+        "scripts/parity.py render --check",
+        "scripts/tests/test_parity.py",
+        "integration_durable_bulk_fanout_preserves_all_128_child_results",
+        "durable_wait_and_checkpoint_survive_engine_restart"
+      ],
+      "remaining_limitations": [
+        "Pinned baseline/current engine CI definitions are supplied and their suites pass locally. Remote GitHub Actions execution awaits pushing this commit.",
+        "The official TS/Go SDK suites are not executed. This proof does not exhaustively compare all scheduling semantics or cover worker-process crashes; those limitations remain partial in the matrix."
+      ]
     },
     {
       "id": "N2",
@@ -568,7 +628,10 @@
     "quality_gates": "format, strict Clippy, strict rustdoc, Rust 1.85 and exact-archive preflight passed",
     "security_advisories": 0
   },
-  "validation_summary": {
+  "matrix": "docs/parity/feature-support.md",
+  "upstream_snapshot": "docs/parity/upstream.json",
+  "batch_3_status": "complete_with_explicit_evidence_limits",
+  "batch_2_validation_summary": {
     "verified_at_utc": "2026-10-25T05:09:04.643308+00:00",
     "engines": {
       "v0.94.14": 16,
@@ -580,5 +643,22 @@
     "live_tests": 17,
     "quality_gates": "format, strict Clippy, strict rustdoc and Rust 1.85.1 passed; exact-archive preflight recorded in docs/parity/batch-2.md and local completion report",
     "security_advisories": 0
+  },
+  "validation_summary": {
+    "verified_at_utc": "2026-10-25T15:27:17.700606+00:00",
+    "engine_live_executions": {
+      "v0.94.14": 19,
+      "v0.111.0": 3,
+      "v0.114.0": 24
+    },
+    "live_executions": 46,
+    "feature_matrix_rows": 39,
+    "quality_gates": "Format, strict Clippy/rustdoc, Rust 1.85.1, exact archive tests/docs, packaged README consumer and sibling registry dry runs passed. SDK registry dry run deferred until sibling publication.",
+    "workspace_tests": 143,
+    "no_default_tests": 140,
+    "standalone_tests": 7,
+    "python_support_claim_tests": 6,
+    "security_advisories": 0,
+    "github_actions": "Definitions supplied and suites pass locally; remote execution awaits push."
   }
 }

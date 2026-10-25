@@ -278,6 +278,9 @@ impl<T: Transport + 'static> Client<T> {
                     declaration.name
                 ))
             })?;
+        if let Some(config) = &materialized.idempotency {
+            config.ttl_ms()?;
+        }
         let validation_errors = materialized
             .steps
             .iter()
@@ -430,7 +433,7 @@ where
         })?;
         let run_id = self
             .transport
-            .run_workflow(&self.workflow_name, input_value.clone(), opts.clone())
+            .run_workflow_traced(&self.workflow_name, input_value.clone(), opts.clone())
             .await?;
         record_run(
             &self.state,
@@ -466,7 +469,7 @@ where
 
         let run_ids = self
             .transport
-            .run_workflows(&self.workflow_name, values.clone(), opts.clone())
+            .run_workflows_traced(&self.workflow_name, values.clone(), opts.clone())
             .await?;
 
         for (run_id, input_value) in run_ids.iter().cloned().zip(values.into_iter()) {

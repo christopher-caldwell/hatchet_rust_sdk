@@ -156,6 +156,31 @@ pub trait Transport: Send + Sync {
         ))
     }
 
+    /// Submits a run with an OpenTelemetry producer span when enabled.
+    async fn run_workflow_traced(
+        &self,
+        workflow_name: &str,
+        input: Value,
+        opts: RunOpts,
+    ) -> Result<WorkflowRunId> {
+        crate::telemetry::submission(workflow_name, opts, |opts| {
+            self.run_workflow(workflow_name, input, opts)
+        })
+        .await
+    }
+
+    async fn run_workflows_traced(
+        &self,
+        workflow_name: &str,
+        inputs: Vec<Value>,
+        opts: RunOpts,
+    ) -> Result<Vec<WorkflowRunId>> {
+        crate::telemetry::submission(workflow_name, opts, |opts| {
+            self.run_workflows(workflow_name, inputs, opts)
+        })
+        .await
+    }
+
     async fn register_result_channel(&self, run_id: &WorkflowRunId) -> Result<()>;
 
     async fn await_result(&self, run_id: &WorkflowRunId) -> Result<Value>;
@@ -258,6 +283,16 @@ pub trait Transport: Send + Sync {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn pause_rate_limit(
+        &self,
+        _key: &str,
+        _until: std::time::SystemTime,
+    ) -> Result<crate::RateLimitPauseResult> {
+        Err(Error::UnsupportedOperation(
+            "rate-limit pause requires an engine-backed transport".to_owned(),
+        ))
     }
 
     async fn upsert_rate_limit(
@@ -767,6 +802,11 @@ impl Transport for InMemoryTransport {
         &self,
         definition: WorkflowDeclaration<Value, Value>,
     ) -> Result<()> {
+        if definition.idempotency.is_some() {
+            return Err(Error::UnsupportedOperation(
+                "idempotency requires an engine-backed transport".to_owned(),
+            ));
+        }
         let registration = WorkflowRegistration::from_declaration(&definition, None);
         self.workflow_registrations
             .write()

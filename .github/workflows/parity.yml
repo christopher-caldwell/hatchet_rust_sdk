@@ -1,0 +1,72 @@
+name: SDK parity
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 9 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate feature evidence and generated matrix
+        run: |
+          python3 scripts/parity.py render --check
+          python3 -m unittest discover -s scripts/tests
+
+  upstream-drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check official main and published SDK versions
+        run: python3 scripts/parity.py check-upstream --output target/parity/upstream-observed.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-version-observation
+          path: target/parity/upstream-observed.json
+          if-no-files-found: warn
+
+  live:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: v0.94.14
+            image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.94.14@sha256:b8d6b7e9b96d354f1a252590d1480d3bb70f01604cc6cba1fd97ff7aaa2cb07c
+            modern: '0'
+          - engine: v0.114.0
+            image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.114.0@sha256:47bfdd1ee569d760012dfb37ba5e551c3cdb5f2f6018b4d9d11ba7febb52f731
+            modern: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            examples/multi-node
+      - name: Live SDK, two-worker and engine-restart proofs
+        env:
+          SMOKE_HATCHET_IMAGE: ${{ matrix.image }}
+          SMOKE_RUN_MODERN_TESTS: ${{ matrix.modern }}
+          SMOKE_RUN_RECOVERY_TESTS: '1'
+        run: examples/multi-node/scripts/local-smoke.sh
+      - name: Upload live reports and worker logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-parity-${{ matrix.engine }}
+          path: examples/multi-node/target/smoke
+          if-no-files-found: warn

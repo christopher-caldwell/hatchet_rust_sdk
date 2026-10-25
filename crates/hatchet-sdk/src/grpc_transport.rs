@@ -382,23 +382,6 @@ impl GrpcTransport {
         )
         .await
     }
-
-    async fn trigger_top_level_v1(
-        &self,
-        workflow_name: &str,
-        input: &Value,
-        opts: &RunOpts,
-    ) -> Result<WorkflowRunId> {
-        self.rest_api_client
-            .trigger_workflow(
-                workflow_name,
-                input,
-                &opts.additional_metadata,
-                opts.priority.map(priority_to_i32),
-            )
-            .await
-            .map(WorkflowRunId)
-    }
 }
 
 #[async_trait]
@@ -438,16 +421,6 @@ impl Transport for GrpcTransport {
     ) -> Result<WorkflowRunId> {
         let workflow_name =
             apply_workflow_namespace(workflow_name, self.config.namespace.as_deref());
-        if opts.parent_workflow_run_id.is_none()
-            && opts.parent_task_run_id.is_none()
-            && opts.desired_worker_labels.is_empty()
-        {
-            let response = self
-                .trigger_top_level_v1(&workflow_name, &input, &opts)
-                .await?;
-            return Ok(response);
-        }
-
         let additional_metadata = if opts.additional_metadata.is_empty() {
             None
         } else {
@@ -471,7 +444,7 @@ impl Transport for GrpcTransport {
             child_index: opts.child_index.map(|index| index as i32),
             child_key: opts.child_key.clone(),
             additional_metadata,
-            desired_worker_id: None,
+            desired_worker_id: opts.sticky.clone(),
             priority: opts.priority.map(priority_to_i32),
             desired_worker_labels,
         };
@@ -546,7 +519,7 @@ impl Transport for GrpcTransport {
                     child_index,
                     child_key: opts.child_key.clone(),
                     additional_metadata: additional_metadata.clone(),
-                    desired_worker_id: None,
+                    desired_worker_id: opts.sticky.clone(),
                     priority: opts.priority.map(priority_to_i32),
                     desired_worker_labels: desired_worker_labels.clone(),
                 }
@@ -841,6 +814,12 @@ impl Transport for GrpcTransport {
         &self,
         mut definition: WorkflowDeclaration<Value, Value>,
     ) -> Result<()> {
+        if let Some(config) = &definition.idempotency {
+            config.ttl_ms()?;
+            self.engine_version()
+                .await?
+                .require(crate::EngineFeature::Idempotency)?;
+        }
         definition.name =
             apply_workflow_namespace(&definition.name, self.config.namespace.as_deref());
         definition.on_events = definition
@@ -879,6 +858,22 @@ impl Transport for GrpcTransport {
             )
         });
 
+        let idempotency = definition
+            .idempotency
+            .as_ref()
+            .map(|config| -> Result<_> {
+                Ok(proto::v1::IdempotencyConfig {
+                    expression: config.expression.clone(),
+                    ttl_ms: config.ttl_ms()?,
+                    method: Some(match config.method {
+                        crate::IdempotencyMethod::Ttl => proto::v1::IdempotencyMethod::Ttl as i32,
+                        crate::IdempotencyMethod::Status => {
+                            proto::v1::IdempotencyMethod::Status as i32
+                        }
+                    }),
+                })
+            })
+            .transpose()?;
         let create_request = proto::v1::CreateWorkflowVersionRequest {
             name: registration.name.clone(),
             description: definition.description.unwrap_or_default(),
@@ -924,6 +919,7 @@ impl Transport for GrpcTransport {
                 })
                 .collect(),
             input_json_schema: serialize_input_schema(definition.input_schema.as_ref()),
+            idempotency,
         };
 
         let admin = self.admin.clone();
@@ -1159,6 +1155,41 @@ impl Transport for GrpcTransport {
             &self.retry_config,
         )
         .await
+    }
+
+    async fn pause_rate_limit(
+        &self,
+        key: &str,
+        until: std::time::SystemTime,
+    ) -> Result<crate::RateLimitPauseResult> {
+        if key.trim().is_empty() {
+            return Err(Error::InputValidation(vec![
+                "rate-limit key must not be empty".to_owned(),
+            ]));
+        }
+        let paused_until = crate::rate_pause::timestamp(until)?;
+        self.engine_version()
+            .await?
+            .require(crate::EngineFeature::RateLimitPause)?;
+        let response = self
+            .legacy_workflows
+            .clone()
+            .pause_rate_limit(
+                self.authed_request(proto::workflows::PauseRateLimitRequest {
+                    key: key.to_owned(),
+                    paused_until: Some(paused_until),
+                }),
+            )
+            .await
+            .map_err(grpc_error)?
+            .into_inner();
+        let until = response
+            .paused_until
+            .ok_or_else(|| Error::Transport("engine omitted the pause timestamp".to_owned()))?;
+        Ok(crate::RateLimitPauseResult {
+            key: key.to_owned(),
+            paused_until: crate::rate_pause::system_time(until)?,
+        })
     }
 
     async fn upsert_rate_limit(
@@ -1697,7 +1728,67 @@ fn serialize_input_schema(schema: Option<&Value>) -> Option<Vec<u8>> {
 
 // --- Conversion helpers ---
 
+#[derive(prost::Message)]
+struct RpcStatusDetails {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+fn collision(detail: proto::v1::IdempotencyCollisionError) -> Option<crate::IdempotencyCollision> {
+    (!detail.existing_run_external_id.is_empty()).then(|| crate::IdempotencyCollision {
+        existing_run_id: WorkflowRunId(detail.existing_run_external_id),
+        colliding_run_id: (!detail.colliding_run_external_id.is_empty())
+            .then_some(WorkflowRunId(detail.colliding_run_external_id)),
+    })
+}
 fn grpc_error(status: Status) -> Error {
+    if status.code() == tonic::Code::AlreadyExists {
+        use prost::Message;
+        if let Ok(envelope) = RpcStatusDetails::decode(status.details()) {
+            for detail in envelope.details {
+                if detail
+                    .type_url
+                    .ends_with("/v1.BulkTriggerIdempotencyCollisionError")
+                {
+                    if let Ok(result) = proto::v1::BulkTriggerIdempotencyCollisionError::decode(
+                        detail.value.as_slice(),
+                    ) {
+                        let Some(collisions) = result
+                            .collisions
+                            .into_iter()
+                            .map(collision)
+                            .collect::<Option<Vec<_>>>()
+                        else {
+                            continue;
+                        };
+                        if collisions.is_empty() {
+                            continue;
+                        }
+                        return Error::BulkIdempotencyCollision(crate::BulkIdempotencyCollision {
+                            successful_run_ids: result
+                                .successful_workflow_run_external_ids
+                                .into_iter()
+                                .map(WorkflowRunId)
+                                .collect(),
+                            collisions,
+                        });
+                    }
+                } else if detail.type_url.ends_with("/v1.IdempotencyCollisionError") {
+                    if let Ok(result) =
+                        proto::v1::IdempotencyCollisionError::decode(detail.value.as_slice())
+                    {
+                        if let Some(result) = collision(result) {
+                            return Error::IdempotencyCollision(result);
+                        }
+                    }
+                }
+            }
+        }
+        return Error::DedupeViolation(status.message().to_owned());
+    }
     Error::Transport(format!(
         "gRPC error: {} ({})",
         status.message(),

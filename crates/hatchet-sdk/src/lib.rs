@@ -16,11 +16,15 @@ mod context;
 mod durable;
 mod engine_version;
 mod error;
+mod idempotency;
 mod management;
+mod middleware;
+mod rate_pause;
 mod rest_client;
 mod run_ref;
 mod run_stream;
 mod task;
+mod telemetry;
 mod transport;
 mod worker;
 mod workflow;
@@ -60,7 +64,12 @@ pub use durable::{
 };
 pub use engine_version::{EngineFeature, EngineVersion};
 pub use error::{Error, Result};
+pub use idempotency::{
+    BulkIdempotencyCollision, IdempotencyCollision, IdempotencyConfig, IdempotencyMethod,
+};
 pub use management::*;
+pub use middleware::{Next, TaskFuture, TaskInvocation, TaskMiddleware};
+pub use rate_pause::RateLimitPauseResult;
 pub use run_ref::{RunControl, WorkflowRunRef};
 pub use run_stream::RunEventStream;
 pub use task::{

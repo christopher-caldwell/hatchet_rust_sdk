@@ -23,6 +23,8 @@ another-hatchet-macros = { version = "0.1.0", path = "../hatchet-macros" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"], optional = true }
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["rt", "sync", "time", "net", "io-util", "fs"] }
 tokio-util = "0.7"
@@ -42,12 +44,14 @@ tonic-prost-build = "=0.14.2"
 protoc-bin-vendored = "3.2"
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "testing"] }
 h2 = "0.4"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 base64 = "0.22"
 
 [features]
 # Retained as a no-op compatibility feature; gRPC/REST support is always built.
-default = ["grpc"]
+default = ["grpc", "opentelemetry"]
+opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
 grpc = []
 integration = []

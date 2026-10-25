@@ -24,6 +24,10 @@ pub enum Error {
     InputValidation(Vec<String>),
     #[error("non-retryable error: {0}")]
     NonRetryable(String),
+    #[error(transparent)]
+    IdempotencyCollision(crate::IdempotencyCollision),
+    #[error(transparent)]
+    BulkIdempotencyCollision(crate::BulkIdempotencyCollision),
     #[error("dedupe violation: {0}")]
     DedupeViolation(String),
     #[error("gRPC error: {0}")]
@@ -45,6 +49,8 @@ impl Error {
             Self::NonRetryable(_)
                 | Self::InputValidation(_)
                 | Self::DedupeViolation(_)
+                | Self::IdempotencyCollision(_)
+                | Self::BulkIdempotencyCollision(_)
                 | Self::Config(_)
                 | Self::UnsupportedOperation(_)
         )

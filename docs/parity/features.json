@@ -1,0 +1,1253 @@
+{
+  "schema_version": 1,
+  "reviewed_against": {
+    "typescript": "1.43.0",
+    "go": "v0.114.0",
+    "main": "af128ec1672adaf8e3cc4afd339ce5c2c6f08c35"
+  },
+  "engine_targets": {
+    "v0.94.14": {
+      "ci": true,
+      "image": "ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.94.14@sha256:b8d6b7e9b96d354f1a252590d1480d3bb70f01604cc6cba1fd97ff7aaa2cb07c"
+    },
+    "v0.111.0": {
+      "ci": false,
+      "note": "Local pause and idempotency support-floor probes"
+    },
+    "v0.114.0": {
+      "ci": true,
+      "image": "ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.114.0@sha256:47bfdd1ee569d760012dfb37ba5e551c3cdb5f2f6018b4d9d11ba7febb52f731"
+    }
+  },
+  "features": [
+    {
+      "id": "C1",
+      "feature": "Typed declaration, registration and execution",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/client.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "client.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/client.rs",
+          "crates/hatchet-sdk/src/workflow.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_basic_register_and_run",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "C2",
+      "feature": "DAGs and terminal outputs",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/client.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "workflow.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/workflow.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_fresh_client_dag_outputs_and_reattachment",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "C3",
+      "feature": "Child workflows and bulk fanout",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/client.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "workflow.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/context.rs",
+          "crates/hatchet-sdk/src/durable.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_child_workflow",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_durable_bulk_fanout_preserves_all_128_child_results",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Live fanout proof uses 128 children; it is not a load-capacity benchmark."
+    },
+    {
+      "id": "C4",
+      "feature": "Durable memo, sleep and scoped event waits",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/client.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "workflow.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/durable.rs",
+          "crates/hatchet-sdk/src/durable_listener.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_durable_memo_and_sleep",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_durable_event_wait",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "C5",
+      "feature": "Condition composition and concurrency policies",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/task.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "workflow.go"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/src/durable.rs",
+          "crates/hatchet-sdk/src/task.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/feature_set_6_validation.rs",
+            "name": "validates_complex_nested_or_groups_with_mixed_condition_types",
+            "engines": []
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Configuration/rendering and selected live waits are proven. Every policy/interleaving is not live-tested."
+    },
+    {
+      "id": "C6",
+      "feature": "Retry/backoff and non-retryable outcomes",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/task.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "errors.go"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/src/task.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/src/grpc_transport.rs",
+            "name": "completion_event_preserves_non_retryable_errors",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/src/grpc_transport.rs",
+            "name": "rendered_to_proto_task_maps_rate_limits_labels_concurrency_backoff_and_slots",
+            "engines": []
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Static options and completion encoding are proven; per-error retry delay is tracked separately below."
+    },
+    {
+      "id": "C7",
+      "feature": "Event push and event-triggered workflows",
+      "typescript": {
+        "status": "supported",
+        "source": "src/core/features/events.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "events.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_event_trigger",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "C8",
+      "feature": "Task logs",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/logs.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/logs.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/context.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_log_retrieval",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "C9",
+      "feature": "Absolute scheduling and delay",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/schedules.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/schedules.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/client.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_delayed_workflow_executes",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "C10",
+      "feature": "Cron triggers and management",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/crons.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/crons.go"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/workflow.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/feature_set_6_validation.rs",
+            "name": "validates_feature_client_operations",
+            "engines": []
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Public registration and management exist; full cron firing/time-zone behavior has no equivalent live proof."
+    },
+    {
+      "id": "C11",
+      "feature": "Worker reconnect and durable restart recovery",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/worker/worker.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "worker.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/worker.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs",
+          "crates/hatchet-sdk/src/durable_listener.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/recovery_engine.rs",
+            "name": "durable_wait_and_checkpoint_survive_engine_restart",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "A pending wait and memo checkpoint survive one disposable engine restart. Worker-process crashes are not covered by this proof."
+    },
+    {
+      "id": "C12",
+      "feature": "Worker labels and slot configuration",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/worker/worker.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "worker.go"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/src/worker.rs",
+          "crates/hatchet-sdk/src/task.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/src/grpc_transport.rs",
+            "name": "rendered_to_proto_task_maps_rate_limits_labels_concurrency_backoff_and_slots",
+            "engines": []
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Wire/local matching and ordinary worker use are proven; all cross-worker label/slot scheduling combinations are not."
+    },
+    {
+      "id": "C13",
+      "feature": "Platform TLS roots",
+      "typescript": {
+        "status": "supported",
+        "source": "src/clients/hatchet-client/client-config.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "client.go"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/src/config.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/src/config.rs",
+            "name": "endpoint_url_uses_https_for_tls",
+            "engines": []
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "TLS transport and system-root setup are implemented. Live engine proofs use disposable plaintext local services."
+    },
+    {
+      "id": "S2",
+      "feature": "Fresh-client named task external ID lookup",
+      "typescript": {
+        "status": "supported",
+        "source": "src/clients/rest/runs.ts"
+      },
+      "go": {
+        "status": "absent"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_durable_recovery_branch_preserves_prior_memos",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Go exposes task details but not this named convenience operation."
+    },
+    {
+      "id": "R1",
+      "feature": "Durable checkpoint branching",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/runs.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/runs.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_durable_recovery_branch_preserves_prior_memos",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "R2",
+      "feature": "Evicted durable task restoration",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/runs.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/runs.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_durable_recovery_restore_preserves_task_and_memo",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "R3",
+      "feature": "Incremental workflow event streams",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/runs.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/runs.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/run_stream.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_streaming_is_incremental_across_a_long_idle_gap",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Live-only engine subscriptions: no history/cursor replay or automatic resubscription; errors are surfaced."
+    },
+    {
+      "id": "O3",
+      "feature": "Engine version and capability guards",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/worker/worker.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "engine_version.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/engine_version.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/management_contracts.rs",
+            "name": "engine_release_is_fetched_and_capabilities_are_available_on_the_feature_client",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/management_contracts.rs",
+            "name": "unknown_and_older_engine_versions_cannot_silently_start_a_worker",
+            "engines": []
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Support floors are explicit; unknown semantic engine releases are rejected."
+    },
+    {
+      "id": "R4",
+      "feature": "Run queries, pagination and task details",
+      "typescript": {
+        "status": "supported",
+        "source": "src/clients/rest/runs.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/runs.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/management_contracts.rs",
+            "name": "searches_resolve_names_and_preserve_pagination_and_all_filters",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_management_search_bulk_controls_and_resources",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "R5",
+      "feature": "Bulk/filtered cancel and replay",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/runs.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/runs.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_management_search_bulk_controls_and_resources",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Affected task IDs are distinct from workflow IDs; replay reuses workflow identity."
+    },
+    {
+      "id": "M1-delete",
+      "feature": "Workflow deletion",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/workflows.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/workflows.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_management_search_bulk_controls_and_resources",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "M1-pause",
+      "feature": "Workflow pause/unpause",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/workflows.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/workflows.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "workflow_pause_holds_new_runs_until_unpause",
+            "engines": [
+              "v0.111.0",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "SDK floor v0.111.0",
+      "notes": "Conservative verified floor, not the earliest engine implementation.",
+      "engine_requirement": {
+        "feature": "WorkflowPause",
+        "version": "0.111.0"
+      }
+    },
+    {
+      "id": "M2",
+      "feature": "Filter lookup and partial updates",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/filters.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/filters.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/management_contracts.rs",
+            "name": "filter_crud_uses_workflow_id_scope_and_optional_patch_fields",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_management_search_bulk_controls_and_resources",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": ""
+    },
+    {
+      "id": "M3",
+      "feature": "CEL evaluation and tenant lookup",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/cel.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/cel.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/clients.rs",
+          "crates/hatchet-sdk/src/management.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/management_contracts.rs",
+            "name": "cel_evaluates_on_the_engine_and_tenant_details_preserve_settings",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_management_search_bulk_controls_and_resources",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Engine CEL returns true/false/error; local transports do not fake evaluation. Tenant Get does not imply API-key management."
+    },
+    {
+      "id": "M4",
+      "feature": "Typed inbound event webhooks",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/webhooks.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/webhooks.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/management.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/management_contracts.rs",
+            "name": "inbound_webhooks_have_typed_auth_and_escaped_names_separate_from_workers",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_management_search_bulk_controls_and_resources",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Separate from the legacy webhook-worker resource."
+    },
+    {
+      "id": "M5",
+      "feature": "Schedule rescheduling and bulk operations",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/schedules.ts"
+      },
+      "go": {
+        "status": "absent"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/management.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/management_contracts.rs",
+            "name": "bulk_schedule_operations_return_partial_success_without_sequential_writes",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_management_search_bulk_controls_and_resources",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Bulk results retain per-item errors. Go exposes schedule CRUD but not these bulk/update operations."
+    },
+    {
+      "id": "M7",
+      "feature": "Task metrics, queues, stats and Prometheus",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/metrics.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/metrics.go"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/src/management.rs",
+          "crates/hatchet-sdk/src/rest_client.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/management_contracts.rs",
+            "name": "supported_metrics_preserve_cancelled_counts_queue_details_stats_and_text",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_management_search_bulk_controls_and_resources",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Task counts/queues/stats live-tested; Prometheus text is protocol-tested and disabled configuration live-tested. Real federation is unproven. Deprecated legacy metric methods return UnsupportedOperation; Go still wraps deprecated legacy endpoints."
+    },
+    {
+      "id": "O1",
+      "feature": "Task middleware, spans and W3C trace propagation",
+      "typescript": {
+        "status": "supported",
+        "source": "src/opentelemetry/instrumentor.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "opentelemetry/middleware.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/middleware.rs",
+          "crates/hatchet-sdk/src/telemetry.rs",
+          "crates/hatchet-sdk/src/worker.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/middleware_contracts.rs",
+            "name": "middleware_wraps_both_task_kinds_in_registration_order_and_can_transform_input",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/src/telemetry.rs",
+            "name": "spans_propagate_across_awaits_and_children_without_cross_task_leaks_and_end_on_abort",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_native_tracing_and_middleware_propagate_across_child_runs",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Native tracing is optional/default-enabled. The application supplies an OpenTelemetry 0.32 provider/exporter; payloads are not recorded automatically."
+    },
+    {
+      "id": "O1-collector",
+      "feature": "Automatic Hatchet collector/exporter setup",
+      "typescript": {
+        "status": "supported",
+        "source": "src/opentelemetry/instrumentor.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "opentelemetry/instrumentor.go"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/src/telemetry.rs"
+        ],
+        "tests": []
+      },
+      "engine": "Application exporter configuration",
+      "notes": "Rust emits standard spans to the application provider; it does not configure Hatchet collector auth, deterministic engine reparenting, or propagate Hatchet attributes to every application span automatically."
+    },
+    {
+      "id": "N1",
+      "feature": "TTL/STATUS idempotency and collision results",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/task.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "workflow.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/idempotency.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/submission_contracts.rs",
+            "name": "collision_errors_keep_existing_and_successful_ids_and_are_never_retried",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "idempotency_ttl_and_bulk_collisions_preserve_partial_success",
+            "engines": [
+              "v0.111.0",
+              "v0.114.0"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "status_idempotency_releases_the_key_after_terminal_completion",
+            "engines": [
+              "v0.111.0",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "SDK floor v0.111.0",
+      "notes": "Workflow policy also covers one-task workflows. In-memory emulation is unsupported; partial-success IDs survive bulk failures.",
+      "engine_requirement": {
+        "feature": "Idempotency",
+        "version": "0.111.0"
+      }
+    },
+    {
+      "id": "M6",
+      "feature": "Pause queued work behind a rate-limit key",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/features/ratelimits.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "features/ratelimits.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/rate_pause.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/submission_contracts.rs",
+            "name": "rate_pause_preserves_the_engine_time_and_never_shortens_or_fakes_the_ack",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "rate_limit_pause_holds_queued_work_and_earlier_pauses_do_not_shorten_it",
+            "engines": [
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "SDK floor v0.114.0",
+      "notes": "Returns the actual engine pause time; earlier requests cannot shorten it.",
+      "engine_requirement": {
+        "feature": "RateLimitPause",
+        "version": "0.114.0"
+      }
+    },
+    {
+      "id": "S1",
+      "feature": "Explicit worker routing on normal/bulk runs",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/admin.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "workflow.go"
+      },
+      "rust": {
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/grpc_transport.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/submission_contracts.rs",
+            "name": "normal_and_bulk_dispatch_preserve_explicit_sticky_worker_routing",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "explicit_sticky_worker_routing_reaches_the_selected_worker_for_single_and_bulk_runs",
+            "engines": [
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "RunOpts.sticky is an explicit desired-worker ID; workflow soft/hard policy remains separate."
+    },
+    {
+      "id": "V1",
+      "feature": "CI-enforced mapping and recovery evidence",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/client.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "client.go"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/tests/integration.rs",
+          "crates/hatchet-sdk/tests/recovery_engine.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_durable_bulk_fanout_preserves_all_128_child_results",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/recovery_engine.rs",
+            "name": "durable_wait_and_checkpoint_survive_engine_restart",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Local baseline/latest engine proofs pass and CI definitions are supplied. Remote CI has not run; TS/Go suites, worker-process crash recovery and every scheduling semantic are not exhaustively compared."
+    },
+    {
+      "id": "N2",
+      "feature": "Server-coalesced batch task handlers",
+      "typescript": {
+        "status": "preview",
+        "source": "src/v1/task.ts"
+      },
+      "go": {
+        "status": "preview",
+        "source": "batch.go"
+      },
+      "rust": {
+        "status": "missing",
+        "sources": [],
+        "tests": []
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Bulk triggering is implemented but is distinct from engine-coalesced batch execution."
+    },
+    {
+      "id": "N3",
+      "feature": "Per-error retry-after delay",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/task.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "errors.go"
+      },
+      "rust": {
+        "status": "missing",
+        "sources": [
+          "crates/hatchet-sdk/src/error.rs"
+        ],
+        "tests": []
+      },
+      "engine": "Official Go floor v0.111.0",
+      "notes": "Version detection exists; no RetryAfter error/completion encoding yet."
+    },
+    {
+      "id": "N5",
+      "feature": "Durable topic/cursor streams",
+      "typescript": {
+        "status": "preview",
+        "source": "src/v1/client/features/streams.ts"
+      },
+      "go": {
+        "status": "absent"
+      },
+      "rust": {
+        "status": "missing",
+        "sources": [],
+        "tests": []
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Separate from supported workflow event streaming; not counted as a Go feature-client gap."
+    },
+    {
+      "id": "N4",
+      "feature": "Embedded real-engine lifecycle",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/embedded.ts"
+      },
+      "go": {
+        "status": "supported",
+        "source": "embedded.go"
+      },
+      "rust": {
+        "status": "missing",
+        "sources": [],
+        "tests": []
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "InMemoryTransport and Docker proofs exist, not an embedded engine API."
+    },
+    {
+      "id": "O2",
+      "feature": "Broad runtime schema/Zod-equivalent validation",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/declaration.ts"
+      },
+      "go": {
+        "status": "absent"
+      },
+      "rust": {
+        "status": "partial",
+        "sources": [
+          "crates/hatchet-sdk/src/task.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/feature_set_6_validation.rs",
+            "name": "validates_task_config_and_workflow_declaration_builders",
+            "engines": []
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Serde typing plus a JSON-schema subset exist. Composition/ref/broad constraints and automatic schema generation remain incomplete; Zod is TS-specific."
+    },
+    {
+      "id": "O4",
+      "feature": "Distinct liveness and readiness endpoints",
+      "typescript": {
+        "status": "supported",
+        "source": "src/v1/client/worker/health-server.ts"
+      },
+      "go": {
+        "status": "absent"
+      },
+      "rust": {
+        "status": "missing",
+        "sources": [
+          "crates/hatchet-sdk/src/health.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/parity_completion.rs",
+            "name": "worker_wait_until_ready_and_health_server",
+            "engines": []
+          }
+        ]
+      },
+      "engine": "Baseline v0.94.14",
+      "notes": "Current health support is connection-dependent for all paths; /livez versus /readyz semantics remain missing."
+    }
+  ]
+}

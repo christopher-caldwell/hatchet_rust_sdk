@@ -210,3 +210,13 @@ railway delete --project <PROJECT_ID> --yes
 See [AUDIT.md](AUDIT.md) for the checkout audit and final workspace verification.
 [railway-evidence.json](railway-evidence.json) contains the sanitized
 live topology, two completed run IDs, 10-minute measurements, and final settings.
+
+### Versioned SDK parity proofs
+
+`local-smoke.sh` defaults to the pinned v0.94.14 baseline. Set
+`SMOKE_HATCHET_IMAGE` to an exact alternate image digest to test another release.
+`SMOKE_RUN_MODERN_TESTS=1` additionally runs the v0.114.0 feature suite;
+`SMOKE_RUN_RECOVERY_TESTS=1` runs the disposable engine-restart test. That test
+requires the container name exported by the runner and never targets a remote
+engine. Reports sum successful tests across the selected suites. See the root
+[feature matrix](../../docs/parity/feature-support.md) for support floors and limits.

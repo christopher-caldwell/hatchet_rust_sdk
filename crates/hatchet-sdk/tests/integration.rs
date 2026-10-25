@@ -1258,20 +1258,25 @@ async fn integration_management_search_bulk_controls_and_resources() {
         .unwrap();
     assert!(deleted.errors.is_empty());
     assert_eq!(deleted.deleted_ids, vec![schedule.name]);
-    assert!(matches!(
-        client
-            .workflows()
-            .pause(
-                name,
-                WorkflowPauseOptions {
-                    paused_workflow_queue_ttl: "1h".into(),
-                    paused_workflow_cron_run_queue_behavior: PausedRunBehavior::Queue,
-                    paused_workflow_scheduled_run_queue_behavior: PausedRunBehavior::Queue
-                }
-            )
-            .await,
-        Err(Error::UnsupportedOperation(_))
-    ));
+    let options = WorkflowPauseOptions {
+        paused_workflow_queue_ttl: "1h".into(),
+        paused_workflow_cron_run_queue_behavior: PausedRunBehavior::Queue,
+        paused_workflow_scheduled_run_queue_behavior: PausedRunBehavior::Queue,
+    };
+    if client
+        .engine_version()
+        .await
+        .unwrap()
+        .supports(EngineFeature::WorkflowPause)
+    {
+        client.workflows().pause(name, options).await.unwrap();
+        client.workflows().unpause(name).await.unwrap();
+    } else {
+        assert!(matches!(
+            client.workflows().pause(name, options).await,
+            Err(Error::UnsupportedOperation(_))
+        ));
+    }
     let opts = RunOpts {
         additional_metadata: std::collections::HashMap::from([(
             "batch".into(),
@@ -1399,4 +1404,150 @@ async fn integration_management_search_bulk_controls_and_resources() {
     worker.shutdown().await.unwrap();
     client.workflows().delete(name).await.unwrap();
     assert!(client.workflows().get(name).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_durable_bulk_fanout_preserves_all_128_child_results() {
+    use serde_json::{Value, json};
+    let client = real_client().await;
+    let child = client.task::<Value, Value>("parity-fanout-child");
+    let parent = client.durable_task::<Value, Value>("parity-fanout-parent");
+    let children = client.workflow::<Value, Value>("parity-fanout-child-workflow");
+    let worker = client
+        .worker("parity-fanout-worker")
+        .slots(64)
+        .register_task(&child, |input, _: Ctx| async { Ok(input) })
+        .register_durable_task(&parent, move |_, ctx: DurableCtx| {
+            let children = children.clone();
+            async move {
+                let runs = ctx
+                    .spawn_children(
+                        &children,
+                        (0..128).map(|i| json!({"index":i})).collect::<Vec<_>>(),
+                        RunOpts::default(),
+                    )
+                    .await?;
+                let mut values = vec![];
+                for run in runs {
+                    values.push(run.output().await?["index"].as_u64().unwrap());
+                }
+                values.sort_unstable();
+                Ok(json!({"indices":values}))
+            }
+        })
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(15))
+        .await
+        .unwrap();
+    client
+        .register_workflow(
+            WorkflowDeclaration::<Value, Value>::new("parity-fanout-child-workflow")
+                .step(&child, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    client
+        .register_workflow(
+            WorkflowDeclaration::<Value, Value>::new("parity-fanout-parent-workflow")
+                .durable_step(&parent, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(90),
+        client
+            .workflow::<Value, Value>("parity-fanout-parent-workflow")
+            .run(json!({}), RunOpts::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result["indices"], json!((0..128).collect::<Vec<_>>()));
+    worker.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "opentelemetry")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_native_tracing_and_middleware_propagate_across_child_runs() {
+    use opentelemetry::{global, trace::TraceContextExt};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use serde_json::{Value, json};
+    #[derive(Debug)]
+    struct Observe(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl TaskMiddleware for Observe {
+        async fn handle(&self, invocation: TaskInvocation, next: Next) -> Result<Value> {
+            assert!(invocation.metadata().contains_key("traceparent"));
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            next.run(invocation).await
+        }
+    }
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    global::set_tracer_provider(provider.clone());
+    let client = real_client().await;
+    let child = client.task::<Value, Value>("otel-live-child");
+    let parent = client.task::<Value, Value>("otel-live-parent");
+    let child_workflow = client.workflow::<Value, Value>("otel-live-child-workflow");
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker=client.worker("otel-live-worker").middleware(Observe(Arc::clone(&calls))).register_task(&child,|_,_:Ctx|async{Ok(json!({"trace_id":opentelemetry::Context::current().span().span_context().trace_id().to_string()}))}).register_task(&parent,move |_,ctx:Ctx|{let child=child_workflow.clone();async move{let run=ctx.run_child(&child,json!({}),RunOpts::default()).await?;run.output().await}}).build().start().unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(15))
+        .await
+        .unwrap();
+    client
+        .register_workflow(
+            WorkflowDeclaration::<Value, Value>::new("otel-live-child-workflow")
+                .step(&child, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    client
+        .register_workflow(
+            WorkflowDeclaration::<Value, Value>::new("otel-live-parent-workflow")
+                .step(&parent, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        TEST_TIMEOUT,
+        client
+            .workflow::<Value, Value>("otel-live-parent-workflow")
+            .run(json!({}), RunOpts::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    provider.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    let traced = spans
+        .iter()
+        .filter(|s| s.span_context.trace_id().to_string() == result["trace_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(traced.len(), 4);
+    assert_eq!(
+        traced
+            .iter()
+            .filter(|s| s.name == "hatchet.start_step_run")
+            .count(),
+        2
+    );
+    assert_eq!(
+        traced
+            .iter()
+            .filter(|s| s.name == "hatchet.run_workflow")
+            .count(),
+        2
+    );
+    worker.shutdown().await.unwrap();
+    provider.shutdown().unwrap();
+    global::set_tracer_provider(opentelemetry::trace::noop::NoopTracerProvider::new());
 }

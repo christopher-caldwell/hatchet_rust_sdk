@@ -224,6 +224,48 @@ health checks, a trigger utility, and local/Railway smoke scripts.
   transport support is part of the v0.1 base crate, so default and
   `--no-default-features` builds expose the same API.
 
+## Official SDK feature support
+
+The [feature support matrix](docs/parity/feature-support.md) compares the published
+TS and Go SDKs, with immutable source references, Rust engine requirements and
+named tests. [upstream.json](docs/parity/upstream.json) records npm/Go registry
+versions separately from official `main` and GitHub's latest-release label.
+
+- Worker `.middleware(layer)` wraps both normal and durable task execution.
+  Implement `TaskMiddleware::handle(invocation, next)` and call
+  `next.run(invocation).await` to continue. The first registered layer is outermost;
+  layers may replace input/output, reject execution, or short-circuit it. `Next`
+  is consumed once, and execution identity is immutable.
+- The default `opentelemetry` feature emits submission/task spans and propagates
+  W3C `traceparent`/`tracestate` through normal and durable children. Applications
+  configure an OpenTelemetry **0.32** provider/exporter; the SDK does not install a
+  global provider, send telemetry without one, or configure Hatchet collector
+  credentials automatically. Async context is scoped per future poll. Disable
+  default features to omit this instrumentation while keeping the transport API.
+- `WorkflowDeclaration::idempotency(IdempotencyConfig { expression, ttl, method })`
+  requests engine-owned TTL or STATUS deduplication, including one-task workflows.
+  TTL is a positive whole-millisecond `Duration`; STATUS releases the key at a
+  terminal outcome, with TTL as a fallback cap. The verified SDK floor is v0.111.0.
+  Local transports reject this configuration rather than simulate an engine claim.
+- Submission collisions return `Error::IdempotencyCollision` with the existing run
+  ID; bulk collisions preserve successful IDs plus collision details in
+  `Error::BulkIdempotencyCollision`. These errors are not retried. Reattach to
+  successful bulk IDs with `client.run_ref(id)`; retrying the entire batch could
+  duplicate work that succeeded. Submission uses the official gRPC contracts so
+  collision details and routing information are retained for fresh clients too.
+- `rate_limits().pause(key, until: SystemTime)` holds queued work behind a rendered
+  key and returns `RateLimitPauseResult` with the actual engine pause time. Earlier
+  requests do not shorten an active pause. This requires engine v0.114.0 or later.
+- `RunOpts::sticky` supplies an explicit desired worker ID on both single and bulk
+  normal dispatch, as well as durable children. Workflow `Soft`/`Hard` sticky
+  policy is a separate registration setting.
+
+Run `python3 scripts/parity.py check-upstream` to check newer official versions;
+use `refresh`, review the changed implementations, then update `features.json`
+and run `render`. `render --check` validates evidence and generated documentation
+offline. CI supplies baseline/current engine jobs and a weekly/manual upstream
+version-drift check; support claims are never promoted automatically on a release.
+
 ## Examples
 
 From the repository root:

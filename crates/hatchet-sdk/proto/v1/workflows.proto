@@ -110,6 +110,7 @@ message CreateWorkflowVersionRequest {
     optional int32 default_priority = 11; // (optional) the default priority for the workflow
     repeated Concurrency concurrency_arr = 12; // (optional) the workflow concurrency options
     repeated DefaultFilter default_filters = 13; // (optional) the default filters for the workflow
+    optional IdempotencyConfig idempotency = 15;
     optional bytes input_json_schema = 14; // (optional) the JSON schema for the workflow input
 }
 
@@ -189,4 +190,26 @@ message GetRunDetailsResponse {
     bool done = 4; // indicates if the workflow run is done
     bytes additional_metadata = 5; // (optional) additional metadata for the workflow run
     bool is_evicted = 6; // whether any task in this run has been evicted
+}
+
+// Additive contracts from official v0.111.0+ (see README.md).
+enum IdempotencyMethod {
+    TTL = 0;
+    STATUS = 1;
+}
+
+message IdempotencyConfig {
+    string expression = 1; // a CEL expression for determining the idempotency key for workflow runs
+    int64 ttl_ms = 2; // time-to-live for idempotency keys in milliseconds. if the method is `STATUS`, this is a "fallback" - the longest the key can live before it's evicted
+    optional IdempotencyMethod method = 3; // the method to use for idempotency, defaults to TTL
+}
+
+message IdempotencyCollisionError {
+    string existing_run_external_id = 1; // the external ID of the existing workflow run that caused the collision
+    string colliding_run_external_id = 2; // the external ID of the workflow run that caused the collision
+}
+
+message BulkTriggerIdempotencyCollisionError {
+    repeated string successful_workflow_run_external_ids = 1; // the external IDs of the successfully triggered workflow runs
+    repeated IdempotencyCollisionError collisions = 2; // the idempotency collision errors
 }

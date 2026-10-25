@@ -9,6 +9,15 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Async task middleware for normal/durable handlers, and optional/default-enabled
+  OpenTelemetry 0.32 spans with W3C context propagation across child submissions.
+- Workflow TTL/STATUS idempotency with engine capability guards, typed single/bulk
+  collision errors and retained successful bulk IDs.
+- Rate-limit pause-until requests and actual engine acknowledgment times.
+- A versioned TS/Go feature matrix, registry/source snapshot, guarded refresh and
+  drift checks, and pinned baseline/current engine CI definitions. Live coverage
+  now includes 128-child durable fanout and a pending wait across engine restart.
+
 - Engine release lookup and capability prerequisites; worker startup checks slot
   configuration and durable support before registering.
 - Paginated run search with time, workflow, status, metadata, worker, parent and
@@ -37,6 +46,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
   workflow replay aliases were removed. In-memory recovery is explicitly unsupported.
 
 ### Fixed
+
+- Preserve explicit desired worker identity on normal single and bulk submissions.
+- Use official gRPC submission paths so idempotency details are not lost through
+  the REST proxy, and classify collisions as non-retryable.
 
 - Resolve workflow filters to IDs, use exploded query arrays, and decode actual
   replay task acknowledgments while preserving the existing workflow ID.

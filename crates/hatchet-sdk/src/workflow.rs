@@ -17,6 +17,8 @@ pub struct WorkflowDeclaration<I, O> {
     pub default_priority: Option<Priority>,
     pub task_defaults: TaskConfig,
     pub sticky: Option<StickyStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency: Option<crate::IdempotencyConfig>,
     pub steps: Vec<WorkflowStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_failure: Option<String>,
@@ -70,6 +72,12 @@ pub struct WorkflowStep {
 }
 
 impl<I, O> WorkflowDeclaration<I, O> {
+    #[must_use]
+    pub fn idempotency(mut self, config: crate::IdempotencyConfig) -> Self {
+        self.idempotency = Some(config);
+        self
+    }
+
     fn push_step(
         &mut self,
         task_name: String,
@@ -99,6 +107,7 @@ impl<I, O> WorkflowDeclaration<I, O> {
             default_priority: None,
             task_defaults: TaskConfig::default(),
             sticky: None,
+            idempotency: None,
             steps: Vec::new(),
             on_failure: None,
             on_failure_is_durable: false,

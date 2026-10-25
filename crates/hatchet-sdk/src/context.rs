@@ -403,6 +403,7 @@ impl<T: Transport> InMemoryContext<T> {
     }
 
     pub(crate) fn child_run_opts(&self, mut opts: RunOpts) -> RunOpts {
+        crate::telemetry::inject_current(&mut opts.additional_metadata);
         let child_index = self.child_index.fetch_add(1, Ordering::Relaxed);
         opts.parent_workflow_run_id = Some(self.ids.workflow_run_id.0.clone());
         opts.parent_task_run_id = Some(self.ids.task_run_id.clone());
@@ -411,6 +412,7 @@ impl<T: Transport> InMemoryContext<T> {
     }
 
     pub(crate) fn bulk_child_run_opts(&self, mut opts: RunOpts, child_count: usize) -> RunOpts {
+        crate::telemetry::inject_current(&mut opts.additional_metadata);
         let first_child_index = self
             .child_index
             .fetch_add(child_count as u64, Ordering::Relaxed);
@@ -510,7 +512,7 @@ impl<T: Transport> Context for InMemoryContext<T> {
     ) -> Result<WorkflowRunId> {
         let run_id = self
             .transport
-            .run_workflow(workflow_name, input, self.child_run_opts(opts))
+            .run_workflow_traced(workflow_name, input, self.child_run_opts(opts))
             .await?;
         self.transport.register_result_channel(&run_id).await?;
         Ok(run_id)
@@ -534,7 +536,7 @@ impl<T: Transport> Context for InMemoryContext<T> {
         let child_count = inputs.len();
         let run_ids = self
             .transport
-            .run_workflows(
+            .run_workflows_traced(
                 workflow_name,
                 inputs,
                 self.bulk_child_run_opts(opts, child_count),

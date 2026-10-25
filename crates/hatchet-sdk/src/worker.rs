@@ -200,6 +200,7 @@ pub struct WorkerBuilder<T: Transport> {
     name: String,
     slots: usize,
     durable_slots: usize,
+    middleware: Arc<[Arc<dyn crate::TaskMiddleware>]>,
     cancellation_grace_period: Duration,
     health_port: Option<u16>,
     labels: BTreeMap<String, String>,
@@ -360,6 +361,7 @@ impl<T: Transport + 'static> WorkerBuilder<T> {
             name,
             slots: 100,
             durable_slots: 1000,
+            middleware: Arc::from([]),
             cancellation_grace_period: DEFAULT_CANCELLATION_GRACE_PERIOD,
             health_port: None,
             labels: BTreeMap::new(),
@@ -368,6 +370,15 @@ impl<T: Transport + 'static> WorkerBuilder<T> {
             non_durable_registry: BTreeMap::new(),
             durable_registry: BTreeMap::new(),
         }
+    }
+
+    /// Adds an outer-to-inner wrapper around both normal and durable task handlers.
+    #[must_use]
+    pub fn middleware(mut self, layer: impl crate::TaskMiddleware + 'static) -> Self {
+        let mut layers = self.middleware.to_vec();
+        layers.push(Arc::new(layer));
+        self.middleware = layers.into();
+        self
     }
 
     #[must_use]
@@ -462,6 +473,7 @@ impl<T: Transport + 'static> WorkerBuilder<T> {
             name: self.name,
             slots: self.slots,
             durable_slots: self.durable_slots,
+            middleware: self.middleware,
             cancellation_grace_period: self.cancellation_grace_period,
             health_port: self.health_port,
             labels: self.labels,
@@ -477,6 +489,7 @@ pub struct Worker<T: Transport> {
     name: String,
     slots: usize,
     durable_slots: usize,
+    middleware: Arc<[Arc<dyn crate::TaskMiddleware>]>,
     cancellation_grace_period: Duration,
     health_port: Option<u16>,
     labels: BTreeMap<String, String>,
@@ -542,6 +555,7 @@ impl<T: Transport + 'static> Worker<T> {
             durable_semaphore: Arc::new(Semaphore::new(self.durable_slots)),
             cancellation_grace_period: self.cancellation_grace_period,
             shutdown_token: cancel_token.clone(),
+            middleware: self.middleware,
         });
 
         let health_state = self.health_port.map(|_| {
@@ -996,6 +1010,7 @@ struct WorkerRuntime<T: Transport> {
     durable_semaphore: Arc<Semaphore>,
     cancellation_grace_period: Duration,
     shutdown_token: CancellationToken,
+    middleware: Arc<[Arc<dyn crate::TaskMiddleware>]>,
 }
 
 impl<T: Transport + 'static> WorkerRuntime<T> {
@@ -1147,6 +1162,14 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                         )))
                     } else {
                         let _task_permit = acquire_task_permit(handler.concurrency_limit()).await;
+                        let invocation = crate::TaskInvocation::new(
+                            task_name.clone(),
+                            ids.clone(),
+                            input,
+                            run_opts.additional_metadata.clone(),
+                            retry_count,
+                            false,
+                        );
                         let mut ctx = InMemoryContext::new(ids, Arc::clone(&self.transport))
                             .with_run_opts(&run_opts)
                             .with_retry_count(retry_count)
@@ -1161,7 +1184,13 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                         if let Some(worker_id) = worker_id {
                             ctx = ctx.with_worker_id(worker_id);
                         }
-                        handler.call(input, ctx).await
+                        crate::telemetry::task(
+                            invocation,
+                            crate::Next::new(Arc::clone(&self.middleware), move |invocation| {
+                                handler.call(invocation.into_input(), ctx)
+                            }),
+                        )
+                        .await
                     }
                 }
             }
@@ -1298,6 +1327,14 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                         )))
                     } else {
                         let _task_permit = acquire_task_permit(handler.concurrency_limit()).await;
+                        let invocation = crate::TaskInvocation::new(
+                            task_name.clone(),
+                            ids.clone(),
+                            input,
+                            run_opts.additional_metadata.clone(),
+                            retry_count,
+                            true,
+                        );
                         let mut ctx = InMemoryDurableContext::new(
                             ids,
                             Arc::clone(&self.transport),
@@ -1319,7 +1356,13 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                         if let Some(listener) = self.transport.durable_listener() {
                             ctx = ctx.with_durable_listener(listener);
                         }
-                        handler.call(input, ctx).await
+                        crate::telemetry::task(
+                            invocation,
+                            crate::Next::new(Arc::clone(&self.middleware), move |invocation| {
+                                handler.call(invocation.into_input(), ctx)
+                            }),
+                        )
+                        .await
                     }
                 }
             }

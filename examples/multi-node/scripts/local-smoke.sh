@@ -10,7 +10,7 @@ HATCHET="$RUN_KEY-hatchet"
 VOLUME="$RUN_KEY-config"
 ORDERS_PID=""
 NOTIFICATIONS_PID=""
-HATCHET_IMAGE="ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.94.14@sha256:b8d6b7e9b96d354f1a252590d1480d3bb70f01604cc6cba1fd97ff7aaa2cb07c"
+HATCHET_IMAGE="${SMOKE_HATCHET_IMAGE:-ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.94.14@sha256:b8d6b7e9b96d354f1a252590d1480d3bb70f01604cc6cba1fd97ff7aaa2cb07c}"
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 CURRENT_STAGE=initialization
 CLEANED_UP=0
@@ -163,12 +163,16 @@ if [[ "${SMOKE_RUN_SDK_INTEGRATION:-1}" != "0" ]]; then
   SDK_INTEGRATION_RAN=true
   (
     cd "$ROOT"
+    SDK_TEST_TARGETS=(--test integration)
+    if [[ "${SMOKE_RUN_MODERN_TESTS:-0}" == "1" ]]; then SDK_TEST_TARGETS+=(--test modern_engine); fi
+    if [[ "${SMOKE_RUN_RECOVERY_TESTS:-0}" == "1" ]]; then SDK_TEST_TARGETS+=(--test recovery_engine); fi
+    export HATCHET_TEST_ENGINE_CONTAINER="$HATCHET"
     cargo test --locked -p another-hatchet-sdk --features integration \
-      --test integration -- --ignored --nocapture --test-threads=1
+      "${SDK_TEST_TARGETS[@]}" -- --ignored --nocapture --test-threads=1
   ) 2>&1 | tee "$EXAMPLE/target/smoke/sdk-integration.log"
   SDK_INTEGRATION_TESTS=$(sed -nE \
     's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' \
-    "$EXAMPLE/target/smoke/sdk-integration.log" | tail -n 1)
+    "$EXAMPLE/target/smoke/sdk-integration.log" | awk '{sum += $1} END {print sum}')
   [[ "$SDK_INTEGRATION_TESTS" =~ ^[0-9]+$ && "$SDK_INTEGRATION_TESTS" -gt 0 ]]
 fi
 

@@ -891,6 +891,11 @@ impl<T: Transport> RateLimitsClient<T> {
         Ok(returned_key)
     }
 
+    /// Holds queued work behind this rendered key. An earlier request does not shorten an active pause.
+    pub async fn pause(&self, key: &str, until: SystemTime) -> Result<crate::RateLimitPauseResult> {
+        self._transport.pause_rate_limit(key, until).await
+    }
+
     pub async fn put(&self, key: impl Into<String>, limit: u32) -> Result<String> {
         self.upsert(key, limit, RateLimitDuration::Second).await
     }

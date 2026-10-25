@@ -14,6 +14,10 @@ pub enum EngineFeature {
     RetryAfter,
     /// SDK support floor verified against v0.111.0; not a claim about the first release.
     WorkflowPause,
+    /// Conservative SDK support floor verified against official release contracts.
+    Idempotency,
+    /// Requires the newer PauseRateLimit RPC, present in v0.114.0.
+    RateLimitPause,
 }
 
 impl EngineFeature {
@@ -23,7 +27,8 @@ impl EngineFeature {
             Self::SlotConfig => "0.78.23",
             Self::DurableEviction => "0.80.0",
             Self::Observability => "0.82.0",
-            Self::RetryAfter | Self::WorkflowPause => "0.111.0",
+            Self::RetryAfter | Self::WorkflowPause | Self::Idempotency => "0.111.0",
+            Self::RateLimitPause => "0.114.0",
         }
     }
 }
