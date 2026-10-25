@@ -37,3 +37,29 @@ assertions, smoke wiring and diagnostic interpretation, independently ran all
 **13** management contracts, and cleared the changes. Strict Clippy passes. The
 new ignored integration regression is wired into the existing disposable recovery
 suite on both CI engine targets. Remote CI still awaits a push.
+
+## Worker process crash and replacement
+
+A new ignored disposable-engine test launches actual subprocesses of the exact
+SDK test executable. The original worker starts one normal and one durable task,
+and records acknowledgement only after its durable memo RPC returns. The parent
+sends **SIGKILL**, checks signal 9 on Unix and reaps the child, then starts a
+replacement worker process. No synthetic transport or graceful shutdown substitutes
+for the crash. Both tasks complete on **retry 1**, retain their original task IDs,
+and report the replacement PID; the durable memo still contains the killed PID.
+
+The scenario passes on **v0.94.14** and **v0.114.0**, each in approximately 11
+seconds, with complete smoke cleanup. It exercises recovery through explicitly
+configured **10-second execution timeout/retries=1**. Immediate death detection,
+automatic recovery without a retry policy, and exactly-once external side effects
+are not claimed. The replacement worker shuts down cleanly and is awaited;
+kill-on-drop protects both owned children on test failure. Private child stdout
+logs keep helper test reports out of the smoke execution count.
+
+Independent review checked subprocess ownership, crash/commit ordering, memo/task
+identity, retry scope, isolation and CI wiring. The reviewer independently ran
+the ordinary no-op helper and strict Clippy; no actionable findings remained.
+The parent's Rust **1.85.1** check also passes. The actual crash parent is included
+in the existing baseline/current disposable recovery targets; no external runtime
+is needed. V1 remains partial for remote CI and its other explicit limits.
+Evidence: `target/parity-batch5-20261025/crash/`.

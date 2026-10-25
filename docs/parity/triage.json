@@ -795,10 +795,10 @@
     "review_policy": "Independent read-only review and local commit after each work/review cycle.",
     "completed": [
       "Exact workflow name lookup pagination; management read/mutation safety",
-      "S1 eventual restart recovery regression and bounded official submission comparison"
+      "S1 eventual restart recovery regression and bounded official submission comparison",
+      "Actual worker-process crash/replacement with normal/durable retry recovery and persistent memo"
     ],
     "remaining_focus": [
-      "Worker process crash recovery",
       "TLS connection verification"
     ],
     "status": "in_progress"

@@ -1132,11 +1132,19 @@
               "v0.94.14",
               "v0.114.0"
             ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/worker_crash_engine.rs",
+            "name": "killed_worker_reassigns_inflight_normal_and_durable_tasks_and_replays_memo",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
           }
         ]
       },
       "engine": "Baseline v0.94.14",
-      "notes": "Local baseline/latest engine proofs pass and CI definitions are supplied. Remote CI has not run; TS/Go suites, worker-process crash recovery and every scheduling semantic are not exhaustively compared."
+      "notes": "Local baseline/latest engine, checkpoint restart and actual worker-process SIGKILL/replacement proofs pass; configured timeout/retry recovery preserves normal/durable taskIDs and durable memo. CI definitions supplied but remote execution awaits push. Official suites, immediate crash detection, exactly-once external effects, production load and exhaustive scheduling remain unclaimed."
     },
     {
       "id": "N2",
