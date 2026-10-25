@@ -463,20 +463,40 @@ impl RestApiClient {
 
     async fn workflow_row(&self, name: &str) -> Result<Value> {
         let name = crate::config::apply_workflow_namespace(name, self.namespace.as_deref());
-        let response: Value = self
-            .get_json(&self.tenant_url(&format!(
-                "/workflows?name={}&limit=1",
-                urlencoding_simple(&name)
-            )))
-            .await?;
-        response["rows"]
-            .as_array()
-            .and_then(|rows| {
-                rows.iter()
-                    .find(|row| row["name"].as_str() == Some(name.as_str()))
-            })
-            .cloned()
-            .ok_or_else(|| crate::Error::Worker(format!("workflow not found: {name}")))
+        // The engine's name filter is a substring search, so a single result
+        // can be a longer name. Never mutate that row or mistake it for absence.
+        const PAGE_SIZE: usize = 100;
+        let mut offset = 0usize;
+        let mut previous = None;
+        loop {
+            let response: Value = self
+                .get_json(&self.tenant_url(&format!(
+                    "/workflows?name={}&limit={PAGE_SIZE}&offset={offset}",
+                    urlencoding_simple(&name)
+                )))
+                .await?;
+            let rows = response["rows"]
+                .as_array()
+                .ok_or_else(|| crate::Error::Transport("workflow list omitted rows".into()))?;
+            if let Some(row) = rows
+                .iter()
+                .find(|row| row["name"].as_str() == Some(name.as_str()))
+            {
+                return Ok(row.clone());
+            }
+            if rows.len() < PAGE_SIZE {
+                return Err(crate::Error::Worker(format!("workflow not found: {name}")));
+            }
+            if previous.as_ref() == Some(rows) {
+                return Err(crate::Error::Transport(
+                    "workflow list repeated a page while resolving an exact name".into(),
+                ));
+            }
+            offset = offset.checked_add(rows.len()).ok_or_else(|| {
+                crate::Error::Transport("workflow pagination offset overflow".into())
+            })?;
+            previous = Some(rows.clone());
+        }
     }
 
     pub async fn branch_durable_task(

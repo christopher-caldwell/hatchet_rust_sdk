@@ -472,10 +472,11 @@
       "acceptance": "Implement the stated operational contract and supply matching local/protocol/live evidence.",
       "validation": [
         "normal_and_bulk_dispatch_preserve_explicit_sticky_worker_routing",
-        "explicit_sticky_worker_routing_reaches_the_selected_worker_for_single_and_bulk_runs"
+        "explicit_sticky_worker_routing_reaches_the_selected_worker_for_single_and_bulk_runs",
+        "hard_sticky_routing_recovers_for_reconnected_and_new_workers"
       ],
       "remaining_limitations": [
-        "Fresh-engine explicit routing is verified. Hard sticky scheduling immediately after engine restart stalled twice despite a matching active worker target, current heartbeat/listener and configured slots; no server schema/state or SDK HARD-routing semantics were altered to bypass it. Root cause remains unconfirmed; equivalent official-client reproduction and recovery support are follow-up work."
+        "Eventual restart recovery verified for current worker IDs on baseline/current in~61\u201363 seconds; old45-second failures reflect an insufficient deadline in those scenarios. TS submissions to the same Rust workers recovered similarly; full official-worker isolation and exact internal cause remain unproven. No low-latency restart SLA or stale-worker-ID remapping is claimed."
       ]
     },
     {
@@ -789,5 +790,17 @@
     "python_support_claim_tests": 6,
     "security_advisories": 0,
     "github_actions": "Definitions supplied and suites pass locally; remote execution awaits push."
+  },
+  "batch_5_progress": {
+    "review_policy": "Independent read-only review and local commit after each work/review cycle.",
+    "completed": [
+      "Exact workflow name lookup pagination; management read/mutation safety",
+      "S1 eventual restart recovery regression and bounded official submission comparison"
+    ],
+    "remaining_focus": [
+      "Worker process crash recovery",
+      "TLS connection verification"
+    ],
+    "status": "in_progress"
   }
 }

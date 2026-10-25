@@ -569,3 +569,58 @@ async fn unknown_and_older_engine_versions_cannot_silently_start_a_worker() {
         assert!(h.requests.lock().await.is_empty());
     }
 }
+
+#[tokio::test]
+async fn exact_workflow_lookup_paginates_past_substring_matches_before_mutating() {
+    let distractors:Vec<_>=(0..100).map(|i|json!({"metadata":{"id":format!("prefix-{i}")},"name":format!("orders & returns-more-{i}")})).collect();
+    let h = fixture(vec![
+        reply(json!({"rows":distractors})),
+        reply(workflow()),
+        reply(json!({})),
+    ])
+    .await;
+    h.client
+        .workflows()
+        .delete("orders & returns")
+        .await
+        .unwrap();
+    let requests = h.requests.lock().await;
+    assert_eq!(requests.len(), 3);
+    assert!(parts(&requests[0]).0.contains("limit=100&offset=0"));
+    assert!(parts(&requests[1]).0.contains("limit=100&offset=100"));
+    assert!(
+        parts(&requests[2])
+            .0
+            .starts_with(&format!("DELETE /api/v1/workflows/{ID} "))
+    );
+}
+#[tokio::test]
+async fn exact_workflow_lookup_never_mutates_a_prefix_match_and_stops_repeated_pages() {
+    let h = fixture(vec![reply(
+        json!({"rows":[{"metadata":{"id":OTHER},"name":"orders & returns-more"}]}),
+    )])
+    .await;
+    assert!(
+        h.client
+            .workflows()
+            .delete("orders & returns")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("workflow not found")
+    );
+    assert_eq!(h.requests.lock().await.len(), 1);
+    let distractors:Vec<_>=(0..100).map(|i|json!({"metadata":{"id":format!("prefix-{i}")},"name":format!("orders & returns-more-{i}")})).collect();
+    let page = reply(json!({"rows":distractors}));
+    let h = fixture(vec![page.clone(), page]).await;
+    assert!(
+        h.client
+            .workflows()
+            .delete("orders & returns")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("repeated a page")
+    );
+    assert_eq!(h.requests.lock().await.len(), 2);
+}

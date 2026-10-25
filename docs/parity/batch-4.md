@@ -81,6 +81,9 @@ including strict Clippy/rustdoc and Rust 1.85.1; six matrix guard tests also pas
 
 ## Newly observed routing/restart limitation (S1)
 
+Follow-up: [batch-5.md](batch-5.md) now proves eventual recovery after a longer
+observed restart window. The original failures below remain historical evidence.
+
 Two full-suite attempts placed the new topic restart proof before ordinary hard
 sticky routing. Topic reader/cursor recovery passed both times. The routing test
 then left a task queued until its 45-second deadline. Read-only database

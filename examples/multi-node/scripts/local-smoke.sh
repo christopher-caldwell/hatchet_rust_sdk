@@ -170,7 +170,7 @@ if [[ "${SMOKE_RUN_SDK_INTEGRATION:-1}" != "0" ]]; then
     cd "$ROOT"
     SDK_TEST_TARGETS=(--test integration)
     if [[ "${SMOKE_RUN_MODERN_TESTS:-0}" == "1" ]]; then SDK_TEST_TARGETS+=(--test modern_engine); fi
-    if [[ "${SMOKE_RUN_RECOVERY_TESTS:-0}" == "1" ]]; then SDK_TEST_TARGETS+=(--test recovery_engine); fi
+    if [[ "${SMOKE_RUN_RECOVERY_TESTS:-0}" == "1" ]]; then SDK_TEST_TARGETS+=(--test recovery_engine --test sticky_recovery_engine); fi
     export HATCHET_TEST_ENGINE_CONTAINER="$HATCHET"
     cargo test --locked -p another-hatchet-sdk --features integration \
       "${SDK_TEST_TARGETS[@]}" -- --ignored --nocapture --test-threads=1

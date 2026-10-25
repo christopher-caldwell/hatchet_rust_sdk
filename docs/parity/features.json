@@ -1085,11 +1085,19 @@
             "engines": [
               "v0.114.0"
             ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/sticky_recovery_engine.rs",
+            "name": "hard_sticky_routing_recovers_for_reconnected_and_new_workers",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
           }
         ]
       },
       "engine": "Baseline v0.94.14",
-      "notes": "Explicit worker routing passes single/bulk normal and durable wire/live contracts on a fresh engine. Two early-restart live runs left a HARD-routed task queued despite matching active target ID, heartbeat/listener and configured slot capacity. Recovery guarantee unresolved; restart proofs run as a separate late phase. Evidence is consistent with scheduling/restart interaction, not conclusive attribution to the engine. See batch-4.md."
+      "notes": "Single/bulk HARD routing and eventual restart recovery verified for reconnecting/new workers and a workflow/action first created after restart on baseline/current engines. Observed recovery was ~61\u201363 seconds; original45-second failures are retained. TS1.43.0 submissions to the same Rust workers recovered in the same window. Fast recovery, worker-versus-engine attribution and latency SLA remain unproven. See batch-5.md."
     },
     {
       "id": "V1",
