@@ -476,7 +476,7 @@
         "hard_sticky_routing_recovers_for_reconnected_and_new_workers"
       ],
       "remaining_limitations": [
-        "Eventual restart recovery verified for current worker IDs on baseline/current in~61\u201363 seconds; old45-second failures reflect an insufficient deadline in those scenarios. TS submissions to the same Rust workers recovered similarly; full official-worker isolation and exact internal cause remain unproven. No low-latency restart SLA or stale-worker-ID remapping is claimed."
+        "Eventual restart recovery verified for current worker IDs on baseline/current in~61\u201363 seconds. The original45-second deadline was shorter than this newly observed recovery window; those original runs were not observed past45seconds. TS submissions to the same Rust workers recovered similarly; full official-worker isolation and exact internal cause remain unproven. No low-latency restart SLA or stale-worker-ID remapping is claimed."
       ]
     },
     {
@@ -695,37 +695,51 @@
     "security_advisories": 0
   },
   "validation_summary": {
-    "verified_at_utc": "2026-10-25T18:17:17.986161+00:00",
-    "workspace_tests": 185,
-    "no_default_tests": 182,
+    "verified_at_utc": "2026-10-25T19:55:27.531292+00:00",
+    "workspace_tests": 191,
+    "no_default_tests": 186,
     "standalone_tests": 7,
-    "live_engine": "v0.114.0",
-    "live_tests": 32,
-    "code_review": "All six gap reviews cleared: N2/N3/N5/N4/O2/O4. Reviewer findings were fixed and independently retested.",
-    "quality_gates": "Workspace/standalone format, strict Clippy, strict rustdoc, doctests and Rust 1.85.1 passed. Exact packaged SDK tests/docs and README consumer passed; sibling registry dry runs passed. SDK registry dry run is deferred until sibling publication.",
-    "live_support_floor": {
-      "v0.111.0": 1
-    },
-    "baseline_live_tests": 20,
-    "security_advisories": 0,
-    "new_limit": "S1 partial: hard sticky scheduling immediately after engine restart remains unresolved; normal routing and isolated restart contracts pass.",
-    "native_sidecar": {
-      "version": "v0.110.5",
-      "platform": "darwin_arm64",
-      "post_fix_live_executions": 4,
-      "cold_and_offline_warm": true
-    },
     "python_support_claim_tests": 9,
+    "live_profiles": {
+      "plain_current": {
+        "engine": "hatchet-sdk-review:v0.114.0",
+        "tests": 34,
+        "run_id": "34634c81-34bc-489e-a3da-4463d2225ac9",
+        "cleanup": "complete"
+      },
+      "plain_baseline": {
+        "engine": "hatchet-sdk-review:v0.94.14",
+        "tests": 22,
+        "run_id": "fe2cf740-b419-4ca7-8f94-a79139ceccf0",
+        "cleanup": "complete"
+      },
+      "tls_current": {
+        "engine": "hatchet-sdk-review:v0.114.0",
+        "tests": 20,
+        "run_id": "f8702524-9dee-4f02-901a-ca3324f9116d",
+        "cleanup": "complete"
+      },
+      "tls_baseline": {
+        "engine": "hatchet-sdk-review:v0.94.14",
+        "tests": 20,
+        "run_id": "b025c236-5eb6-46dd-b14e-1b121b08b985",
+        "cleanup": "complete"
+      }
+    },
+    "live_test_executions": 96,
     "matrix": {
       "rows": 39,
-      "supported": 30,
-      "partial": 9,
+      "supported": 31,
+      "partial": 8,
       "missing": 0
     },
-    "security_warnings": 0,
-    "release_preflight": "Original quality stages passed. Stale protobuf count guard fixed from7 to8 and independently reviewed; unchanged exact packaging/archive/consumer/dry-run functions resumed and passed.",
-    "github_actions": "Definitions supplied and suites pass locally; remote execution awaits push.",
-    "upstream": "Official SDK versions, main source and embedded source/release/assets rechecked current."
+    "code_review": "All four review checkpoints cleared, including TLS IPv6 CI wire coverage, Bash3 optional-array follow-up and authoritative cancellation plus eventual REST assertion.",
+    "quality_gates": "Workspace/standalone format, strict Clippy, strict rustdoc, doctests and Rust1.85.1 checks pass. Packaged SDK tests/docs/README consumer and sibling registry dry runs pass. SDK registry dry run deferred until unpublished siblings exist.",
+    "security": "Dependency locks unchanged; prior recorded RustSec audits remain zero vulnerabilities/warnings.",
+    "upstream": "Official source/package/artifact check current; snapshot check time refreshed without changing version support.",
+    "github_actions": "Supplied, not remotely executed.",
+    "publication": "No push or publication performed.",
+    "remaining": "Eight partial rows retained: S1 latency attribution, collector integration, broader scheduling/retry/cron/labels/Prometheus evidence and remoteCI. HTTPS REST, mTLS fleet/platform rotation and production capacity not claimed."
   },
   "batch_4_progress": {
     "completed": [
@@ -797,9 +811,57 @@
       "Exact workflow name lookup pagination; management read/mutation safety",
       "S1 eventual restart recovery regression and bounded official submission comparison",
       "Actual worker-process crash/replacement with normal/durable retry recovery and persistent memo",
-      "Native engine gRPC TLS trust/name verification; fixed IPv6 default name and incomplete client identity; reviewed permanent IPv6 wire regression"
+      "Native engine gRPC TLS trust/name verification; fixed IPv6 default name and incomplete client identity; reviewed permanent IPv6 wire regression",
+      "Reviewed Bash3 empty optional-TLS args fix and strict eventual REST cancellation assertion"
     ],
     "remaining_focus": [],
-    "status": "final_validation"
+    "status": "complete_with_explicit_evidence_limits"
+  },
+  "batch_5_validation_summary": {
+    "verified_at_utc": "2026-10-25T19:55:27.531292+00:00",
+    "workspace_tests": 191,
+    "no_default_tests": 186,
+    "standalone_tests": 7,
+    "python_support_claim_tests": 9,
+    "live_profiles": {
+      "plain_current": {
+        "engine": "hatchet-sdk-review:v0.114.0",
+        "tests": 34,
+        "run_id": "34634c81-34bc-489e-a3da-4463d2225ac9",
+        "cleanup": "complete"
+      },
+      "plain_baseline": {
+        "engine": "hatchet-sdk-review:v0.94.14",
+        "tests": 22,
+        "run_id": "fe2cf740-b419-4ca7-8f94-a79139ceccf0",
+        "cleanup": "complete"
+      },
+      "tls_current": {
+        "engine": "hatchet-sdk-review:v0.114.0",
+        "tests": 20,
+        "run_id": "f8702524-9dee-4f02-901a-ca3324f9116d",
+        "cleanup": "complete"
+      },
+      "tls_baseline": {
+        "engine": "hatchet-sdk-review:v0.94.14",
+        "tests": 20,
+        "run_id": "b025c236-5eb6-46dd-b14e-1b121b08b985",
+        "cleanup": "complete"
+      }
+    },
+    "live_test_executions": 96,
+    "matrix": {
+      "rows": 39,
+      "supported": 31,
+      "partial": 8,
+      "missing": 0
+    },
+    "code_review": "All four review checkpoints cleared, including TLS IPv6 CI wire coverage, Bash3 optional-array follow-up and authoritative cancellation plus eventual REST assertion.",
+    "quality_gates": "Workspace/standalone format, strict Clippy, strict rustdoc, doctests and Rust1.85.1 checks pass. Packaged SDK tests/docs/README consumer and sibling registry dry runs pass. SDK registry dry run deferred until unpublished siblings exist.",
+    "security": "Dependency locks unchanged; prior recorded RustSec audits remain zero vulnerabilities/warnings.",
+    "upstream": "Official source/package/artifact check current; snapshot check time refreshed without changing version support.",
+    "github_actions": "Supplied, not remotely executed.",
+    "publication": "No push or publication performed.",
+    "remaining": "Eight partial rows retained: S1 latency attribution, collector integration, broader scheduling/retry/cron/labels/Prometheus evidence and remoteCI. HTTPS REST, mTLS fleet/platform rotation and production capacity not claimed."
   }
 }

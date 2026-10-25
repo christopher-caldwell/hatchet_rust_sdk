@@ -111,7 +111,7 @@ docker run -d --name "$HATCHET" --network "$NETWORK" \
   -e SERVER_AUTH_COOKIE_INSECURE=true -e SERVER_AUTH_SET_EMAIL_VERIFIED=true \
   -e SERVER_ALLOW_SIGNUP=false -e SERVER_ALLOW_INVITES=false \
   -e LITE_RUNTIME_PORT=8888 -e SERVER_HEALTHCHECK_PORT=8733 \
-  "${TLS_ARGS[@]}" "$HATCHET_IMAGE" >/dev/null
+  ${TLS_ARGS[@]+"${TLS_ARGS[@]}"} "$HATCHET_IMAGE" >/dev/null
 
 CURRENT_STAGE=hatchet_readiness
 for _ in $(seq 1 120); do

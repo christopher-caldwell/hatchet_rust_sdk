@@ -671,16 +671,29 @@ async fn server_batch_handler_cancel_then_return_keeps_every_member_cancelled() 
         .unwrap()
         .unwrap();
     for run in runs {
+        let error = tokio::time::timeout(Duration::from_secs(15), run.output())
+            .await
+            .unwrap()
+            .expect_err("cancelled member must never complete successfully");
         assert!(
-            tokio::time::timeout(Duration::from_secs(15), run.output())
-                .await
-                .unwrap()
-                .is_err()
+            matches!(error, Error::Transport(ref message) if message == "workflow run was cancelled"),
+            "expected authoritative cancellation, got {error:?}"
         );
-        assert_eq!(
-            client.runs().get_status(run.run_id()).await.unwrap(),
-            RunStatus::Cancelled
-        );
+        // GetRunDetails completion is authoritative; the REST OLAP projection
+        // can still report Running briefly after the cancellation is observed.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match client.runs().get_status(run.run_id()).await.unwrap() {
+                    RunStatus::Cancelled => break,
+                    RunStatus::Queued | RunStatus::Running => {
+                        tokio::time::sleep(Duration::from_millis(50)).await
+                    }
+                    other => panic!("self-cancelled member reached wrong REST status: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("REST projection must converge to Cancelled");
     }
     worker.shutdown().await.unwrap();
     client.workflows().delete(name).await.unwrap();

@@ -99,3 +99,72 @@ profiles; remote CI remains unexecuted. C13 now records the exercised gRPC TLS
 contract as supported, with explicit limits for HTTPS REST, OS/platform fleets,
 trust-store installation, full mTLS lifecycle and rotation. Those operations were
 not exercised by this fixture. Evidence: `target/parity-batch5-20261025/tls/`.
+
+## Final combined-validation corrections
+
+The first plaintext run caught a macOS Bash 3.2 `set -u` incompatibility: expanding
+an empty TLS argument array aborted the default non-TLS fixture. The Docker call
+now uses a conditional array expansion that emits zero arguments for an empty
+array and retains quoted word boundaries otherwise. The TLS reviewer independently
+verified macOS Bash 3.2 cases for empty/unset arrays, spaces, empty string elements
+and literal glob characters. This is a runner correction, not a TLS-verification
+change.
+
+A subsequent full run exposed a pre-existing batch self-cancellation test race:
+the gRPC terminal read returned cancellation while the independent REST OLAP
+projection still reported Running. The test previously accepted any output error
+and immediately asserted REST Cancelled. It now requires the exact authoritative
+cancellation error and waits up to 15 seconds for REST to converge, failing on a
+successful output, any other terminal status or deadline. An independent reviewer
+checked the separate read paths, confirmed this strengthens the outcome assertion
+and independently ran strict Clippy. Product cancellation behavior is unchanged.
+Original failed-run evidence is retained under the final local evidence directory.
+
+## Stopping point and next priorities
+
+This pass fixed three SDK defects (exact workflow lookup, incomplete TLS identity,
+and default IPv6 TLS names), added actual crash/TLS/restart evidence and corrected
+the runner/projection test issues exposed by combined verification. All independent
+review findings are closed. The remaining local work has lower immediate return
+than these correctness/recovery checks:
+
+1. Isolate prompt sticky restart behavior using fully official workers and engine
+   instrumentation; eventual delivery is proven, the delay's origin/SLA is not.
+2. Design and exercise automatic Hatchet collector/exporter setup against a real
+   collector, including authentication, trace parenting, attribute propagation and
+   provider ownership. Existing application-owned OpenTelemetry remains supported.
+3. Broaden scheduling, retry/backoff, cron/time-zone, label/slot and Prometheus
+   federation fixtures; exhaustive interleavings and production capacity are not
+   asserted by more local unit tests.
+4. Push and run the supplied remote CI/platform profiles, then handle publication
+   in dependency order. No push or publication is performed by this pass.
+
+The matrix retains eight partial rows instead of treating additional test volume
+as exhaustive parity. Further collector/platform/load integration deserves its
+own focused work rather than extending this local verification loop indefinitely.
+
+## Final verification
+
+Final workspace tests pass **191**, SDK tests without default features pass
+**186**, standalone tests pass **7**, and Python support-claim guards pass **9**.
+Format, strict Clippy/rustdoc, doctests and Rust **1.85.1** workspace/standalone
+checks pass; the final cancellation-test change also passes its targeted strict
+Clippy and MSRV check. Exact packaged SDK tests/docs, its README consumer and
+core/macros registry dry runs pass. SDK registry dry run remains deferred until
+those unpublished sibling versions exist. Dependency locks are unchanged, so
+the prior recorded RustSec zero-vulnerability/warning audits still describe the
+same locked dependencies. No crate was published.
+
+The final ordinary/recovery suites pass **34** current-engine and **22** baseline
+checks. Separate native TLS profiles pass **20** per engine. These total **96 live
+test executions across four profiles**, with overlap between profiles, plus each
+profile's two-worker example and complete cleanup. There are no new ignored tests
+counted as live executions. The earlier N4 native sidecar proof is retained as
+historical evidence and was not rerun in this pass.
+
+The 39-row support matrix is **31 supported / 8 partial / 0 missing**. Official
+package/source/artifact versions were queried again and are current; the snapshot
+check timestamp was refreshed without changing reviewed versions. All independent
+review findings are closed. Full logs, reports and packaged-consumer evidence are
+under `target/parity-batch5-20261025/final/`; profile reports are retained beside
+their corresponding crash/TLS/routing evidence.
