@@ -6,7 +6,7 @@
     "official_go_revision": "aef20b00755da5b1e7e69197e7189848309afb20",
     "official_ts_release": "1.43.0"
   },
-  "scope": "Batches 1\u20133 and batch 4 N2/N3/N5 are implemented with explicit support/evidence limits in feature-support.md. S1 is partial after observing a restart/routing interaction. Remaining batch 4 gaps continue in order with a separate code review after each.",
+  "scope": "Batches 1\u20133 and batch 4 N2/N3/N5/N4 are implemented with explicit support/evidence limits in feature-support.md. S1 remains partial after a restart/routing interaction. O2 and O4 continue with independent review after each.",
   "batch_rationale": {
     "1": "Correct existing public contracts that can replay the wrong work or truncate data; all are supported by the pinned engine.",
     "2": "Complete operational controls and run discovery; negotiate engine capabilities before enabling newer controls.",
@@ -592,8 +592,8 @@
       "area": "Embedded real-engine mode",
       "batch": 4,
       "order": 4,
-      "status": "pending",
-      "acceptance": "Rust has InMemoryTransport and Docker smoke scripts, but no supported API for booting an embedded real engine with persistence.",
+      "status": "complete",
+      "acceptance": "Explicit real official-sidecar engine/client lifecycle with bundled persistent Postgres, verified content-addressed binary cache, private handshake and owned cleanup. Real cold/post-fix/offline-warm native proofs; API-less raw mode works, full Rust client needs REST. See embedded.md.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/embedded.ts",
@@ -604,7 +604,14 @@
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/embedded.go"
         }
       ],
-      "priority": "P3"
+      "priority": "P3",
+      "original_gap": "Rust has InMemoryTransport and Docker smoke scripts, but no supported API for booting an embedded real engine with persistence.",
+      "validation": [
+        "embedded_handshake_wires_config_redacts_secrets_and_stop_reaps_idempotently",
+        "differing_same_tag_digest_policies_never_replace_a_returned_pinned_executable",
+        "embedded_real_engine_runs_workflows_and_preserves_history_across_postgres_restart",
+        "embedded_real_api_less_mode_exposes_authenticated_grpc_and_cleans_up"
+      ]
     },
     {
       "id": "O2",
@@ -691,10 +698,10 @@
     "completed": [
       "N2",
       "N3",
-      "N5"
+      "N5",
+      "N4"
     ],
     "remaining": [
-      "N4",
       "O2",
       "O4"
     ],
@@ -702,19 +709,26 @@
     "new_recovery_limit": "S1 partial: hard sticky task remained queued immediately after early engine restart in two runs; desired worker/action and active listener/heartbeat/configured capacity matched, root cause unconfirmed."
   },
   "batch_4_validation_summary": {
-    "verified_at_utc": "2026-10-25T16:39:41.998892+00:00",
-    "workspace_tests": 163,
-    "no_default_tests": 160,
+    "verified_at_utc": "2026-10-25T17:28:08.140561+00:00",
+    "workspace_tests": 174,
+    "no_default_tests": 171,
     "standalone_tests": 7,
     "live_engine": "v0.114.0",
     "live_tests": 31,
-    "code_review": "N2/N3/N5 cleared after synchronous cancellation, bounded capability probe and deterministic test polling corrections",
+    "code_review": "N2/N3/N5/N4 cleared; cancellation propagation, bounded capability discovery, deterministic publish tests and same-tag checksum cache race fixed",
     "quality_gates": "All ten workspace/standalone format, Clippy, rustdoc, doctest and Rust 1.85.1 checks passed; matrix guard tests passed.",
     "live_support_floor": {
       "v0.111.0": 1
     },
     "baseline_live_tests": 19,
     "security_advisories": 0,
-    "new_limit": "S1 partial: hard sticky scheduling immediately after engine restart remains unresolved; normal routing and isolated restart contracts pass."
+    "new_limit": "S1 partial: hard sticky scheduling immediately after engine restart remains unresolved; normal routing and isolated restart contracts pass.",
+    "native_sidecar": {
+      "version": "v0.110.5",
+      "platform": "darwin_arm64",
+      "post_fix_live_executions": 4,
+      "cold_and_offline_warm": true
+    },
+    "python_support_claim_tests": 9
   }
 }

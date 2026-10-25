@@ -26,9 +26,11 @@ semver = "1.0"
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"], optional = true }
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["rt", "sync", "time", "net", "io-util", "fs"] }
+tokio = { version = "1.48", features = ["rt", "sync", "time", "net", "io-util", "fs", "process"] }
 tokio-util = "0.7"
 uuid = { version = "1.0", features = ["v4"] }
+sha2 = "0.10"
+tempfile = "3.27"
 
 # The production transport is part of the supported v0.1 surface. Keeping these
 # dependencies mandatory makes every advertised feature combination honest.
@@ -55,3 +57,6 @@ default = ["grpc", "opentelemetry"]
 opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
 grpc = []
 integration = []
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process"] }

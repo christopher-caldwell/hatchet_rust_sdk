@@ -144,3 +144,34 @@ features, **7** standalone tests and six matrix guard tests. Strict Clippy/rustd
 format and Rust **1.85.1** workspace/standalone checks pass. The unchanged baseline
 engine v0.94.14 passes **19** live contracts, checkpoint restart and the two-worker
 example; both engine runs finish with complete cleanup.
+
+## N4: owned embedded real engine
+
+`embedded::EmbeddedClient` and `EmbeddedEngine` manage the official sidecar with
+private validated readiness, persisted bundled Postgres, explicit connection
+configuration and awaited, cancellation-safe shutdown. Eight executable-peer
+lifecycle tests and three HTTP release/cache tests cover the failure boundaries.
+The real published v0.110.5 sidecar is tracked independently of SDK v0.114.0;
+[embedded.md](embedded.md) records exact source/artifact pins and supported modes.
+
+Independent review found a P2 checksum race in a shared same-tag cache filename:
+a different digest policy could replace a pinned caller's verified path before
+spawn. Cache executables now live in expected-digest directories; pinned calls do
+not rewrite the release-policy offline reference. The reviewer independently ran
+the differing-policy interleaving regression and cleared all source findings.
+
+Post-fix native tests pass twice: one real download/install run and one warm-cache
+run with public HTTP(S) proxies deliberately unreachable (loopback bypassed).
+These are **four live executions** of two cases on darwin-arm64. They run/restore
+workflow history and definitions across bundled-Postgres restart, authenticate a
+protected gRPC workflow-registration RPC without REST, and assert sidecar and
+Postgres processes exit. There is no Docker or supplied API token in these runs.
+A separately pinned Linux-amd64 CI job is supplied, not remotely executed yet.
+
+Final N4 workspace tests pass **174**, SDK tests without default features pass
+**171**, and standalone tests pass **7**. Strict Clippy/rustdoc, format, Rust
+**1.85.1** workspace/standalone and both RustSec lockfile audits pass; vulnerabilities
+and warnings are zero. Nine Python support-claim guards pass, including embedded
+release/source/artifact drift and native CI pin checks. Upstream versions/main
+were queried again and are current. Native parent SIGKILL during initialization,
+external DB/RabbitMQ fleets and forced-kill database cleanup are NOT EXERCISED.

@@ -37,6 +37,8 @@ def upstream():
     npm = fetch("https://registry.npmjs.org/%40hatchet-dev%2Ftypescript-sdk/latest")
     go = fetch("https://proxy.golang.org/github.com/hatchet-dev/hatchet/@latest")
     release = fetch("https://api.github.com/repos/hatchet-dev/hatchet/releases/latest")
+    embedded = fetch("https://api.github.com/repos/hatchet-dev/hatchet-embedded/releases/latest")
+    embedded_main = fetch("https://api.github.com/repos/hatchet-dev/hatchet-embedded/commits/main")
     return {
         "schema_version": 1,
         "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -46,16 +48,26 @@ def upstream():
         "go": {"module": "github.com/hatchet-dev/hatchet", "version": go["Version"], "revision": go["Origin"]["Hash"], "date": go["Time"],
                "registry": "https://proxy.golang.org/github.com/hatchet-dev/hatchet/@latest"},
         "github_latest_release": {"version": release["tag_name"], "published_at": release["published_at"], "url": release["html_url"]},
+        "embedded": embedded_snapshot(embedded, embedded_main),
+    }
+
+
+def embedded_snapshot(release, main):
+    return {
+        "version": release["tag_name"], "published_at": release["published_at"], "url": release["html_url"],
+        "main": {"revision": main["sha"], "date": main["commit"]["committer"]["date"], "url": main["html_url"]},
+        "assets": {asset["name"]: {"digest": asset.get("digest"), "size": asset["size"]} for asset in release["assets"]},
     }
 
 
 def comparison(snapshot):
     # Inspection notes and check timestamps do not constitute upstream version drift.
-    return {key: snapshot[key] for key in ["main", "typescript", "go", "github_latest_release"]}
+    return {key: snapshot[key] for key in ["main", "typescript", "go", "github_latest_release", "embedded"]}
 
 
 def validate(matrix, snapshot):
     expected = {"typescript": snapshot["typescript"]["version"], "go": snapshot["go"]["version"], "main": snapshot["main"]["revision"]}
+    expected.update(embedded=snapshot["embedded"]["version"], embedded_main=snapshot["embedded"]["main"]["revision"])
     assert matrix["reviewed_against"] == expected, "upstream changed: inspect official implementations before updating reviewed_against"
 
     import re
@@ -66,7 +78,12 @@ def validate(matrix, snapshot):
     workflow = (ROOT / ".github/workflows/parity.yml").read_text()
     for target in matrix["engine_targets"].values():
         if target.get("ci"):
-            assert target["image"] in workflow, "CI engine image differs from the support matrix"
+            if target.get("kind") == "native_embedded":
+                assert target["release"] in workflow and target["checksum"] in workflow, "native embedded CI differs from the support matrix"
+                if target["release"] == snapshot["embedded"]["version"]:
+                    assert "sha256:" + target["checksum"] == snapshot["embedded"]["assets"][target["asset"]]["digest"], "native embedded CI checksum differs from published artifact"
+            else:
+                assert target["image"] in workflow, "CI engine image differs from the support matrix"
     seen = set()
     for row in matrix["features"]:
         assert row["id"] not in seen, f"duplicate feature {row['id']}"
@@ -101,6 +118,9 @@ def render(matrix, snapshot):
              "Supported means the stated Rust contract has supplied code and named tests; it does not imply every official option or every engine release was exercised. Partial rows name the limits. Engine versions beside live tests identify executed proof targets; support floors are separately documented SDK requirements.", "",
              "OpenTelemetry requires the `opentelemetry` Cargo feature (enabled by default) and an application-configured provider/exporter. Local transports do not emulate engine-owned guarantees.", "",
              "| Feature | TS | Go | Rust | Engine / prerequisite | Rust evidence and limits |", "| --- | --- | --- | --- | --- | --- |"]
+    embedded = snapshot["embedded"]
+    lines.insert(8, f"Embedded sidecar release: [{embedded['version']}]({embedded['url']}); source main [{embedded['main']['revision'][:12]}]({embedded['main']['url']}). It is tracked independently of TS/Go SDK releases and Docker engine images.")
+    lines.insert(9, "")
     for row in matrix["features"]:
         sdk_cells = []
         for sdk, revision, prefix in [("typescript", snapshot["main"]["revision"], "sdks/typescript/"), ("go", snapshot["go"]["revision"], "sdks/go/")]:

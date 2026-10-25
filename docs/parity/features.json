@@ -3,7 +3,9 @@
   "reviewed_against": {
     "typescript": "1.43.0",
     "go": "v0.114.0",
-    "main": "af128ec1672adaf8e3cc4afd339ce5c2c6f08c35"
+    "main": "af128ec1672adaf8e3cc4afd339ce5c2c6f08c35",
+    "embedded": "v0.110.5",
+    "embedded_main": "f0b16756371f27279f3114fa72c83f9b56176811"
   },
   "engine_targets": {
     "v0.94.14": {
@@ -17,6 +19,14 @@
     "v0.114.0": {
       "ci": true,
       "image": "ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.114.0@sha256:47bfdd1ee569d760012dfb37ba5e551c3cdb5f2f6018b4d9d11ba7febb52f731"
+    },
+    "v0.110.5": {
+      "ci": true,
+      "kind": "native_embedded",
+      "release": "v0.110.5",
+      "asset": "hatchet-embedded-sidecar_linux_amd64",
+      "checksum": "18ddacae0005042bd982328bcb8d370cca6907352a1ab2a3c8406001d31e7dee",
+      "note": "Official sidecar with bundled Postgres; local proof uses darwin_arm64 and CI supplies linux_amd64. No Docker."
     }
   },
   "features": [
@@ -1300,12 +1310,47 @@
         "source": "embedded.go"
       },
       "rust": {
-        "status": "missing",
-        "sources": [],
-        "tests": []
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/embedded/mod.rs",
+          "crates/hatchet-sdk/src/embedded/download.rs",
+          "crates/hatchet-sdk/src/embedded/process.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/embedded_lifecycle.rs",
+            "name": "embedded_handshake_wires_config_redacts_secrets_and_stop_reaps_idempotently"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/embedded_lifecycle.rs",
+            "name": "embedded_cancelled_start_and_dropped_guard_request_cleanup"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/embedded_lifecycle.rs",
+            "name": "embedded_cancelled_stop_preserves_the_original_shutdown_deadline"
+          },
+          {
+            "file": "crates/hatchet-sdk/src/embedded/download.rs",
+            "name": "differing_same_tag_digest_policies_never_replace_a_returned_pinned_executable"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/embedded_engine.rs",
+            "name": "embedded_real_engine_runs_workflows_and_preserves_history_across_postgres_restart",
+            "engines": [
+              "v0.110.5"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/embedded_engine.rs",
+            "name": "embedded_real_api_less_mode_exposes_authenticated_grpc_and_cleans_up",
+            "engines": [
+              "v0.110.5"
+            ]
+          }
+        ]
       },
-      "engine": "Baseline v0.94.14",
-      "notes": "InMemoryTransport and Docker proofs exist, not an embedded engine API."
+      "engine": "Official published sidecar v0.110.5; native bundled Postgres, independent of SDK release versions",
+      "notes": "Explicit owned engine/client guard, content-addressed SHA-256 cache, private handshake, cancellation-safe startup/stop and persisted DB. Local real proof: darwin-arm64; Linux-amd64 native CI definition supplied. Full client requires REST; raw API-less engine/gRPC works. External DB/RabbitMQ fleets, parent SIGKILL during init and forced-kill DB cleanup untested. See embedded.md."
     },
     {
       "id": "O2",

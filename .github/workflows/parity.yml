@@ -70,3 +70,20 @@ jobs:
           name: live-parity-${{ matrix.engine }}
           path: examples/multi-node/target/smoke
           if-no-files-found: warn
+
+  embedded:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Official native sidecar with bundled Postgres and restart persistence
+        env:
+          HATCHET_TEST_EMBEDDED_VERSION: v0.110.5
+          HATCHET_TEST_EMBEDDED_CHECKSUM: 18ddacae0005042bd982328bcb8d370cca6907352a1ab2a3c8406001d31e7dee
+          HATCHET_TEST_EMBEDDED_ROOT: target/embedded-native
+        run: >-
+          cargo test --locked -p another-hatchet-sdk --features integration
+          --test embedded_engine -- --ignored --nocapture --test-threads=1

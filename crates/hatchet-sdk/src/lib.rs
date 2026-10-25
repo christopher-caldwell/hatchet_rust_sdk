@@ -34,6 +34,7 @@ mod workflow;
 
 pub mod config;
 pub mod durable_listener;
+pub mod embedded;
 pub mod eviction;
 pub mod grpc_transport;
 pub mod health;

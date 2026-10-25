@@ -24,5 +24,40 @@
     "version": "v0.110.5",
     "published_at": "2026-10-06T07:44:23Z",
     "url": "https://github.com/hatchet-dev/hatchet/releases/tag/v0.110.5"
+  },
+  "embedded": {
+    "version": "v0.110.5",
+    "published_at": "2026-10-06T08:33:08Z",
+    "url": "https://github.com/hatchet-dev/hatchet-embedded/releases/tag/v0.110.5",
+    "main": {
+      "revision": "f0b16756371f27279f3114fa72c83f9b56176811",
+      "date": "2026-10-22T14:17:32Z",
+      "url": "https://github.com/hatchet-dev/hatchet-embedded/commit/f0b16756371f27279f3114fa72c83f9b56176811"
+    },
+    "assets": {
+      "checksums.txt": {
+        "digest": "sha256:d15dddfa8cbb320a11fba176bdaeabe2a8c71b8cb0d569b2c1d590303def365c",
+        "size": 414
+      },
+      "hatchet-embedded-sidecar_darwin_amd64": {
+        "digest": "sha256:398d1269036d480d91ea9e8ea03e62b79375e056d82c737e51163b74a8a6ef29",
+        "size": 61417921
+      },
+      "hatchet-embedded-sidecar_darwin_arm64": {
+        "digest": "sha256:4b466fee2249dcaab03f83b6ceb7a9f5c0ff130eb25e4bd3cfa653f8e709e671",
+        "size": 57882563
+      },
+      "hatchet-embedded-sidecar_linux_amd64": {
+        "digest": "sha256:18ddacae0005042bd982328bcb8d370cca6907352a1ab2a3c8406001d31e7dee",
+        "size": 59072674
+      },
+      "hatchet-embedded-sidecar_linux_arm64": {
+        "digest": "sha256:2b5f0e7f675d166b8af0b1c0aee1c81a651ffc60905b89b241d17b889dee00a0",
+        "size": 55247010
+      }
+    }
+  },
+  "inspected": {
+    "embedded_release_revision": "3dc26f939dfc5c1072c35dedc65bf51313d665a7"
   }
 }

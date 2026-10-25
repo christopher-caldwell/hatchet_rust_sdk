@@ -20,6 +20,22 @@ class SupportClaimGuards(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "inspect official implementations"):
             parity.validate(self.matrix, self.snapshot)
 
+    def test_embedded_release_and_main_changes_require_review(self):
+        for field in ["version", "main"]:
+            changed = copy.deepcopy(self.snapshot)
+            if field == "version":
+                changed["embedded"]["version"] = "v99.0.0"
+            else:
+                changed["embedded"]["main"]["revision"] = "different revision"
+            with self.assertRaisesRegex(AssertionError, "inspect official implementations"):
+                parity.validate(self.matrix, changed)
+
+    def test_embedded_binary_changes_are_drift_even_without_a_version_change(self):
+        changed = copy.deepcopy(self.snapshot)
+        asset = next(iter(changed["embedded"]["assets"].values()))
+        asset["digest"] = "different published artifact"
+        self.assertNotEqual(parity.comparison(changed), parity.comparison(self.snapshot))
+
     def test_supported_features_require_code_and_a_named_existing_test(self):
         row = next(row for row in self.matrix["features"] if row["rust"]["status"] == "supported")
         row["rust"]["tests"] = []
@@ -36,6 +52,12 @@ class SupportClaimGuards(unittest.TestCase):
         row = next(row for row in self.matrix["features"] if row.get("engine_requirement"))
         row["engine_requirement"]["version"] = "0.0.1"
         with self.assertRaisesRegex(AssertionError, "engine floor mismatch"):
+            parity.validate(self.matrix, self.snapshot)
+
+    def test_native_embedded_ci_must_use_the_recorded_platform_checksum(self):
+        target = next(row for row in self.matrix["engine_targets"].values() if row.get("kind") == "native_embedded")
+        target["checksum"] = "different"
+        with self.assertRaisesRegex(AssertionError, "native embedded CI"):
             parity.validate(self.matrix, self.snapshot)
 
     def test_official_support_requires_an_implementation_reference(self):

@@ -342,3 +342,6 @@ delay (engine >= v0.111.0); see [retry scheduling and fallback](docs/parity/retr
 Preview [durable topic streams](docs/parity/durable-topics.md) support resumable
 cursors, reset, batched publication and large payloads independently of workflows.
 They require the engine streams service and the durable-streams tenant entitlement.
+
+[Embedded mode](docs/parity/embedded.md) manages the official real-engine sidecar
+and bundled persistent Postgres, with checksum verification and awaited shutdown.
