@@ -78,3 +78,69 @@ fix. No production load or engine delay-cap exhaustion test is claimed.
 Final N3 checks pass **154** workspace tests, **151** SDK tests without default
 features and **7** standalone tests. All ten quality/compatibility checks pass,
 including strict Clippy/rustdoc and Rust 1.85.1; six matrix guard tests also pass.
+
+## Newly observed routing/restart limitation (S1)
+
+Two full-suite attempts placed the new topic restart proof before ordinary hard
+sticky routing. Topic reader/cursor recovery passed both times. The routing test
+then left a task queued until its 45-second deadline. Read-only database
+inspection confirmed the task's `HARD` strategy, expected action and requested
+worker ID matched an active worker with current heartbeat/listener and configured
+slots. The second run also passed ordinary topic reset/history/large-payload
+operations, isolating the ordering assertion from this separate failure.
+
+S1 is now **partial**. Ordinary single/bulk explicit routing retains its existing
+wire and fresh-engine live evidence; hard sticky recovery immediately after
+engine restart is not verified and has an observed failure. The evidence is
+consistent with a scheduling/restart interaction, but does not conclusively
+attribute the cause to the engine without an equivalent official-client or
+independent raw-wire reproduction. No schema mutation, worker substitution or
+weakened `HARD` routing policy was used to bypass it.
+
+Independent review agreed that the disruptive topic restart proof should run in
+an explicit late test target, after ordinary routing/checkpoint contracts. Ordinary
+topic operations remain before sticky routing, so the isolation experiment checks
+the trigger rather than removing stream operations from that scenario. Failed
+runs and database state are retained under `target/parity-batch4-20261025/n5/`.
+
+## N5: durable topic streams
+
+Implemented the current TS preview contract as `client.streams()?`: independently
+namespaced topics, retained-message metadata, cursor reads and reset, serialized
+producer sequences, automatic count/byte bounded batches, single-publish fallback
+with partial acknowledgments, and large-payload upload/fetch. Readers reconnect
+from the last delivered cursor; failed payload fetches do not skip buffered
+messages. Dropping/cancelling a reader closes its actual HTTP/2 request. See
+[durable-topics.md](durable-topics.md) for the API and error/lifetime contract.
+
+Nine controlled HTTP/2/HTTP tests cover count/byte limits, namespace isolation,
+ambiguous-write sequence rotation, producer-gap recovery, older RPC fallback,
+partial failure, upload/reference authentication, transient/permanent payload
+fetches, cursor reconnect, hangup, cancellation and actual request closure.
+Independent source review found no product defects. Its P2 test-order finding was
+fixed with explicit biased polling of concurrent publish futures; the reviewer
+independently reran all nine corrected tests successfully.
+
+The fresh v0.114.0 run passes **31** live checks: 18 baseline contracts, 11 modern
+contracts, durable checkpoint restart, then an explicit late topic restart phase.
+It includes ordinary topic reset/resume/history/namespace semantics, 4 MiB
+upload/download and active reader plus cursor persistence across real engine
+restart. Ordinary stream operations and hard sticky routing pass together before
+the disruptive phases. The existing restart/routing limitation is retained above
+and in S1, rather than erased by test isolation. The local test tenant enables
+the official `SERVER_DEFAULT_TENANT_ENTITLEMENT_DURABLE_STREAMS` configuration;
+production tenant enablement is an engine/account decision.
+
+The real older-publish fallback, elapsed retention/cursor expiration, elapsed
+producer watermark retention, 30-minute idle expiry and 64 MiB production capacity
+are NOT EXERCISED against an engine. Their request/error paths are protocol-tested;
+the actual live payload is 4 MiB. Uploads within a batch are processed in order,
+so overlapping large-upload throughput is not claimed. The official TS/Go suites
+are not run. New multipart dependencies pass both lockfile RustSec audits against
+the recorded advisory database with zero vulnerabilities/warnings.
+
+N5 final checks pass **163** workspace tests, **160** SDK tests without default
+features, **7** standalone tests and six matrix guard tests. Strict Clippy/rustdoc,
+format and Rust **1.85.1** workspace/standalone checks pass. The unchanged baseline
+engine v0.94.14 passes **19** live contracts, checkpoint restart and the two-worker
+example; both engine runs finish with complete cleanup.

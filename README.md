@@ -338,3 +338,7 @@ see the [configuration and handler contract](docs/parity/batch-tasks.md).
 
 Normal and durable tasks can return `RetryAfterError` to request a per-failure
 delay (engine >= v0.111.0); see [retry scheduling and fallback](docs/parity/retry-after.md).
+
+Preview [durable topic streams](docs/parity/durable-topics.md) support resumable
+cursors, reset, batched publication and large payloads independently of workflows.
+They require the engine streams service and the durable-streams tenant entitlement.

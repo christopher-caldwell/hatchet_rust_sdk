@@ -123,6 +123,13 @@ pub enum WorkerConnectionState {
 
 #[async_trait]
 pub trait Transport: Send + Sync {
+    /// Independent durable topics require the engine streams service.
+    fn topic_streams(&self) -> Result<crate::StreamsClient> {
+        Err(Error::UnsupportedOperation(
+            "durable topics require an engine-backed streams service".into(),
+        ))
+    }
+
     /// Returns the workflow/event namespace configured by this transport.
     /// Fetches the connected engine release, if this transport has an engine.
     async fn engine_version(&self) -> Result<crate::EngineVersion> {

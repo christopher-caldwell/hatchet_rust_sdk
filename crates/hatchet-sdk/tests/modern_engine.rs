@@ -827,3 +827,123 @@ async fn retry_after_delays_normal_and_durable_attempts_without_overriding_retry
         client.workflows().delete(name).await.unwrap();
     }
 }
+
+async fn topic_next(stream: &mut TopicEventStream) -> StreamEvent {
+    tokio::time::timeout(Duration::from_secs(15), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires engine v0.114.0 and the durable-streams tenant entitlement"]
+async fn durable_topics_publish_resume_reset_namespaces_and_large_payloads() {
+    let client = real_client().await;
+    let streams = client.streams().unwrap();
+    let topic = format!("parity-{}", uuid::Uuid::new_v4());
+    assert!(
+        streams
+            .topic_metadata(&topic, StreamOptions::default())
+            .await
+            .is_err()
+    );
+    let batch = StreamOptions {
+        batch_timeout: Duration::from_millis(50),
+        ..Default::default()
+    };
+    let (alpha, beta) = tokio::join!(biased;
+        streams.publish(&topic,b"alpha".to_vec(),batch.clone()),
+        streams.publish(&topic,b"beta".to_vec(),batch),
+    );
+    alpha.unwrap();
+    beta.unwrap();
+    let metadata = streams
+        .topic_metadata(&topic, StreamOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(metadata.message_count, 2);
+    assert_eq!(metadata.namespace, "");
+    assert!(metadata.last_published_at.is_some());
+    let mut old = streams.events(&topic, StreamOptions::default()).unwrap();
+    let alpha = topic_next(&mut old).await;
+    assert_eq!(alpha.payload, b"alpha");
+    streams
+        .reset(&topic, StreamOptions::default())
+        .await
+        .unwrap();
+    streams
+        .publish(&topic, b"gamma".to_vec(), StreamOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(topic_next(&mut old).await.payload, b"beta");
+    assert_eq!(topic_next(&mut old).await.payload, b"gamma");
+    drop(old);
+    let mut fresh = streams.events(&topic, StreamOptions::default()).unwrap();
+    assert_eq!(topic_next(&mut fresh).await.payload, b"gamma");
+    drop(fresh);
+    let mut resumed = streams
+        .events(
+            &topic,
+            StreamOptions {
+                cursor: Some(alpha.cursor),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(topic_next(&mut resumed).await.payload, b"beta");
+    assert_eq!(topic_next(&mut resumed).await.payload, b"gamma");
+    drop(resumed);
+    let isolated = StreamOptions {
+        namespace: "literal-stream-namespace".into(),
+        ..Default::default()
+    };
+    streams
+        .publish(&topic, b"private".to_vec(), isolated.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        streams
+            .topic_metadata(&topic, isolated.clone())
+            .await
+            .unwrap()
+            .message_count,
+        1
+    );
+    let mut private = streams.events(&topic, isolated).unwrap();
+    assert_eq!(topic_next(&mut private).await.payload, b"private");
+    drop(private);
+    let large = StreamOptions {
+        namespace: "large-payload".into(),
+        ..Default::default()
+    };
+    let payload = vec![42; 4 * 1024 * 1024];
+    streams
+        .publish(&topic, payload.clone(), large.clone())
+        .await
+        .unwrap();
+    let mut downloaded = streams.events(&topic, large).unwrap();
+    assert_eq!(topic_next(&mut downloaded).await.payload, payload);
+    drop(downloaded);
+    let metadata = streams
+        .topic_metadata(&topic, StreamOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(metadata.message_count, 3);
+    let mut invalid = streams
+        .events(
+            &topic,
+            StreamOptions {
+                cursor: Some("malformed-cursor".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), invalid.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(invalid.next().await.is_none());
+}

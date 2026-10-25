@@ -6,7 +6,7 @@
     "official_go_revision": "aef20b00755da5b1e7e69197e7189848309afb20",
     "official_ts_release": "1.43.0"
   },
-  "scope": "Batches 1\u20133 and batch 4 N2/N3 are implemented with explicit support/evidence limits in feature-support.md. Remaining batch 4 gaps continue in order with a separate code review after each.",
+  "scope": "Batches 1\u20133 and batch 4 N2/N3/N5 are implemented with explicit support/evidence limits in feature-support.md. S1 is partial after observing a restart/routing interaction. Remaining batch 4 gaps continue in order with a separate code review after each.",
   "batch_rationale": {
     "1": "Correct existing public contracts that can replay the wrong work or truncate data; all are supported by the pinned engine.",
     "2": "Complete operational controls and run discovery; negotiate engine capabilities before enabling newer controls.",
@@ -456,7 +456,7 @@
       "area": "Per-run sticky routing",
       "batch": 3,
       "order": 4,
-      "status": "complete",
+      "status": "partial",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/admin.ts",
@@ -473,6 +473,9 @@
       "validation": [
         "normal_and_bulk_dispatch_preserve_explicit_sticky_worker_routing",
         "explicit_sticky_worker_routing_reaches_the_selected_worker_for_single_and_bulk_runs"
+      ],
+      "remaining_limitations": [
+        "Fresh-engine explicit routing is verified. Hard sticky scheduling immediately after engine restart stalled twice despite a matching active worker target, current heartbeat/listener and configured slots; no server schema/state or SDK HARD-routing semantics were altered to bypass it. Root cause remains unconfirmed; equivalent official-client reproduction and recovery support are follow-up work."
       ]
     },
     {
@@ -566,15 +569,23 @@
       "area": "Durable topic streams",
       "batch": 4,
       "order": 3,
-      "status": "pending",
-      "acceptance": "No streams feature client for publish, resumable cursor-based events, reset and topic metadata. This is distinct from workflow event streaming and is currently a preview feature. Not counted as a Go feature-client gap.",
+      "status": "complete",
+      "acceptance": "Current TS preview durable topics implemented with exact cursors/reset/metadata, serialized producer sequences, batching/older-RPC fallback, upload/fetch and reconnect/cancellation. Verified on v0.114.0 with required entitlement; legacy fallback/retention errors protocol-tested. See durable-topics.md.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/features/streams.ts",
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/streams.ts"
         }
       ],
-      "priority": "P3"
+      "priority": "P3",
+      "original_gap": "No streams feature client for publish, resumable cursor-based events, reset and topic metadata. This is distinct from workflow event streaming and is currently a preview feature. Not counted as a Go feature-client gap.",
+      "validation": [
+        "topic_publish_rotates_after_ambiguous_error_and_retries_producer_gap_once",
+        "topic_publish_batch_fallback_preserves_partial_success_and_rejected_sequence",
+        "topic_reconnect_resumes_after_last_delivered_cursor_and_permanent_errors_stop",
+        "durable_topics_publish_resume_reset_namespaces_and_large_payloads",
+        "durable_topic_cursor_and_active_reader_survive_engine_restart"
+      ]
     },
     {
       "id": "N4",
@@ -679,27 +690,31 @@
   "batch_4_progress": {
     "completed": [
       "N2",
-      "N3"
+      "N3",
+      "N5"
     ],
     "remaining": [
-      "N5",
       "N4",
       "O2",
       "O4"
     ],
-    "review_policy": "A separate read-only code review is required after each gap before the next begins."
+    "review_policy": "A separate read-only code review is required after each gap before the next begins.",
+    "new_recovery_limit": "S1 partial: hard sticky task remained queued immediately after early engine restart in two runs; desired worker/action and active listener/heartbeat/configured capacity matched, root cause unconfirmed."
   },
   "batch_4_validation_summary": {
-    "verified_at_utc": "2026-10-25T16:14:17.143235+00:00",
-    "workspace_tests": 154,
-    "no_default_tests": 151,
+    "verified_at_utc": "2026-10-25T16:39:41.998892+00:00",
+    "workspace_tests": 163,
+    "no_default_tests": 160,
     "standalone_tests": 7,
     "live_engine": "v0.114.0",
-    "live_tests": 29,
-    "code_review": "N2 and N3 cleared; synchronous cancellation and bounded capability-probe findings fixed",
+    "live_tests": 31,
+    "code_review": "N2/N3/N5 cleared after synchronous cancellation, bounded capability probe and deterministic test polling corrections",
     "quality_gates": "All ten workspace/standalone format, Clippy, rustdoc, doctest and Rust 1.85.1 checks passed; matrix guard tests passed.",
     "live_support_floor": {
       "v0.111.0": 1
-    }
+    },
+    "baseline_live_tests": 19,
+    "security_advisories": 0,
+    "new_limit": "S1 partial: hard sticky scheduling immediately after engine restart remains unresolved; normal routing and isolated restart contracts pass."
   }
 }

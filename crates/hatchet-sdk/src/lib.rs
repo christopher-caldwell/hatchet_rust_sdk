@@ -25,6 +25,7 @@ mod rest_client;
 mod retry_after;
 mod run_ref;
 mod run_stream;
+mod streams;
 mod task;
 mod telemetry;
 mod transport;
@@ -76,6 +77,9 @@ pub use rate_pause::RateLimitPauseResult;
 pub use retry_after::RetryAfterError;
 pub use run_ref::{RunControl, WorkflowRunRef};
 pub use run_stream::RunEventStream;
+pub use streams::{
+    StreamEvent, StreamOptions, StreamTopicMetadata, StreamsClient, TopicEventStream,
+};
 pub use task::{
     BackoffConfig, ConcurrencyConfig, ConcurrencyLimitStrategy, DesiredLabelConfig, LabelValue,
     RateLimit, RateLimitDuration, RateLimitKey, SlotType, TaskConfig, TaskConfigBuilder,

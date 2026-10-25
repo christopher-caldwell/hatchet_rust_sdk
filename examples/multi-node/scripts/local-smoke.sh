@@ -78,8 +78,13 @@ done
 [[ "$(docker inspect -f '{{.State.Health.Status}}' "$POSTGRES")" == "healthy" ]]
 
 CURRENT_STAGE=hatchet_start
+STREAMS_ENTITLEMENT=false
+if [[ "${SMOKE_RUN_MODERN_TESTS:-0}" == "1" ]]; then
+  STREAMS_ENTITLEMENT=true
+fi
 docker run -d --name "$HATCHET" --network "$NETWORK" \
   -p 127.0.0.1:18888:8888 -p 127.0.0.1:17077:7077 -p 127.0.0.1:18733:8733 \
+  -e SERVER_DEFAULT_TENANT_ENTITLEMENT_DURABLE_STREAMS="$STREAMS_ENTITLEMENT" \
   -v "$VOLUME:/config" \
   -e DATABASE_URL='postgresql://hatchet:local-hatchet-password@'"$POSTGRES"':5432/hatchet?sslmode=disable' \
   -e SERVER_MSGQUEUE_KIND=postgres -e ADMIN_EMAIL=local-demo@example.test \
@@ -169,6 +174,12 @@ if [[ "${SMOKE_RUN_SDK_INTEGRATION:-1}" != "0" ]]; then
     export HATCHET_TEST_ENGINE_CONTAINER="$HATCHET"
     cargo test --locked -p another-hatchet-sdk --features integration \
       "${SDK_TEST_TARGETS[@]}" -- --ignored --nocapture --test-threads=1
+    # Restart proofs disrupt worker identities/scheduling; keep topic restart in
+    # its own late phase, after the ordinary routing and checkpoint tests.
+    if [[ "${SMOKE_RUN_MODERN_TESTS:-0}" == "1" ]]; then
+      cargo test --locked -p another-hatchet-sdk --features integration \
+        --test topic_recovery_engine -- --ignored --nocapture --test-threads=1
+    fi
   ) 2>&1 | tee "$EXAMPLE/target/smoke/sdk-integration.log"
   SDK_INTEGRATION_TESTS=$(sed -nE \
     's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' \

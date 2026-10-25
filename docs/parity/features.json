@@ -1059,7 +1059,7 @@
         "source": "workflow.go"
       },
       "rust": {
-        "status": "supported",
+        "status": "partial",
         "sources": [
           "crates/hatchet-sdk/src/grpc_transport.rs"
         ],
@@ -1079,7 +1079,7 @@
         ]
       },
       "engine": "Baseline v0.94.14",
-      "notes": "RunOpts.sticky is an explicit desired-worker ID; workflow soft/hard policy remains separate."
+      "notes": "Explicit worker routing passes single/bulk normal and durable wire/live contracts on a fresh engine. Two early-restart live runs left a HARD-routed task queued despite matching active target ID, heartbeat/listener and configured slot capacity. Recovery guarantee unresolved; restart proofs run as a separate late phase. Evidence is consistent with scheduling/restart interaction, not conclusive attribution to the engine. See batch-4.md."
     },
     {
       "id": "V1",
@@ -1239,12 +1239,54 @@
         "status": "absent"
       },
       "rust": {
-        "status": "missing",
-        "sources": [],
-        "tests": []
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/streams.rs",
+          "crates/hatchet-sdk/src/streams/publish.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/topic_streams.rs",
+            "name": "topic_publish_rotates_after_ambiguous_error_and_retries_producer_gap_once"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/topic_streams.rs",
+            "name": "topic_publish_batch_fallback_preserves_partial_success_and_rejected_sequence"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/topic_streams.rs",
+            "name": "topic_automatic_batches_respect_entry_and_byte_limits_and_namespaces_are_independent"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/topic_streams.rs",
+            "name": "topic_reconnect_resumes_after_last_delivered_cursor_and_permanent_errors_stop"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/topic_streams.rs",
+            "name": "topic_payload_retry_reconnect_keeps_undelivered_cursor_and_forbidden_fetch_is_terminal"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/topic_streams.rs",
+            "name": "topic_drop_and_cancellation_close_the_actual_subscription"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "durable_topics_publish_resume_reset_namespaces_and_large_payloads",
+            "engines": [
+              "v0.114.0"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/topic_recovery_engine.rs",
+            "name": "durable_topic_cursor_and_active_reader_survive_engine_restart",
+            "engines": [
+              "v0.114.0"
+            ]
+          }
+        ]
       },
-      "engine": "Baseline v0.94.14",
-      "notes": "Separate from supported workflow event streaming; not counted as a Go feature-client gap."
+      "engine": "Verified v0.114.0; requires V1Streams service and tenant durable-streams entitlement",
+      "notes": "TS preview parity: durable cursor topics, reset/metadata, producer sequencing, batching/fallback, payload upload/fetch and reconnect/drop cancellation. Literal per-call namespace independent of workflow namespace. Older PublishBatch fallback and retention errors are protocol-tested; live proof uses v0.114.0 and a 4 MiB upload, not 64 MiB capacity or elapsed retention. See durable-topics.md."
     },
     {
       "id": "N4",

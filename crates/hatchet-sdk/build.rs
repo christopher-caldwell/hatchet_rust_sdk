@@ -3,6 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
         format!("{proto_root}/v1/dispatcher.proto"),
         format!("{proto_root}/v1/workflows.proto"),
+        format!("{proto_root}/v1/streams.proto"),
         format!("{proto_root}/v1/shared/condition.proto"),
         format!("{proto_root}/v1/shared/trigger.proto"),
         format!("{proto_root}/dispatcher/dispatcher.proto"),

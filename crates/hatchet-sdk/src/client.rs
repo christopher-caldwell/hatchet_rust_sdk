@@ -70,6 +70,13 @@ impl<T: Transport> Clone for Client<T> {
 }
 
 impl<T: Transport + 'static> Client<T> {
+    /// Accesses preview durable topics, independently of workflow run streams.
+    /// # Errors
+    /// Returns unsupported operation for transports without a streams service.
+    pub fn streams(&self) -> Result<crate::StreamsClient> {
+        self.transport.topic_streams()
+    }
+
     #[must_use]
     pub fn new(transport: Arc<T>) -> Self {
         let state = Arc::new(RwLock::new(FeatureState::default()));

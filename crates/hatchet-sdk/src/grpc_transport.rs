@@ -39,6 +39,7 @@ const MAX_COMPLETED_RUNS: usize = 1_024;
 #[derive(Clone)]
 pub struct GrpcTransport {
     config: HatchetConfig,
+    topic_streams: crate::StreamsClient,
     rest: reqwest::Client,
     admin: proto::v1::admin_service_client::AdminServiceClient<Channel>,
     legacy_workflows: proto::workflows::workflow_service_client::WorkflowServiceClient<Channel>,
@@ -86,7 +87,10 @@ impl GrpcTransport {
             config.tenant_id.clone(),
             config.namespace.clone(),
         );
+        let topic_streams =
+            crate::StreamsClient::new(config.clone(), channel.clone(), rest_client.clone());
         Ok(Self {
+            topic_streams: topic_streams?,
             rest: rest_client,
             admin: proto::v1::admin_service_client::AdminServiceClient::new(channel.clone()),
             legacy_workflows: proto::workflows::workflow_service_client::WorkflowServiceClient::new(
@@ -387,6 +391,10 @@ impl GrpcTransport {
 
 #[async_trait]
 impl Transport for GrpcTransport {
+    fn topic_streams(&self) -> Result<crate::StreamsClient> {
+        Ok(self.topic_streams.clone())
+    }
+
     async fn run_details(
         &self,
         run_id: &WorkflowRunId,
