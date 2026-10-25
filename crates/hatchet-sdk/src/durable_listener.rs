@@ -841,6 +841,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_eviction_cancels_before_backpressured_ack_even_if_watch_is_aborted() {
+        // Exercise the production watcher with the real bounded request queue.
+        for abort_watch in [false, true] {
+            let (listener, mut requests) = test_listener();
+            let capacity = requests.max_capacity();
+            for _ in 0..capacity {
+                listener
+                    .send_evict_invocation("queued", 1, None)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(requests.len(), capacity);
+            let completion_guard = tokio_util::sync::CancellationToken::new();
+            let context_cancel = tokio_util::sync::CancellationToken::new();
+            let watch = crate::worker::spawn_durable_eviction_watch(
+                Arc::clone(&listener),
+                "task-1".into(),
+                7,
+                Some(completion_guard.clone()),
+                context_cancel.clone(),
+            );
+            listener
+                .evict_tx
+                .send(EvictionNotice {
+                    task_external_id: "task-1".into(),
+                    invocation_count: 7,
+                    reason: "server already evicted invocation".into(),
+                    requires_acknowledgment: true,
+                })
+                .unwrap();
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                completion_guard.cancelled().await;
+                context_cancel.cancelled().await;
+            })
+            .await
+            .expect("eviction must cancel locally without outbound queue capacity");
+            assert!(
+                !watch.is_finished(),
+                "acknowledgment must still be backpressured"
+            );
+            assert_eq!(requests.len(), capacity);
+            if abort_watch {
+                // Worker cleanup aborts the watcher when the handler returns.
+                watch.abort();
+                assert!(watch.await.unwrap_err().is_cancelled());
+                assert!(completion_guard.is_cancelled());
+                assert!(context_cancel.is_cancelled());
+            } else {
+                requests.recv().await.unwrap();
+                tokio::time::timeout(Duration::from_secs(1), watch)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                for _ in 1..capacity {
+                    requests.recv().await.unwrap();
+                }
+                let request = requests.recv().await.unwrap();
+                let Some(v1::durable_task_request::Message::EvictInvocation(ack)) = request.message
+                else {
+                    panic!("expected eviction acknowledgment");
+                };
+                assert_eq!(ack.durable_task_external_id, "task-1");
+                assert_eq!(ack.invocation_count, 7);
+                assert_eq!(
+                    ack.reason.as_deref(),
+                    Some("server already evicted invocation")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn eviction_control_bypasses_pending_memo_and_does_not_steal_its_ack() {
         let (listener, mut requests) = test_listener();
         let mut notices = listener.subscribe_evictions();

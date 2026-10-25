@@ -1349,37 +1349,14 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         // Merge eviction with the transport token too, so a late handler return
         // cannot overwrite an engine-owned EVICTED outcome with FAILED.
         if let Some(listener) = self.transport.durable_listener() {
-            let task_id = ids.task_run_id.clone();
-            let inv = invocation_count as i32;
-            let mut evict_rx = listener.subscribe_evictions();
             let evict_token = CancellationToken::new();
-            let evict_token_clone = evict_token.clone();
-            eviction_watch = Some(tokio::spawn(async move {
-                loop {
-                    match evict_rx.recv().await {
-                        Ok(notice)
-                            if notice.task_external_id == task_id
-                                && notice.invocation_count == inv =>
-                        {
-                            if notice.requires_acknowledgment {
-                                if let Err(error) = listener
-                                    .send_evict_invocation(&task_id, inv, Some(notice.reason))
-                                    .await
-                                {
-                                    eprintln!("failed to acknowledge durable eviction: {error}");
-                                }
-                            }
-                            if let Some(token) = transport_cancel_token {
-                                token.cancel();
-                            }
-                            evict_token_clone.cancel();
-                            break;
-                        }
-                        Ok(_) => {}
-                        Err(_) => break,
-                    }
-                }
-            }));
+            eviction_watch = Some(spawn_durable_eviction_watch(
+                listener,
+                ids.task_run_id.clone(),
+                invocation_count as i32,
+                transport_cancel_token,
+                evict_token.clone(),
+            ));
             cancel_token = combine_cancellation_tokens(Some(cancel_token), evict_token);
         }
 
@@ -1494,6 +1471,45 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         }
         let _ = reply.send(result);
     }
+}
+
+// Subscribe before spawning so an eviction cannot arrive between setup and polling.
+pub(crate) fn spawn_durable_eviction_watch(
+    listener: Arc<crate::durable_listener::DurableListenerClient>,
+    task_id: String,
+    inv: i32,
+    transport_cancel_token: Option<CancellationToken>,
+    evict_token: CancellationToken,
+) -> JoinHandle<()> {
+    let mut evict_rx = listener.subscribe_evictions();
+    tokio::spawn(async move {
+        loop {
+            match evict_rx.recv().await {
+                Ok(notice)
+                    if notice.task_external_id == task_id && notice.invocation_count == inv =>
+                {
+                    // The engine has already evicted this invocation. Publish
+                    // cancellation before the bounded outbound queue can block,
+                    // even if handler completion later aborts this watcher.
+                    if let Some(token) = transport_cancel_token {
+                        token.cancel();
+                    }
+                    evict_token.cancel();
+                    if notice.requires_acknowledgment {
+                        if let Err(error) = listener
+                            .send_evict_invocation(&task_id, inv, Some(notice.reason))
+                            .await
+                        {
+                            eprintln!("failed to acknowledge durable eviction: {error}");
+                        }
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    })
 }
 
 fn combine_cancellation_tokens(
