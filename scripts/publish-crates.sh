@@ -129,8 +129,8 @@ verify_package_contents() {
   if [[ "$package" == "$sdk_name" ]]; then
     local proto_count
     proto_count="$(grep -Ec '^proto/.+\.proto$' <<<"$files")"
-    if [[ "$proto_count" -ne 7 ]]; then
-      printf 'SDK package contains %s protobuf files; expected 7.\n' "$proto_count" >&2
+    if [[ "$proto_count" -ne 8 ]]; then
+      printf 'SDK package contains %s protobuf files; expected 8.\n' "$proto_count" >&2
       exit 1
     fi
   fi
