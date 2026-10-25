@@ -515,8 +515,11 @@ async fn validates_feature_client_operations() {
     let cel = client
         .cel()
         .debug("payload.id != ''", &json!({ "id": "ord-1" }))
-        .unwrap();
-    assert!(cel.accepted);
+        .await;
+    assert!(matches!(
+        cel,
+        Err(another_hatchet_sdk::Error::UnsupportedOperation(_))
+    ));
 
     assert!(client.schedules().delete("daily").await.is_ok());
     assert!(client.crons().delete("nightly").await.is_ok());

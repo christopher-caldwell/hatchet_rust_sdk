@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::RunEventStream;
 use crate::error::{Error, Result};
 
 pub type BoxRunFuture<O> = Pin<Box<dyn Future<Output = Result<O>> + Send + 'static>>;
@@ -18,6 +19,11 @@ pub trait RunControl: Send + Sync {
     async fn cancel_run(&self, run_id: &WorkflowRunId) -> Result<()>;
     async fn replay_run(&self, run_id: &WorkflowRunId) -> Result<WorkflowRunId>;
     async fn stream_run(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>>;
+
+    /// Custom controls may override this to provide an incremental subscription.
+    async fn subscribe_run_stream(&self, run_id: &WorkflowRunId) -> Result<RunEventStream> {
+        Ok(RunEventStream::from_values(self.stream_run(run_id).await?))
+    }
 }
 
 #[derive(Clone)]
@@ -70,6 +76,11 @@ impl<O: DeserializeOwned + Send + 'static> WorkflowRunRef<O> {
 
     pub async fn stream(&self) -> Result<Vec<Value>> {
         self.client.stream_run(&self.run_id).await
+    }
+
+    /// Opens an incremental stream; values can be read before the run completes.
+    pub async fn stream_events(&self) -> Result<RunEventStream> {
+        self.client.subscribe_run_stream(&self.run_id).await
     }
 }
 

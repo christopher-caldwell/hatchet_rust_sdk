@@ -1192,7 +1192,9 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                 .await;
         }
 
-        if resolve_run {
+        // Engine-backed runs are resolved by Hatchet after completion reporting;
+        // a local handler return must not override cancellation or graph status.
+        if resolve_run && self.transport.rest_api().is_none() {
             self.transport
                 .resolve_result(&workflow_run_id, result.clone())
                 .await;
@@ -1219,26 +1221,40 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
             trigger_data,
             errors,
         } = context;
+        let transport_cancel_token = cancel_token.clone();
         let mut cancel_token =
             combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
         let workflow_run_id = ids.workflow_run_id.clone();
         let resolve_run = ids.workflow_name == ids.task_name;
         let completed = Arc::new(AtomicBool::new(false));
 
-        // Merge any server-eviction cancel with the existing cancel token.
+        let mut eviction_watch = None;
+        // Merge eviction with the transport token too, so a late handler return
+        // cannot overwrite an engine-owned EVICTED outcome with FAILED.
         if let Some(listener) = self.transport.durable_listener() {
             let task_id = ids.task_run_id.clone();
             let inv = invocation_count as i32;
             let mut evict_rx = listener.subscribe_evictions();
             let evict_token = CancellationToken::new();
             let evict_token_clone = evict_token.clone();
-            tokio::spawn(async move {
+            eviction_watch = Some(tokio::spawn(async move {
                 loop {
                     match evict_rx.recv().await {
                         Ok(notice)
                             if notice.task_external_id == task_id
                                 && notice.invocation_count == inv =>
                         {
+                            if notice.requires_acknowledgment {
+                                if let Err(error) = listener
+                                    .send_evict_invocation(&task_id, inv, Some(notice.reason))
+                                    .await
+                                {
+                                    eprintln!("failed to acknowledge durable eviction: {error}");
+                                }
+                            }
+                            if let Some(token) = transport_cancel_token {
+                                token.cancel();
+                            }
                             evict_token_clone.cancel();
                             break;
                         }
@@ -1246,7 +1262,7 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                         Err(_) => break,
                     }
                 }
-            });
+            }));
             cancel_token = combine_cancellation_tokens(Some(cancel_token), evict_token);
         }
 
@@ -1259,6 +1275,12 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         let result = match self.durable_semaphore.clone().acquire_owned().await {
             Ok(_permit) => {
                 let Some(handler) = self.durable_registry.get(&task_name).cloned() else {
+                    if let Some(watch) = eviction_watch.take() {
+                        watch.abort();
+                    }
+                    if let Some(handle) = monitor {
+                        handle.abort();
+                    }
                     let _ = reply.send(Err(Error::Worker(format!(
                         "worker '{}' missing durable task '{}'",
                         self.name, task_name
@@ -1305,6 +1327,9 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         };
 
         completed.store(true, Ordering::Relaxed);
+        if let Some(watch) = eviction_watch {
+            watch.abort();
+        }
         if let Some(handle) = monitor {
             handle.abort();
         }
@@ -1331,7 +1356,7 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                 .await;
         }
 
-        if resolve_run {
+        if resolve_run && self.transport.rest_api().is_none() {
             self.transport
                 .resolve_result(&workflow_run_id, result.clone())
                 .await;

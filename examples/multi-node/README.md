@@ -27,7 +27,7 @@ PostgreSQL container. The SDK vendors both its protocol definitions and
 
 The script starts PostgreSQL 16, official Hatchet Lite
 `v0.94.14@sha256:b8d6b7e9b96d354f1a252590d1480d3bb70f01604cc6cba1fd97ff7aaa2cb07c`,
-both workers, and one trigger. Before teardown it also runs the SDK's nine
+both workers, and one trigger. Before teardown it also runs the SDK's
 ignored live-engine integration tests serially against that same local server.
 Those tests cover basic and DAG runs, child workflows, durable memo/sleep,
 scoped durable-event lookback, event triggers, cancellation, REST feature

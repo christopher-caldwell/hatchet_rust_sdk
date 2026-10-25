@@ -8,7 +8,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn health_response_identifies_only_the_orders_action() {
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve probe port");
+    let probe = std::net::TcpListener::bind("0.0.0.0:0")
+        .or_else(|error| {
+            (20_000..49_152)
+                .find_map(|port| std::net::TcpListener::bind(("0.0.0.0", port)).ok())
+                .ok_or(error)
+        })
+        .expect("reserve probe port");
     let port = probe.local_addr().expect("probe address").port();
     drop(probe);
 
@@ -31,7 +37,12 @@ async fn health_response_identifies_only_the_orders_action() {
         .await
         .expect("worker ready");
 
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+    let socket = tokio::net::TcpSocket::new_v4().expect("create local socket");
+    socket
+        .bind("127.0.0.1:0".parse().unwrap())
+        .expect("bind local source address");
+    let mut stream = socket
+        .connect(([127, 0, 0, 1], port).into())
         .await
         .expect("connect health server");
     stream
@@ -62,13 +73,27 @@ fn smoke_cleanup_runs_on_success_and_injected_failure() {
     for (mode, expected_success) in [("success", true), ("failure", false)] {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("marker");
+        let child_pid = temp.path().join("child.pid");
         let status = Command::new("bash")
             .arg(&script)
             .env("SMOKE_TEST_CLEANUP_ONLY", mode)
             .env("SMOKE_TEST_MARKER", &marker)
+            .env("SMOKE_TEST_CHILD_PID_FILE", &child_pid)
             .status()
             .expect("run cleanup contract");
         assert_eq!(status.success(), expected_success);
         assert!(!marker.exists(), "cleanup did not remove marker for {mode}");
+        let pid = std::fs::read_to_string(child_pid).expect("child PID recorded");
+        let still_running = Command::new("kill")
+            .arg("-0")
+            .arg(pid.trim())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("check child process")
+            .success();
+        assert!(
+            !still_running,
+            "cleanup left its child process running for {mode}"
+        );
     }
 }

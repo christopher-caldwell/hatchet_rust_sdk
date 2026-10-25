@@ -651,6 +651,23 @@ pub struct InMemoryDurableContext<T: Transport> {
 }
 
 impl<T: Transport> InMemoryDurableContext<T> {
+    /// Whether the current invocation has been cancelled or evicted.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.base.is_cancelled()
+    }
+
+    /// Waits for cancellation or eviction of the current invocation.
+    pub fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
+        self.base.cancelled()
+    }
+
+    /// Returns the invocation's cancellation token for cooperative waits.
+    #[must_use]
+    pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
+        self.base.cancel_token()
+    }
+
     #[must_use]
     pub fn new(ids: ContextIds, transport: Arc<T>, invocation_count: u32) -> Self {
         let (event_tx, _) = broadcast::channel(128);

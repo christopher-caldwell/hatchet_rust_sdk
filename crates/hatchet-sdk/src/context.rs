@@ -588,8 +588,12 @@ impl<T: Transport> Context for InMemoryContext<T> {
 
     async fn put_stream(&self, payload: Value) -> Result<()> {
         self.transport
-            .append_run_stream(&self.ids.workflow_run_id, payload.clone())
-            .await;
+            .append_run_stream(
+                &self.ids.workflow_run_id,
+                &self.ids.task_run_id,
+                payload.clone(),
+            )
+            .await?;
         self.stream.lock().await.push(payload);
         Ok(())
     }

@@ -1,7 +1,7 @@
 //! Integration tests against a real Hatchet engine.
 //!
 //! Run with:
-//!   cargo test -p another-hatchet-sdk --features integration --test integration -- --nocapture
+//!   cargo test -p another-hatchet-sdk --features integration --test integration -- --ignored --nocapture --test-threads=1
 //!
 //! Requires environment variables:
 //!   HATCHET_CLIENT_TOKEN=<jwt>
@@ -33,6 +33,28 @@ async fn real_client() -> Client<GrpcTransport> {
         .await
         .expect("live integration tests require a reachable Hatchet engine");
     Client::new(Arc::new(transport))
+}
+
+async fn wait_for_status(
+    client: &Client<GrpcTransport>,
+    run_id: &WorkflowRunId,
+    expected: RunStatus,
+) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let status = client
+                .runs()
+                .get_status(run_id)
+                .await
+                .expect("read engine status");
+            if status == expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("engine should report the expected run status");
 }
 
 // ---------------------------------------------------------------------------
@@ -230,10 +252,16 @@ async fn integration_durable_memo_and_sleep() {
                 ctx.supports_eviction(),
                 "live durable tasks should use the engine listener"
             );
-            let memoized = ctx
-                .memo("live-integration-memo", serde_json::json!({"stored": true}))
-                .await?;
-            ctx.sleep_for(Duration::from_secs(1)).await?;
+            let (memoized, other) = tokio::try_join!(
+                ctx.memo("live-integration-memo", serde_json::json!({"stored": true})),
+                ctx.memo("live-parallel-memo", serde_json::json!({"other": true})),
+            )?;
+            assert_eq!(memoized, serde_json::json!({"stored": true}));
+            assert_eq!(other, serde_json::json!({"other": true}));
+            tokio::try_join!(
+                ctx.sleep_for(Duration::from_secs(1)),
+                ctx.sleep_for(Duration::from_millis(100)),
+            )?;
             Ok(format!("awake:{memoized}"))
         })
         .build()
@@ -458,8 +486,7 @@ async fn integration_run_cancel() {
         .await
         .expect("run should trigger");
 
-    // Give the run a moment to start, then cancel
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_status(&client, run_ref.run_id(), RunStatus::Running).await;
 
     let cancel_fut = client.runs().cancel(run_ref.run_id());
 
@@ -473,6 +500,13 @@ async fn integration_run_cancel() {
         Err(_) => panic!("cancel timed out after {TEST_TIMEOUT:?}"),
     }
 
+    wait_for_status(&client, run_ref.run_id(), RunStatus::Cancelled).await;
+    assert!(
+        tokio::time::timeout(TEST_TIMEOUT, run_ref.output())
+            .await
+            .unwrap()
+            .is_err()
+    );
     _worker.shutdown().await.unwrap();
 }
 
@@ -607,4 +641,762 @@ async fn integration_log_retrieval() {
     );
 
     _worker.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_fresh_client_dag_outputs_and_reattachment() {
+    let owner = real_client().await;
+    let first = owner.task::<serde_json::Value, serde_json::Value>("fresh-first");
+    let last = owner.task::<serde_json::Value, String>("fresh-last");
+    let side = owner.task::<serde_json::Value, String>("fresh-side");
+    let failure = owner.task::<serde_json::Value, String>("fresh-on-failure");
+    let worker = owner
+        .worker("fresh-output-worker")
+        .register_task(&first, |_, _: Ctx| async {
+            Ok(serde_json::json!({"intermediate":true}))
+        })
+        .register_task(&last, |_, _: Ctx| async { Ok("finished".to_owned()) })
+        .register_task(&side, |_, _: Ctx| async { Ok("side".to_owned()) })
+        .register_task(&failure, |_, _: Ctx| async {
+            Ok("failure-handler".to_owned())
+        })
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(10))
+        .await
+        .unwrap();
+    owner
+        .register_workflow(
+            WorkflowDeclaration::<serde_json::Value, String>::new("fresh-output")
+                .step(&first, TaskConfig::default())
+                .step_after(&last, &[&first], TaskConfig::default())
+                .on_failure_task(&failure),
+        )
+        .await
+        .unwrap();
+
+    let producer = real_client().await;
+    let run = producer
+        .workflow::<serde_json::Value, String>("fresh-output")
+        .run_no_wait(serde_json::json!({}), RunOpts::default())
+        .await
+        .unwrap();
+    let old_run_id = run.run_id().0.clone();
+    let output = tokio::time::timeout(TEST_TIMEOUT, run.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output, "finished");
+
+    // An older run must retain its own graph after a new version adds another leaf.
+    owner
+        .register_workflow(
+            WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("fresh-output")
+                .step(&first, TaskConfig::default())
+                .step_after(&last, &[&first], TaskConfig::default())
+                .step_after(&side, &[&first], TaskConfig::default())
+                .on_failure_task(&failure),
+        )
+        .await
+        .unwrap();
+    let resumed = real_client().await;
+    let old = tokio::time::timeout(TEST_TIMEOUT, resumed.run_ref::<String>(old_run_id).output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(old, "finished");
+    // Hatchet v0.94.14 caches workflow-name -> version for five seconds
+    // (pkg/repository/shared.go). Let that engine cache expire before checking
+    // the new version; the old run above must still use its original graph.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let branched = tokio::time::timeout(
+        TEST_TIMEOUT,
+        resumed
+            .workflow::<serde_json::Value, serde_json::Value>("fresh-output")
+            .run(serde_json::json!({}), RunOpts::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        branched,
+        serde_json::json!({"fresh-last":"finished", "fresh-side":"side"})
+    );
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_failed_run_status() {
+    let client = real_client().await;
+    let task = client.task::<serde_json::Value, String>("failed-status-task");
+    let worker = client
+        .worker("failed-status-worker")
+        .register_task(&task, |_, _: Ctx| async {
+            Err(Error::non_retryable("intentional status regression test"))
+        })
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(10))
+        .await
+        .unwrap();
+    client
+        .register_workflow(
+            WorkflowDeclaration::<serde_json::Value, String>::new("failed-status")
+                .step(&task, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    let run = client
+        .workflow::<serde_json::Value, String>("failed-status")
+        .run_no_wait(serde_json::json!({}), RunOpts::default())
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(TEST_TIMEOUT, run.output())
+        .await
+        .unwrap();
+    assert!(result.is_err());
+    wait_for_status(&client, run.run_id(), RunStatus::Failed).await;
+    let failed = client
+        .runs()
+        .list_filtered(RunFilter {
+            status: Some(RunStatus::Failed),
+            ..RunFilter::default()
+        })
+        .await
+        .unwrap();
+    assert!(failed.iter().any(|record| &record.run_id == run.run_id()));
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_delayed_workflow_executes() {
+    let client = real_client().await;
+    let task = client.task::<serde_json::Value, u32>("delayed-task");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+    let worker = client
+        .worker("delayed-worker")
+        .register_task(&task, move |input, _: Ctx| {
+            let tx = Arc::clone(&tx);
+            async move {
+                let input = input["value"].as_u64().unwrap() as u32;
+                if let Some(sender) = tx.lock().await.take() {
+                    let _ = sender.send(input);
+                }
+                Ok(input * 2)
+            }
+        })
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(10))
+        .await
+        .unwrap();
+    client
+        .register_workflow(
+            WorkflowDeclaration::<serde_json::Value, u32>::new("delayed-workflow")
+                .step(&task, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    client
+        .workflow::<serde_json::Value, u32>("delayed-workflow")
+        .delay(
+            "delayed-regression",
+            Duration::from_secs(2),
+            serde_json::json!({"value":21}),
+        )
+        .await
+        .unwrap();
+    let input = tokio::time::timeout(TEST_TIMEOUT, rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input, 21);
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "schedule must not execute immediately"
+    );
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_durable_recovery_branch_preserves_prior_memos() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let owner = real_client().await;
+    let task = owner.durable_task::<serde_json::Value, serde_json::Value>("recovery-branch-task");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let worker = owner
+        .worker("recovery-branch-worker")
+        .register_durable_task(&task, move |_, ctx: DurableCtx| {
+            let calls = Arc::clone(&calls);
+            let tx = tx.clone();
+            async move {
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let before = ctx.memo("before-branch", serde_json::json!(call)).await?;
+                let after = ctx.memo("after-branch", serde_json::json!(call)).await?;
+                tx.send((call, ctx.task_run_id().to_owned())).unwrap();
+                Ok(serde_json::json!({"before":before,"after":after}))
+            }
+        })
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(10))
+        .await
+        .unwrap();
+    owner
+        .register_workflow(
+            WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("recovery-branch")
+                .durable_step(&task, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    let run = owner
+        .workflow::<serde_json::Value, serde_json::Value>("recovery-branch")
+        .run_no_wait(serde_json::json!({}), RunOpts::default())
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(TEST_TIMEOUT, run.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, serde_json::json!({"before":1,"after":1}));
+    let (_, task_id) = rx.recv().await.unwrap();
+    let operator = real_client().await;
+    let resolved = operator
+        .runs()
+        .get_task_external_id(run.run_id(), "recovery-branch-task")
+        .await
+        .unwrap();
+    assert_eq!(resolved.as_deref(), Some(task_id.as_str()));
+    assert_eq!(
+        operator
+            .runs()
+            .get_task_external_id(run.run_id(), "missing")
+            .await
+            .unwrap(),
+        None
+    );
+    // The pinned engine initializes durable logs on branch 1. Fork its second
+    // node so the first memo is inherited and the second memo is recomputed.
+    let branch = operator
+        .runs()
+        .branch_durable_task(&task_id, 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(branch.task_external_id, task_id);
+    assert_eq!(branch.node_id, 2);
+    assert!(branch.branch_id > 1);
+    let (call, rerun_task) = tokio::time::timeout(TEST_TIMEOUT, rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(call, 2);
+    assert_eq!(rerun_task, task_id);
+    // The original client's prior output must not remain cached after a branch
+    // initiated by a separate client.
+    let second = tokio::time::timeout(TEST_TIMEOUT, run.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second, serde_json::json!({"before":1,"after":2}));
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_durable_recovery_restore_preserves_task_and_memo() {
+    let config = HatchetConfig::from_env().unwrap();
+    let transport = Arc::new(GrpcTransport::from_config(config).await.unwrap());
+    let owner = Client::new(Arc::clone(&transport));
+    let task = owner.durable_task::<serde_json::Value, serde_json::Value>("recovery-restore-task");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stopped_tx, mut stopped_rx) = tokio::sync::mpsc::unbounded_channel();
+    let worker=owner.worker("recovery-restore-worker")
+        .register_durable_task(&task,move |_,ctx:DurableCtx| {
+            let tx=tx.clone();let stopped=stopped_tx.clone();
+            async move {
+                let invocation=ctx.invocation_count();
+                let seed=ctx.memo("restore-seed",serde_json::json!(invocation)).await?;
+                tx.send((ctx.task_run_id().to_owned(),invocation)).unwrap();
+                if invocation==1 {
+                    ctx.cancelled().await;
+                    stopped.send(()).unwrap();
+                    return Err(Error::Worker("evicted invocation stopped".to_owned()));
+                }
+                Ok(serde_json::json!({"seed":seed,"invocation":invocation,"task":ctx.task_run_id()}))
+            }
+        }).build().start().unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(10))
+        .await
+        .unwrap();
+    owner
+        .register_workflow(
+            WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("recovery-restore")
+                .durable_step(&task, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    let run = owner
+        .workflow::<serde_json::Value, serde_json::Value>("recovery-restore")
+        .run_no_wait(serde_json::json!({}), RunOpts::default())
+        .await
+        .unwrap();
+    let (task_id, invocation) = tokio::time::timeout(TEST_TIMEOUT, rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(invocation, 1);
+    transport
+        .durable_listener()
+        .unwrap()
+        .send_evict_invocation(
+            &task_id,
+            invocation as i32,
+            Some("restore parity test".to_owned()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, stopped_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let operator = real_client().await;
+    assert!(
+        operator
+            .runs()
+            .restore_task(&task_id)
+            .await
+            .unwrap()
+            .requeued
+    );
+    let (restored_id, restored_invocation) = tokio::time::timeout(TEST_TIMEOUT, rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored_id, task_id);
+    assert!(restored_invocation > invocation);
+    let result = tokio::time::timeout(TEST_TIMEOUT, run.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["seed"], 1);
+    assert_eq!(result["invocation"], restored_invocation);
+    assert_eq!(result["task"], task_id);
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_streaming_is_incremental_across_a_long_idle_gap() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let owner = real_client().await;
+    let publishing = owner.task::<serde_json::Value, serde_json::Value>("live-stream-publisher");
+    let finish = owner.task::<serde_json::Value, serde_json::Value>("live-stream-finish");
+    let begin = Arc::new(tokio::sync::Notify::new());
+    let finish_gate = Arc::new(tokio::sync::Notify::new());
+    let completed = Arc::new(AtomicBool::new(false));
+    let worker = owner
+        .worker("live-stream-worker")
+        .register_task(&publishing, {
+            let begin = Arc::clone(&begin);
+            let finish_gate = Arc::clone(&finish_gate);
+            move |_, ctx: Ctx| {
+                let begin = Arc::clone(&begin);
+                let finish_gate = Arc::clone(&finish_gate);
+                async move {
+                    assert_ne!(
+                        ctx.task_run_id(),
+                        ctx.workflow_run_id().0,
+                        "DAG publication must use task identity"
+                    );
+                    // The pinned engine sends subscription headers with its first
+                    // event. Publish readiness values until the consumer confirms it
+                    // has actually received one, then start the ordered test data.
+                    loop {
+                        ctx.put_stream(serde_json::json!("ready")).await?;
+                        tokio::select! {
+                            _=begin.notified()=>break,
+                            _=tokio::time::sleep(Duration::from_millis(100))=>{}
+                        }
+                    }
+                    ctx.put_stream(serde_json::json!({"chunk":1})).await?;
+                    tokio::time::sleep(Duration::from_secs(6)).await;
+                    ctx.put_stream(serde_json::json!({"chunk":2})).await?;
+                    finish_gate.notified().await;
+                    Ok(serde_json::json!({"published":2}))
+                }
+            }
+        })
+        .register_task(&finish, {
+            let completed = Arc::clone(&completed);
+            move |_, _: Ctx| {
+                let completed = Arc::clone(&completed);
+                async move {
+                    completed.store(true, Ordering::SeqCst);
+                    Ok(serde_json::json!({"done":true}))
+                }
+            }
+        })
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(10))
+        .await
+        .unwrap();
+    owner
+        .register_workflow(
+            WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("live-stream-dag")
+                .step(&publishing, TaskConfig::default())
+                .step_after(&finish, &[&publishing], TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    let run = owner
+        .workflow::<serde_json::Value, serde_json::Value>("live-stream-dag")
+        .run_no_wait(serde_json::json!({}), RunOpts::default())
+        .await
+        .unwrap();
+    let consumer = real_client().await;
+    let mut stream = tokio::time::timeout(
+        TEST_TIMEOUT,
+        consumer.runs().subscribe_to_stream(run.run_id()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let ready = tokio::time::timeout(TEST_TIMEOUT, stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready, serde_json::json!("ready"));
+    begin.notify_one();
+    let first = tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let value = stream.next().await.unwrap().unwrap();
+            if value != serde_json::json!("ready") {
+                break value;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(first, serde_json::json!({"chunk":1}));
+    assert!(!completed.load(Ordering::SeqCst));
+    let second = tokio::time::timeout(TEST_TIMEOUT, stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(second, serde_json::json!({"chunk":2}));
+    assert!(!completed.load(Ordering::SeqCst));
+    finish_gate.notify_one();
+    assert!(
+        tokio::time::timeout(TEST_TIMEOUT, stream.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let output = tokio::time::timeout(TEST_TIMEOUT, run.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output, serde_json::json!({"done":true}));
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires live Hatchet engine credentials; run explicitly with --ignored"]
+async fn integration_management_search_bulk_controls_and_resources() {
+    use serde_json::json;
+    let client = real_client().await;
+    assert!(
+        client
+            .engine_version()
+            .await
+            .unwrap()
+            .supports(EngineFeature::DurableEviction)
+    );
+    assert!(!client.tenant().get().await.unwrap().slug.is_empty());
+    let task = client.task::<serde_json::Value, serde_json::Value>("management-batch2-task");
+    let name = "management-batch2";
+    client
+        .register_workflow(
+            WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new(name)
+                .step(&task, TaskConfig::default()),
+        )
+        .await
+        .unwrap();
+    let filter = client
+        .filters()
+        .create(name, "batch2", "input.ok == true")
+        .await
+        .unwrap();
+    let record = client.filters().get_record(&filter.name).await.unwrap();
+    assert_eq!(record.scope, "batch2");
+    let updated = client
+        .filters()
+        .update_options(
+            &filter.name,
+            FilterUpdate {
+                scope: Some("batch2-updated".into()),
+                payload: Some(json!({"limit":5}).as_object().unwrap().clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.scope, "batch2-updated");
+    assert_eq!(updated.payload["limit"], 5);
+    client.filters().delete(&filter.name).await.unwrap();
+    let cel = client
+        .cel()
+        .debug("input.ok == true", &json!({"ok":true}))
+        .await
+        .unwrap();
+    assert_eq!(cel.status, "SUCCESS");
+    assert_eq!(cel.output, Some(true));
+    let webhook_name = "management-batch2-webhook";
+    let webhook = client
+        .webhooks()
+        .create_inbound(WebhookCreate {
+            name: webhook_name.into(),
+            source_name: WebhookSource::Generic,
+            auth: WebhookAuth::ApiKey {
+                header_name: "X-Test-Key".into(),
+                api_key: "disposable-local-key".into(),
+            },
+            options: WebhookUpdate {
+                event_key_expression: Some("'management-test'".into()),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(webhook.name, webhook_name);
+    assert_eq!(
+        client.webhooks().get(webhook_name).await.unwrap().auth_type,
+        "API_KEY"
+    );
+    assert_eq!(
+        client
+            .webhooks()
+            .update(
+                webhook_name,
+                WebhookUpdate {
+                    static_payload: Some(json!({"fixed":true}).as_object().unwrap().clone()),
+                    ..Default::default()
+                }
+            )
+            .await
+            .unwrap()
+            .configuration
+            .static_payload
+            .unwrap()["fixed"],
+        true
+    );
+    assert!(
+        client
+            .webhooks()
+            .list_inbound()
+            .await
+            .unwrap()
+            .iter()
+            .any(|w| w.name == webhook_name)
+    );
+    client
+        .webhooks()
+        .delete_inbound(webhook_name)
+        .await
+        .unwrap();
+    let schedule = client
+        .schedules()
+        .create(
+            name,
+            "management-schedule",
+            "2099-01-01T00:00:00Z",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let schedule = client
+        .schedules()
+        .reschedule(&schedule.name, "2099-02-01T00:00:00Z")
+        .await
+        .unwrap();
+    assert!(schedule.expression.starts_with("2099-02-01"));
+    let update = client
+        .schedules()
+        .bulk_update(vec![ScheduleUpdate {
+            id: schedule.name.clone(),
+            trigger_at: "2099-03-01T00:00:00Z".into(),
+        }])
+        .await
+        .unwrap();
+    assert!(update.errors.is_empty(), "{:?}", update.errors);
+    assert_eq!(update.updated_ids, vec![schedule.name.clone()]);
+    let deleted = client
+        .schedules()
+        .bulk_delete(vec![schedule.name.clone()])
+        .await
+        .unwrap();
+    assert!(deleted.errors.is_empty());
+    assert_eq!(deleted.deleted_ids, vec![schedule.name]);
+    assert!(matches!(
+        client
+            .workflows()
+            .pause(
+                name,
+                WorkflowPauseOptions {
+                    paused_workflow_queue_ttl: "1h".into(),
+                    paused_workflow_cron_run_queue_behavior: PausedRunBehavior::Queue,
+                    paused_workflow_scheduled_run_queue_behavior: PausedRunBehavior::Queue
+                }
+            )
+            .await,
+        Err(Error::UnsupportedOperation(_))
+    ));
+    let opts = RunOpts {
+        additional_metadata: std::collections::HashMap::from([(
+            "batch".into(),
+            "management-2".into(),
+        )]),
+        ..Default::default()
+    };
+    let workflow = client.workflow::<serde_json::Value, serde_json::Value>(name);
+    let first = workflow
+        .run_no_wait(json!({"ok":true}), opts.clone())
+        .await
+        .unwrap();
+    let second = workflow
+        .run_no_wait(json!({"ok":true}), opts)
+        .await
+        .unwrap();
+    let query = RunQuery {
+        workflow_names: vec![name.into()],
+        additional_metadata: std::collections::BTreeMap::from([(
+            "batch".into(),
+            "management-2".into(),
+        )]),
+        ..Default::default()
+    };
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let page = client
+                .runs()
+                .list_page(RunListOptions {
+                    filter: query.clone(),
+                    limit: Some(1),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if !page.rows.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let cancelled = client
+        .runs()
+        .cancel_many(RunSelection::ExternalIds(vec![
+            first.run_id().0.clone(),
+            second.run_id().0.clone(),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.ids.len(), 2);
+    wait_for_status(&client, first.run_id(), RunStatus::Cancelled).await;
+    wait_for_status(&client, second.run_id(), RunStatus::Cancelled).await;
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let metrics = client
+                .metrics()
+                .get_task_status_metrics(RunListOptions {
+                    filter: query.clone(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if metrics
+                .iter()
+                .any(|m| m.status == "CANCELLED" && m.count >= 2)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut replay_query = query;
+    replay_query.statuses = vec![RunStatus::Cancelled];
+    let replayed = client
+        .runs()
+        .replay_many(RunSelection::Filter(replay_query))
+        .await
+        .unwrap();
+    assert_eq!(replayed.ids.len(), 2);
+    let worker = client
+        .worker("management-batch2-worker")
+        .register_task(&task, |input, _: Ctx| async move { Ok(input) })
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(10))
+        .await
+        .unwrap();
+    for run in [&first, &second] {
+        assert_eq!(
+            tokio::time::timeout(TEST_TIMEOUT, run.output())
+                .await
+                .unwrap()
+                .unwrap()["ok"],
+            true
+        );
+    }
+    assert!(
+        client
+            .runs()
+            .get_details(first.run_id())
+            .await
+            .unwrap()
+            .done
+    );
+    client.metrics().get_task_queue_metrics().await.unwrap();
+    client.metrics().get_task_stats().await.unwrap();
+    // This baseline fixture deliberately has no Prometheus federation server.
+    let error = client
+        .metrics()
+        .scrape_prometheus_metrics()
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Prometheus metrics are not enabled"),
+        "{error}"
+    );
+    worker.shutdown().await.unwrap();
+    client.workflows().delete(name).await.unwrap();
+    assert!(client.workflows().get(name).await.is_err());
 }

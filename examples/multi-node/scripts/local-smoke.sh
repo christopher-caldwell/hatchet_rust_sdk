@@ -15,11 +15,20 @@ STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 CURRENT_STAGE=initialization
 CLEANED_UP=0
 SDK_INTEGRATION_RAN=false
+SDK_INTEGRATION_TESTS=0
 
 perform_cleanup() {
   if [[ "$CLEANED_UP" == "1" ]]; then return; fi
   if [[ -n "${ORDERS_PID}" ]]; then kill "${ORDERS_PID}" 2>/dev/null || true; fi
   if [[ -n "${NOTIFICATIONS_PID}" ]]; then kill "${NOTIFICATIONS_PID}" 2>/dev/null || true; fi
+  for pid in "${ORDERS_PID}" "${NOTIFICATIONS_PID}"; do
+    [[ -n "$pid" ]] || continue
+    for _ in $(seq 1 50); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+  done
   wait "${ORDERS_PID}" 2>/dev/null || true
   wait "${NOTIFICATIONS_PID}" 2>/dev/null || true
   if [[ -n "${SMOKE_TEST_MARKER:-}" ]]; then rm -rf "${SMOKE_TEST_MARKER}"; fi
@@ -40,11 +49,20 @@ trap 'echo "smoke_error_stage=$CURRENT_STAGE line=$LINENO"' ERR
 
 if [[ -n "${SMOKE_TEST_CLEANUP_ONLY:-}" ]]; then
   mkdir -p "${SMOKE_TEST_MARKER:?SMOKE_TEST_MARKER is required}"
+  if [[ -n "${SMOKE_TEST_CHILD_PID_FILE:-}" ]]; then
+    sleep 60 &
+    ORDERS_PID=$!
+    printf '%s\n' "$ORDERS_PID" >"$SMOKE_TEST_CHILD_PID_FILE"
+  fi
   if [[ "$SMOKE_TEST_CLEANUP_ONLY" == "failure" ]]; then exit 23; fi
   exit 0
 fi
 
 mkdir -p "$EXAMPLE/target/smoke"
+CURRENT_STAGE=worker_build
+cargo build --locked --manifest-path "$EXAMPLE/Cargo.toml" --bins
+EXAMPLE_TARGET=$(cargo metadata --locked --manifest-path "$EXAMPLE/Cargo.toml" \
+  --no-deps --format-version 1 | jq -r .target_directory)
 CURRENT_STAGE=postgres_start
 docker network create "$NETWORK" >/dev/null
 docker volume create "$VOLUME" >/dev/null
@@ -105,13 +123,19 @@ export HATCHET_CLIENT_NAMESPACE=local-demo
 export HATCHET_CLIENT_LOG_LEVEL=info
 
 CURRENT_STAGE=worker_start
-(cd "$EXAMPLE" && HATCHET_NODE=orders PORT=19081 cargo run --locked >target/smoke/orders.log 2>&1) &
+HATCHET_NODE=orders PORT=19081 "$EXAMPLE_TARGET/debug/hatchet-multi-node" \
+  >"$EXAMPLE/target/smoke/orders.log" 2>&1 &
 ORDERS_PID=$!
-(cd "$EXAMPLE" && HATCHET_NODE=notifications PORT=19082 cargo run --locked >target/smoke/notifications.log 2>&1) &
+HATCHET_NODE=notifications PORT=19082 "$EXAMPLE_TARGET/debug/hatchet-multi-node" \
+  >"$EXAMPLE/target/smoke/notifications.log" 2>&1 &
 NOTIFICATIONS_PID=$!
 
 for endpoint in http://127.0.0.1:19081/health http://127.0.0.1:19082/health; do
-  for _ in $(seq 1 120); do curl -fsS "$endpoint" >/dev/null 2>&1 && break; sleep 1; done
+  for _ in $(seq 1 120); do
+    kill -0 "$ORDERS_PID" 2>/dev/null && kill -0 "$NOTIFICATIONS_PID" 2>/dev/null
+    curl -fsS "$endpoint" >/dev/null 2>&1 && break
+    sleep 1
+  done
   curl -fsS "$endpoint" >/dev/null
 done
 for log in "$EXAMPLE/target/smoke/orders.log" "$EXAMPLE/target/smoke/notifications.log"; do
@@ -142,6 +166,10 @@ if [[ "${SMOKE_RUN_SDK_INTEGRATION:-1}" != "0" ]]; then
     cargo test --locked -p another-hatchet-sdk --features integration \
       --test integration -- --ignored --nocapture --test-threads=1
   ) 2>&1 | tee "$EXAMPLE/target/smoke/sdk-integration.log"
+  SDK_INTEGRATION_TESTS=$(sed -nE \
+    's/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;.*/\1/p' \
+    "$EXAMPLE/target/smoke/sdk-integration.log" | tail -n 1)
+  [[ "$SDK_INTEGRATION_TESTS" =~ ^[0-9]+$ && "$SDK_INTEGRATION_TESTS" -gt 0 ]]
 fi
 
 CURRENT_STAGE=post_run_worker_recovery
@@ -160,11 +188,12 @@ jq -n \
   --arg hatchet_image "$HATCHET_IMAGE" \
   --arg run_id "$RUN_ID" \
   --argjson sdk_integration_ran "$SDK_INTEGRATION_RAN" \
+  --argjson sdk_integration_tests "$SDK_INTEGRATION_TESTS" \
   --argjson elapsed_seconds "$SECONDS" \
   '{status:"pass",started_at:$started_at,finished_at:$finished_at,
     hatchet_image:$hatchet_image,workflow:"rust-order-processing",run_id:$run_id,
     elapsed_seconds:$elapsed_seconds,sdk_integration_ran:$sdk_integration_ran,
-    sdk_integration_tests:(if $sdk_integration_ran then 9 else 0 end),
+    sdk_integration_tests:$sdk_integration_tests,
     post_run_worker_health:"pass",ordered_steps:[
       {worker:"rust-orders-worker",action:"process-order"},
       {worker:"rust-notifications-worker",action:"send-order-receipt"}

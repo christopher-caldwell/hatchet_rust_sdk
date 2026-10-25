@@ -68,19 +68,30 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    let mut last_error = None;
+    retry_if(f, config, Error::is_retryable).await
+}
+
+/// Shares the retry budget while preserving provider-specific error classification.
+pub(crate) async fn retry_if<F, Fut, T, E>(
+    f: F,
+    config: &RetryConfig,
+    is_retryable: impl Fn(&E) -> bool,
+) -> std::result::Result<T, E>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+{
     let mut backoff = config.initial_backoff;
     let started_at = tokio::time::Instant::now();
+    let mut attempt = 0;
 
-    for attempt in 0..=config.max_retries {
+    loop {
         match f().await {
             Ok(value) => return Ok(value),
             Err(error) => {
-                if !error.is_retryable() || attempt == config.max_retries {
+                if !is_retryable(&error) || attempt == config.max_retries {
                     return Err(error);
                 }
-
-                last_error = Some(error);
 
                 let jitter_span = (config.jitter_max_factor - config.jitter_min_factor).max(0.0);
                 let jitter_factor = config.jitter_min_factor + (pseudo_random_f64() * jitter_span);
@@ -91,23 +102,18 @@ where
                     .max_elapsed
                     .is_some_and(|max_elapsed| started_at.elapsed() + capped > max_elapsed)
                 {
-                    return Err(last_error.unwrap_or_else(|| {
-                        Error::Transport("retry max elapsed exceeded".to_owned())
-                    }));
+                    return Err(error);
                 }
 
                 tokio::time::sleep(capped).await;
-
-                // Exponential growth
                 backoff = Duration::from_secs_f64(
                     (backoff.as_secs_f64() * config.backoff_multiplier)
                         .min(config.max_backoff.as_secs_f64()),
                 );
+                attempt += 1;
             }
         }
     }
-
-    Err(last_error.unwrap_or_else(|| Error::Transport("retry exhausted with no error".to_owned())))
 }
 
 /// Retries with default configuration.

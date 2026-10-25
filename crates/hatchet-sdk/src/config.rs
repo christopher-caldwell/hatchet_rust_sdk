@@ -173,7 +173,7 @@ impl HatchetConfig {
             TlsConfig::Insecure => {}
             TlsConfig::System => {
                 endpoint = endpoint
-                    .tls_config(tonic::transport::ClientTlsConfig::new())
+                    .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
                     .map_err(|error| {
                         Error::Transport(format!("system TLS config failed: {error}"))
                     })?;

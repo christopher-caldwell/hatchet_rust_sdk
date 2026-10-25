@@ -10,6 +10,16 @@ this repository has been exercised against that version.
 
 ## Install
 
+The crates have not been published to crates.io yet. Clone this repository and
+use a path dependency while evaluating the SDK (adjust the path for your project):
+
+```toml
+[dependencies]
+another-hatchet-sdk = { path = "../hatchet_rust_sdk/crates/hatchet-sdk" }
+```
+
+After the first registry release, the corresponding installation will be:
+
 ```toml
 [dependencies]
 another-hatchet-sdk = "0.1.0"
@@ -54,14 +64,14 @@ async fn main() -> Result<()> {
         })
         .register_task(&finish, |_input, ctx: InMemoryContext<_>| async move {
             let prepared: serde_json::Value = ctx.parent_output("prepare").await?;
-            Ok(format!("done: {}", prepared["message"]))
+            Ok(format!("done: {}", prepared["message"].as_str().unwrap_or("")))
         })
         .build()
         .start()?;
 
     client
         .register_workflow(
-            WorkflowDeclaration::new("quickstart")
+            WorkflowDeclaration::<serde_json::Value, String>::new("quickstart")
                 .step(&prepare, TaskConfig::default())
                 .step_after(&finish, &[&prepare], TaskConfig::default()),
         )
@@ -137,6 +147,73 @@ health checks, a trigger utility, and local/Railway smoke scripts.
   local declaration when the engine rejects registration.
 - Parent output is selected by task name:
   `ctx.parent_output::<Output>("parent-task").await?`.
+- DAG results select terminal task outputs even when the submitting client did
+  not register the workflow. A single terminal task returns its output directly;
+  multiple terminal tasks return a map keyed by task name.
+- Hatchet v0.94.14 caches workflow versions for five seconds when triggering by
+  name. Allow that cache to expire after deploying a changed workflow graph.
+- An unused failure handler can leave a successful graph's engine status running
+  on v0.94.14. The SDK can return its completed task outputs while status inspection
+  continues to report the engine's state.
+- Concurrent durable operations are serialized through their engine
+  acknowledgments within each task invocation; their subsequent waits can overlap.
+- Run status includes queued, running, completed, failed, cancelled, and unknown
+  engine states. `delay()` schedules an absolute timestamp computed from its duration.
+- Result metadata reads retry transient REST failures and replication lag using
+  `GrpcTransport::with_retry_config`. Each request has a ten-second timeout;
+  `max_elapsed` also bounds the full retry cycle when configured.
+- `runs().get_task_external_id(run_id, task_name)` resolves engine state even
+  for a fresh client; tasks that have not started return `None`.
+- Durable recovery takes a **task external ID**, not a workflow run ID.
+  `branch_durable_task(task_id, node_id, branch_id)` returns the new checkpoint;
+  `restore_task(task_id)` requeues an evicted task without replacing its durable
+  log. These operations require an engine-backed transport.
+- `run.stream_events().await?` and `runs().subscribe_to_stream(run_id).await?`
+  return an incremental `RunEventStream` implementing `futures_core::Stream`.
+  Read it with `while let Some(value) = stream.next().await`; there is no idle
+  cutoff. `run.stream()` remains a convenience that collects until completion.
+  Dropping a stream closes the subscription, and transport errors are returned
+  instead of a successful partial batch.
+- Engine workflow streams are live-only: subscribe while a run is active.
+  They do not replay history or automatically reconnect without a resume cursor.
+  In-memory subscriptions replay their buffered values before following new ones.
+- Recovery responses acknowledge an asynchronous engine operation. Use branch
+  coordinates from the durable log, and observe the new execution before treating
+  an earlier run snapshot as the recovered result.
+- `client.engine_version().await?` fetches a semantic engine release. Capability
+  checks cover slot configuration, durable eviction, observability and retry-after
+  delays using the official SDK prerequisites. Worker startup checks its slot
+  and durable prerequisites; unknown development versions return an error.
+- `runs().list_page(RunListOptions { ..Default::default() })` supports offset,
+  limit, time bounds, multiple workflow names and statuses, metadata, worker,
+  parent-task and event filters. Workflow names are resolved to engine IDs.
+  Pages retain pagination plus execution timestamps, output and metadata in
+  `RunRecord::summary`; `get_details` exposes typed task details.
+- `cancel_many` and `replay_many` take `RunSelection::ExternalIds` or `::Filter`.
+  Omitted filter start times mean one hour ago. Results contain **task** external
+  IDs. Replay preserves the existing workflow ID; it does not create a new run.
+  Management writes are not automatically retried.
+- Workflow deletion, filter lookup/update, CEL debugging, tenant lookup and
+  schedule rescheduling/bulk operations use engine APIs. Bulk schedule responses
+  retain successful IDs and per-item errors. Schedule updates change trigger time.
+  CEL debugging is asynchronous and requires an engine; local transports do not
+  pretend to evaluate expressions.
+- Inbound event webhooks use `webhooks().create_inbound`, `get`, `update`,
+  `list_inbound` and `delete_inbound`, with typed source/authentication options.
+  The older `create(name, url)`, `list` and `delete` methods configure legacy
+  webhook **workers**, a separate engine resource.
+- `metrics()` exposes `get_task_status_metrics`, `get_task_queue_metrics`,
+  `get_task_stats` and `scrape_prometheus_metrics`. Legacy workflow-run and tenant
+  queue count methods return `UnsupportedOperation` on engine clients because
+  the pinned engine deprecated those handlers. Local test counters remain available.
+- Workflow pause/unpause uses the newer pause/queue-policy contract and verifies
+  the returned state. The SDK requires v0.111.0 or later, a conservative support
+  floor verified against that release rather than the earliest possible version.
+  The pinned v0.94.14 engine is rejected before sending a mutation.
+- Prometheus scraping requires the engine's Prometheus federation configuration
+  and any tenant entitlement. Engine rejections are returned with their explanation.
+- Hatchet engine schedules require JSON object inputs. Intermediate DAG outputs
+  consumed by child tasks must also be objects; use structs or JSON object values.
 - Namespaces configured in `HatchetConfig` are applied consistently to
   registration and run handles.
 - `Error::NonRetryable` sets Hatchet's no-retry completion flag.
@@ -188,7 +265,7 @@ For a credential-free, isolated local proof, Docker users can run:
 ```
 
 That command starts the pinned official Hatchet Lite `v0.94.14` image and
-PostgreSQL 16, runs the two-process example, executes all nine live SDK tests
+PostgreSQL 16, runs the two-process example, executes the live SDK tests
 serially—including a scoped, namespaced durable-event lookback—verifies both
 long-lived workers recover to healthy, and removes only the containers, network,
 and volume it created.

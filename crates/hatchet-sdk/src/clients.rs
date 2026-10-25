@@ -16,8 +16,26 @@ use crate::transport::Transport;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
     Queued,
+    Running,
+    Failed,
     Cancelled,
     Completed,
+    Unknown,
+}
+
+/// The checkpoint created by branching an engine-backed durable task.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DurableBranchResult {
+    pub task_external_id: String,
+    pub node_id: i64,
+    pub branch_id: i64,
+}
+
+/// Whether Hatchet requeued an evicted durable task.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RestoreTaskResult {
+    pub requeued: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +46,7 @@ pub struct RunRecord {
     pub opts: RunOpts,
     pub status: RunStatus,
     pub external_task_ids: HashMap<String, String>,
+    pub summary: Option<crate::RunSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +128,7 @@ pub struct LogRecord {
 
 #[derive(Debug, Clone)]
 pub struct FilterDefinition {
+    /// Engine filter UUID; local transports retain their caller-supplied key.
     pub name: String,
     pub expression: String,
 }
@@ -147,6 +167,55 @@ pub(crate) type SharedFeatureState = Arc<RwLock<FeatureState>>;
 pub struct RunFilter {
     pub workflow_name: Option<String>,
     pub status: Option<RunStatus>,
+}
+
+/// Engine-backed run search, with explicit pagination and RFC3339 time bounds.
+#[derive(Debug, Clone, Default)]
+pub struct RunListOptions {
+    pub filter: RunQuery,
+    pub offset: u64,
+    pub limit: Option<u64>,
+    pub worker_id: Option<String>,
+    pub only_tasks: bool,
+    pub parent_task_external_id: Option<String>,
+    pub triggering_event_external_id: Option<String>,
+    pub include_payloads: Option<bool>,
+}
+
+/// A shared selection for search, cancel and replay. Omitted `since` means one hour ago.
+#[derive(Debug, Clone, Default)]
+pub struct RunQuery {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub statuses: Vec<RunStatus>,
+    pub workflow_names: Vec<String>,
+    pub additional_metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Pagination {
+    pub current_page: Option<u64>,
+    pub next_page: Option<u64>,
+    pub num_pages: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunPage {
+    pub rows: Vec<RunRecord>,
+    pub pagination: Option<Pagination>,
+}
+
+/// Exactly one selection is sent to the engine; empty ID selections are rejected.
+#[derive(Debug, Clone)]
+pub enum RunSelection {
+    ExternalIds(Vec<String>),
+    Filter(RunQuery),
+}
+
+/// Task external IDs affected by cancel or replay. These are not workflow run IDs.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TaskMutationResult {
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,14 +258,17 @@ impl<T: Transport> RunsClient<T> {
 
     pub async fn list_filtered(&self, filter: RunFilter) -> Result<Vec<RunRecord>> {
         if let Some(api) = self._transport.rest_api() {
-            let status_str = filter.status.map(|s| match s {
-                RunStatus::Queued => "PENDING",
-                RunStatus::Cancelled => "CANCELLED",
-                RunStatus::Completed => "COMPLETED",
-            });
-            return api
-                .list_runs_filtered(filter.workflow_name.as_deref(), status_str)
-                .await;
+            return Ok(api
+                .list_run_page(&RunListOptions {
+                    filter: RunQuery {
+                        workflow_names: filter.workflow_name.into_iter().collect(),
+                        statuses: filter.status.into_iter().collect(),
+                        ..RunQuery::default()
+                    },
+                    ..RunListOptions::default()
+                })
+                .await?
+                .rows);
         }
         let state = self.state.read().await;
         Ok(state
@@ -211,6 +283,41 @@ impl<T: Transport> RunsClient<T> {
             })
             .cloned()
             .collect())
+    }
+
+    /// Returns an engine page, preserving pagination metadata.
+    pub async fn list_page(&self, options: RunListOptions) -> Result<RunPage> {
+        let api = self._transport.rest_api().ok_or_else(|| {
+            Error::UnsupportedOperation(
+                "advanced run search requires an engine-backed transport".to_owned(),
+            )
+        })?;
+        api.list_run_page(&options).await
+    }
+
+    pub async fn get_details(
+        &self,
+        run_id: &WorkflowRunId,
+    ) -> Result<crate::proto::v1::GetRunDetailsResponse> {
+        self._transport.run_details(run_id).await
+    }
+
+    pub async fn cancel_many(&self, selection: RunSelection) -> Result<TaskMutationResult> {
+        let api = self._transport.rest_api().ok_or_else(|| {
+            Error::UnsupportedOperation(
+                "bulk cancellation requires an engine-backed transport".to_owned(),
+            )
+        })?;
+        api.mutate_runs("cancel", &selection).await
+    }
+
+    pub async fn replay_many(&self, selection: RunSelection) -> Result<TaskMutationResult> {
+        let api = self._transport.rest_api().ok_or_else(|| {
+            Error::UnsupportedOperation(
+                "bulk replay requires an engine-backed transport".to_owned(),
+            )
+        })?;
+        api.mutate_runs("replay", &selection).await
     }
 
     pub async fn cancel(&self, run_id: &WorkflowRunId) -> Result<()> {
@@ -251,6 +358,7 @@ impl<T: Transport> RunsClient<T> {
                 opts: original.opts,
                 status: RunStatus::Queued,
                 external_task_ids: original.external_task_ids,
+                summary: None,
             },
         );
         Ok(replay_id)
@@ -265,32 +373,29 @@ impl<T: Transport> RunsClient<T> {
         WorkflowRunRef::new(run_id, client)
     }
 
-    pub async fn subscribe_to_stream(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>> {
-        let _state = self.state.read().await;
-        self._transport.stream_run(run_id).await
-    }
-
-    pub async fn branch_durable_task(
+    pub async fn subscribe_to_stream(
         &self,
         run_id: &WorkflowRunId,
-        _task_name: &str,
-    ) -> Result<WorkflowRunId> {
-        self.replay(run_id).await
+    ) -> Result<crate::RunEventStream> {
+        self._transport.subscribe_run_stream(run_id).await
     }
 
-    pub async fn restore_task(&self, run_id: &WorkflowRunId, task_name: &str) -> Result<()> {
-        if let Some(api) = self._transport.rest_api() {
-            api.replay_run(&run_id.0).await?;
-            return Ok(());
-        }
-        let mut state = self.state.write().await;
-        let _task_name = task_name;
-        let run = state
-            .runs
-            .get_mut(&run_id.0)
-            .ok_or_else(|| Error::Worker(format!("run not found: {run_id}")))?;
-        run.status = RunStatus::Queued;
-        Ok(())
+    /// Branches a durable task from a node on an existing branch. The engine
+    /// returns the new checkpoint; this does not create a new workflow run ID.
+    pub async fn branch_durable_task(
+        &self,
+        task_external_id: &str,
+        node_id: i64,
+        branch_id: i64,
+    ) -> Result<DurableBranchResult> {
+        self._transport
+            .branch_durable_task(task_external_id, node_id, branch_id)
+            .await
+    }
+
+    /// Requeues an evicted task by task external ID, preserving its durable log.
+    pub async fn restore_task(&self, task_external_id: &str) -> Result<RestoreTaskResult> {
+        self._transport.restore_task(task_external_id).await
     }
 
     pub async fn get_task_external_id(
@@ -298,6 +403,10 @@ impl<T: Transport> RunsClient<T> {
         run_id: &WorkflowRunId,
         task_name: &str,
     ) -> Result<Option<String>> {
+        if let Some(api) = self._transport.rest_api() {
+            let run = api.get_run(&run_id.0).await?;
+            return Ok(run.external_task_ids.get(task_name).cloned());
+        }
         let state = self.state.read().await;
         let run = state
             .runs
@@ -342,16 +451,35 @@ impl<T: Transport> WorkflowsClient<T> {
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
-        if self._transport.rest_api().is_some() {
-            return Err(Error::UnsupportedOperation(
-                "workflow deletion is not implemented for engine-backed clients".to_owned(),
-            ));
+        if let Some(api) = self._transport.rest_api() {
+            return api.delete_workflow(name).await;
         }
         let mut state = self.state.write().await;
         if state.workflows.remove(name).is_none() {
             return Err(Error::Worker(format!("workflow not found: {name}")));
         }
         Ok(())
+    }
+
+    /// Requires the engine's newer pause contract; the pinned v0.94.14 handler is deprecated.
+    pub async fn pause(&self, name: &str, options: crate::WorkflowPauseOptions) -> Result<()> {
+        self._transport
+            .engine_version()
+            .await?
+            .require(crate::EngineFeature::WorkflowPause)?;
+        engine_api(&self._transport)?
+            .pause_workflow(name, Some(&options))
+            .await
+    }
+
+    pub async fn unpause(&self, name: &str) -> Result<()> {
+        self._transport
+            .engine_version()
+            .await?
+            .require(crate::EngineFeature::WorkflowPause)?;
+        engine_api(&self._transport)?
+            .pause_workflow(name, None)
+            .await
     }
 
     pub async fn put(
@@ -449,11 +577,10 @@ impl<T: Transport> SchedulesClient<T> {
         Ok(state.schedules.values().cloned().collect())
     }
 
+    /// On engine clients, updates the trigger time; input and workflow are immutable.
     pub async fn update(&self, schedule: Schedule) -> Result<Schedule> {
-        if self._transport.rest_api().is_some() {
-            return Err(Error::UnsupportedOperation(
-                "schedule updates are not implemented for engine-backed clients".to_owned(),
-            ));
+        if let Some(api) = self._transport.rest_api() {
+            return api.reschedule(&schedule.name, &schedule.expression).await;
         }
         let mut state = self.state.write().await;
         if !state.schedules.contains_key(&schedule.name) {
@@ -479,19 +606,26 @@ impl<T: Transport> SchedulesClient<T> {
         Ok(())
     }
 
-    pub async fn bulk_update(&self, schedules: Vec<Schedule>) -> Result<Vec<Schedule>> {
-        let mut updated = Vec::with_capacity(schedules.len());
-        for schedule in schedules {
-            updated.push(self.update(schedule).await?);
-        }
-        Ok(updated)
+    /// Updates trigger times only, matching the engine contract. All per-item failures are returned.
+    pub async fn bulk_update(
+        &self,
+        updates: Vec<crate::ScheduleUpdate>,
+    ) -> Result<crate::ScheduleBulkUpdateResult> {
+        engine_api(&self._transport)?
+            .bulk_reschedule(&updates)
+            .await
     }
 
-    pub async fn bulk_delete(&self, names: Vec<String>) -> Result<()> {
-        for name in names {
-            self.delete(&name).await?;
-        }
-        Ok(())
+    pub async fn bulk_delete(&self, ids: Vec<String>) -> Result<crate::ScheduleBulkDeleteResult> {
+        engine_api(&self._transport)?
+            .bulk_delete_schedules(&ids)
+            .await
+    }
+
+    pub async fn reschedule(&self, id: &str, trigger_at: &str) -> Result<Schedule> {
+        engine_api(&self._transport)?
+            .reschedule(id, trigger_at)
+            .await
     }
 }
 
@@ -647,15 +781,28 @@ impl<T: Transport> MetricsClient<T> {
         }
     }
 
+    /// Engine task counts grouped by status, including cancelled tasks.
+    pub async fn get_task_status_metrics(
+        &self,
+        options: crate::RunListOptions,
+    ) -> Result<Vec<crate::TaskStatusMetric>> {
+        engine_api(&self._transport)?
+            .task_status_metrics(&options)
+            .await
+    }
+    pub async fn get_task_queue_metrics(&self) -> Result<crate::TaskQueueMetrics> {
+        engine_api(&self._transport)?.task_queue_metrics().await
+    }
+    pub async fn get_task_stats(&self) -> Result<HashMap<String, crate::TaskStat>> {
+        engine_api(&self._transport)?.task_stats().await
+    }
+    pub async fn scrape_prometheus_metrics(&self) -> Result<String> {
+        engine_api(&self._transport)?.scrape_prometheus().await
+    }
+
     pub async fn get_workflow_metrics(&self, workflow_name: &str) -> Result<WorkflowMetrics> {
-        if let Some(api) = self._transport.rest_api() {
-            let m = api.get_workflow_metrics(workflow_name).await?;
-            return Ok(WorkflowMetrics {
-                workflow_name: workflow_name.to_owned(),
-                total_runs: m.total_runs.unwrap_or(0) as usize,
-                queued_runs: m.queued_runs.unwrap_or(0) as usize,
-                cancelled_runs: 0,
-            });
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation("legacy workflow run metrics are deprecated by the engine; use get_task_status_metrics with a workflow filter".to_owned()));
         }
         let state = self.state.read().await;
         let runs = state
@@ -683,12 +830,8 @@ impl<T: Transport> MetricsClient<T> {
     }
 
     pub async fn get_queue_metrics(&self) -> Result<QueueMetrics> {
-        if let Some(api) = self._transport.rest_api() {
-            let m = api.get_queue_metrics().await?;
-            return Ok(QueueMetrics {
-                total_runs: m.total_runs.unwrap_or(0) as usize,
-                queued_runs: m.queued_runs.unwrap_or(0) as usize,
-            });
+        if self._transport.rest_api().is_some() {
+            return Err(Error::UnsupportedOperation("legacy tenant queue metrics are deprecated by the engine; use get_task_queue_metrics".to_owned()));
         }
         let state = self.state.read().await;
         let total_runs = state.runs.len();
@@ -883,10 +1026,12 @@ impl<T: Transport> FiltersClient<T> {
     }
 
     pub async fn get(&self, name: &str) -> Result<FilterDefinition> {
-        if self._transport.rest_api().is_some() {
-            return Err(Error::UnsupportedOperation(
-                "filter lookup is not implemented for engine-backed clients".to_owned(),
-            ));
+        if let Some(api) = self._transport.rest_api() {
+            let record = api.get_filter(name).await?;
+            return Ok(FilterDefinition {
+                name: record.metadata.id,
+                expression: record.expression,
+            });
         }
         let state = self.state.read().await;
         state
@@ -905,10 +1050,20 @@ impl<T: Transport> FiltersClient<T> {
     }
 
     pub async fn update(&self, filter: FilterDefinition) -> Result<FilterDefinition> {
-        if self._transport.rest_api().is_some() {
-            return Err(Error::UnsupportedOperation(
-                "filter updates are not implemented for engine-backed clients".to_owned(),
-            ));
+        if let Some(api) = self._transport.rest_api() {
+            let record = api
+                .update_filter(
+                    &filter.name,
+                    &crate::FilterUpdate {
+                        expression: Some(filter.expression),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            return Ok(FilterDefinition {
+                name: record.metadata.id,
+                expression: record.expression,
+            });
         }
         let mut state = self.state.write().await;
         if !state.filters.contains_key(&filter.name) {
@@ -916,6 +1071,19 @@ impl<T: Transport> FiltersClient<T> {
         }
         state.filters.insert(filter.name.clone(), filter.clone());
         Ok(filter)
+    }
+
+    pub async fn get_record(&self, id: &str) -> Result<crate::FilterRecord> {
+        engine_api(&self._transport)?.get_filter(id).await
+    }
+    pub async fn update_options(
+        &self,
+        id: &str,
+        update: crate::FilterUpdate,
+    ) -> Result<crate::FilterRecord> {
+        engine_api(&self._transport)?
+            .update_filter(id, &update)
+            .await
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
@@ -942,6 +1110,38 @@ impl<T: Transport> WebhooksClient<T> {
             _transport: transport,
             state,
         }
+    }
+
+    /// Creates an inbound event webhook. `create(name, url)` configures a legacy webhook worker.
+    pub async fn create_inbound(
+        &self,
+        options: crate::WebhookCreate,
+    ) -> Result<crate::InboundWebhook> {
+        engine_api(&self._transport)?
+            .create_inbound_webhook(&options)
+            .await
+    }
+    pub async fn get(&self, name: &str) -> Result<crate::InboundWebhook> {
+        engine_api(&self._transport)?
+            .get_inbound_webhook(name)
+            .await
+    }
+    pub async fn update(
+        &self,
+        name: &str,
+        update: crate::WebhookUpdate,
+    ) -> Result<crate::InboundWebhook> {
+        engine_api(&self._transport)?
+            .update_inbound_webhook(name, &update)
+            .await
+    }
+    pub async fn list_inbound(&self) -> Result<Vec<crate::InboundWebhook>> {
+        engine_api(&self._transport)?.list_inbound_webhooks().await
+    }
+    pub async fn delete_inbound(&self, name: &str) -> Result<()> {
+        engine_api(&self._transport)?
+            .delete_inbound_webhook(name)
+            .await
     }
 
     pub async fn create(&self, name: &str, url: &str) -> Result<WebhookDefinition> {
@@ -990,31 +1190,33 @@ impl<T: Transport> CelClient<T> {
         }
     }
 
-    pub fn debug(&self, expression: impl Into<String>, payload: &Value) -> Result<CelDebugResult> {
-        if self._transport.rest_api().is_some() {
-            return Err(Error::UnsupportedOperation(
-                "CEL debugging is not implemented for engine-backed clients".to_owned(),
-            ));
-        }
-        let expression = expression.into();
-        let accepted = !expression.trim().is_empty() && !payload.is_null();
-        let details = if accepted {
-            "expression accepted by local debug evaluator".to_owned()
-        } else {
-            "expression rejected by local debug evaluator".to_owned()
-        };
-        Ok(CelDebugResult {
-            expression,
-            accepted,
-            details,
+    pub async fn debug(
+        &self,
+        expression: impl Into<String>,
+        payload: &Value,
+    ) -> Result<crate::CelEvaluation> {
+        let input = payload.as_object().cloned().ok_or_else(|| {
+            Error::InputValidation(vec!["CEL input must be a JSON object".to_owned()])
+        })?;
+        self.debug_with_options(crate::CelDebugOptions {
+            expression: expression.into(),
+            input,
+            ..Default::default()
         })
+        .await
+    }
+
+    pub async fn debug_with_options(
+        &self,
+        options: crate::CelDebugOptions,
+    ) -> Result<crate::CelEvaluation> {
+        engine_api(&self._transport)?.debug_cel(&options).await
     }
 }
 
 /// Client for tenant-level operations.
 ///
-/// Placeholder for transport-backed tenant operations (API key management,
-/// tenant settings, etc.) that exist in the TS SDK's `features/tenant.ts`.
+/// Fetches details of the authenticated tenant from the engine.
 #[derive(Debug, Clone)]
 pub struct TenantClient<T: Transport> {
     _transport: Arc<T>,
@@ -1025,6 +1227,9 @@ impl<T: Transport> TenantClient<T> {
         Self {
             _transport: transport,
         }
+    }
+    pub async fn get(&self) -> Result<crate::TenantDetails> {
+        engine_api(&self._transport)?.get_tenant().await
     }
 }
 
@@ -1045,6 +1250,7 @@ pub(crate) async fn record_run(
             opts,
             status: RunStatus::Queued,
             external_task_ids: HashMap::new(),
+            summary: None,
         },
     );
 }
@@ -1053,4 +1259,12 @@ fn timestamp_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos())
+}
+
+fn engine_api<T: Transport>(transport: &Arc<T>) -> Result<Arc<crate::rest_client::RestApiClient>> {
+    transport.rest_api().ok_or_else(|| {
+        Error::UnsupportedOperation(
+            "this management operation requires an engine-backed transport".to_owned(),
+        )
+    })
 }

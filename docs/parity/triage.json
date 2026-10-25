@@ -1,0 +1,584 @@
+{
+  "baseline": {
+    "rust_engine": "v0.94.14",
+    "official_revision": "af128ec1672adaf8e3cc4afd339ce5c2c6f08c35"
+  },
+  "scope": "Batches 1 and 2 are implemented and validated. Batches 3 and 4 remain prioritized follow-up work.",
+  "batch_rationale": {
+    "1": "Correct existing public contracts that can replay the wrong work or truncate data; all are supported by the pinned engine.",
+    "2": "Complete operational controls and run discovery; negotiate engine capabilities before enabling newer controls.",
+    "3": "Add production observability and submission guarantees; expand live contract coverage across prior batches.",
+    "4": "Add newer execution modes and language-specific conveniences after checking engine prerequisites."
+  },
+  "batch_1_acceptance": [
+    "Fresh clients resolve named task external IDs from the engine, excluding unstarted task placeholders.",
+    "Branch sends taskExternalId, nodeId and branchId to the durable branch endpoint and preserves the returned checkpoint.",
+    "Restore calls the evicted-task restore endpoint and returns the requeue outcome without replaying a run.",
+    "Streaming yields events as they arrive, survives idle gaps and lasts until completion/cancellation; tests cover errors and consumer drop.",
+    "Actual pinned-engine tests exercise recovery and streaming; focused protocol tests prove wire shapes and failure paths."
+  ],
+  "items": [
+    {
+      "id": "S2",
+      "area": "Fresh-client task external ID lookup",
+      "batch": 1,
+      "order": 1,
+      "status": "complete",
+      "acceptance": "Rust runs().get_task_external_id reads only local FeatureState instead of querying engine run details. Official TS resolves it from engine data.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/clients/rest/runs.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/clients/rest/runs.ts"
+        }
+      ],
+      "validation": [
+        "run_management contract tests",
+        "integration_durable_recovery_branch_preserves_prior_memos",
+        "integration_durable_recovery_restore_preserves_task_and_memo"
+      ],
+      "priority": "P1"
+    },
+    {
+      "id": "R1",
+      "area": "Durable branching",
+      "batch": 1,
+      "order": 2,
+      "status": "complete",
+      "acceptance": "Rust branch_durable_task replays the whole run and has no nodeId or branchId selection. Official APIs branch a durable task at a specific checkpoint.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/runs.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/runs.ts"
+        },
+        {
+          "path": "go/features/runs.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/runs.go"
+        }
+      ],
+      "validation": [
+        "run_management contract tests",
+        "integration_durable_recovery_branch_preserves_prior_memos",
+        "integration_durable_recovery_restore_preserves_task_and_memo"
+      ],
+      "priority": "P1"
+    },
+    {
+      "id": "R2",
+      "area": "Evicted task restoration",
+      "batch": 1,
+      "order": 3,
+      "status": "complete",
+      "acceptance": "Rust restore_task replays a run and ignores the task selector. Official restore operations re-enqueue an evicted task.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/runs.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/runs.ts"
+        },
+        {
+          "path": "go/features/runs.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/runs.go"
+        }
+      ],
+      "validation": [
+        "run_management contract tests",
+        "integration_durable_recovery_branch_preserves_prior_memos",
+        "integration_durable_recovery_restore_preserves_task_and_memo"
+      ],
+      "priority": "P1"
+    },
+    {
+      "id": "R3",
+      "area": "Workflow event streaming",
+      "batch": 1,
+      "order": 4,
+      "status": "complete",
+      "acceptance": "Rust returns Vec<Value> after collecting for at most five seconds and can stop on a short idle interval after receiving an event. It does not expose a continuous consumer stream/channel.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/runs.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/runs.ts"
+        },
+        {
+          "path": "go/features/runs.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/runs.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "run_streaming protocol and in-memory contracts",
+        "integration_streaming_is_incremental_across_a_long_idle_gap"
+      ],
+      "remaining_limitations": [
+        "Engine workflow subscriptions are live-only, without cursor replay or automatic resubscription. Transport errors are surfaced to the consumer."
+      ]
+    },
+    {
+      "id": "O3",
+      "area": "Engine capability negotiation",
+      "batch": 2,
+      "order": 1,
+      "status": "complete",
+      "acceptance": "Rust has no engine-version fetch and capability-gating layer for eviction/newer features; protocol files and live tests remain pinned to v0.94.14.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/worker/worker.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/worker/worker.ts"
+        },
+        {
+          "path": "go/engine_version.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/engine_version.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "capabilities_respect_boundaries_prereleases_and_unknown_versions",
+        "engine_release_is_fetched_and_capabilities_are_available_on_the_feature_client",
+        "unknown_and_older_engine_versions_cannot_silently_start_a_worker",
+        "integration_management_search_bulk_controls_and_resources"
+      ]
+    },
+    {
+      "id": "R4",
+      "area": "Run query and response breadth",
+      "batch": 2,
+      "order": 2,
+      "status": "complete",
+      "acceptance": "Rust RunFilter has one workflow name and one status. List requests have fixed limit 200, fixed time window and no pagination controls. Missing time ranges, metadata/worker/parent/event filters and richer task details on the feature client. Low-level gRPC get_run_details is available.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/clients/rest/runs.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/clients/rest/runs.ts"
+        },
+        {
+          "path": "go/features/runs.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/runs.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "searches_resolve_names_and_preserve_pagination_and_all_filters",
+        "integration_management_search_bulk_controls_and_resources"
+      ]
+    },
+    {
+      "id": "R5",
+      "area": "Bulk or filtered replay and cancellation",
+      "batch": 2,
+      "order": 3,
+      "status": "complete",
+      "acceptance": "Rust exposes one-run cancellation and replay; official clients accept multiple IDs or filter-based selections.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/runs.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/runs.ts"
+        },
+        {
+          "path": "go/features/runs.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/runs.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "bulk_selections_and_replay_use_task_ids_and_never_retry_writes",
+        "legacy_replay_preserves_the_workflow_id_and_rejects_an_empty_acknowledgment",
+        "integration_management_search_bulk_controls_and_resources"
+      ]
+    },
+    {
+      "id": "M1",
+      "area": "Workflow deletion and workflow pause",
+      "batch": 2,
+      "order": 4,
+      "status": "complete",
+      "acceptance": "Engine-backed deletion is unsupported. Workflow-level pause/unpause is absent; pausing a worker is a separate capability. Workflow pause is newer than the Rust engine baseline. Raw workflow put is not counted as missing because register_workflow is the supported Rust equivalent.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/workflows.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/workflows.ts"
+        },
+        {
+          "path": "go/features/workflows.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/workflows.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "workflow_delete_and_pause_use_actual_ids_and_guard_deprecated_engines",
+        "integration_management_search_bulk_controls_and_resources",
+        "workflow_pause_holds_new_runs_until_unpause on v0.111.0"
+      ],
+      "remaining_limitations": [
+        "Workflow pause/unpause uses a conservative SDK support floor of v0.111.0, verified against that release. Earlier releases are rejected; this is not a claim about the first engine release implementing pause."
+      ]
+    },
+    {
+      "id": "M2",
+      "area": "Filter lookup and update",
+      "batch": 2,
+      "order": 5,
+      "status": "complete",
+      "acceptance": "Engine-backed get/update return UnsupportedOperation; create/list/delete exist.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/filters.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/filters.ts"
+        },
+        {
+          "path": "go/features/filters.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/filters.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "filter_crud_uses_workflow_id_scope_and_optional_patch_fields",
+        "integration_management_search_bulk_controls_and_resources"
+      ]
+    },
+    {
+      "id": "M3",
+      "area": "CEL debugging and tenant inspection",
+      "batch": 2,
+      "order": 6,
+      "status": "complete",
+      "acceptance": "CEL debugging is unsupported against the engine; the in-memory evaluator is only a placeholder. TenantClient has no public operation; official clients expose tenant Get. This is not a claim that official tenant clients offer arbitrary API-key management.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/cel.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/cel.ts"
+        },
+        {
+          "path": "typescript/src/v1/client/features/tenant.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/tenant.ts"
+        },
+        {
+          "path": "go/features/cel.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/cel.go"
+        },
+        {
+          "path": "go/features/tenant.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/tenant.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "cel_evaluates_on_the_engine_and_tenant_details_preserve_settings",
+        "integration_management_search_bulk_controls_and_resources"
+      ]
+    },
+    {
+      "id": "M4",
+      "area": "Webhook client breadth",
+      "batch": 2,
+      "order": 7,
+      "status": "complete",
+      "acceptance": "Rust exposes name/url create and list/delete with reduced output. It lacks get/update and the typed source/authentication configurations exposed by official clients.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/webhooks.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/webhooks.ts"
+        },
+        {
+          "path": "go/features/webhooks.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/webhooks.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "inbound_webhooks_have_typed_auth_and_escaped_names_separate_from_workers",
+        "integration_management_search_bulk_controls_and_resources"
+      ]
+    },
+    {
+      "id": "M5",
+      "area": "Schedule updates and bulk management",
+      "batch": 2,
+      "order": 8,
+      "status": "complete",
+      "acceptance": "Rust update returns UnsupportedOperation and bulk_update delegates to it; bulk_delete is sequential. TypeScript exposes actual update/bulk endpoints. Current Go schedules client does not expose these update methods, so this is a TS parity gap.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/schedules.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/schedules.ts"
+        },
+        {
+          "path": "go/features/schedules.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/schedules.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "bulk_schedule_operations_return_partial_success_without_sequential_writes",
+        "integration_management_search_bulk_controls_and_resources"
+      ]
+    },
+    {
+      "id": "M7",
+      "area": "Metrics breadth",
+      "batch": 2,
+      "order": 9,
+      "status": "complete",
+      "acceptance": "Rust exposes reduced workflow/queue counts and hardcodes live cancelled_runs to zero. Missing Go task-queue metrics and richer query parameters; TS additionally exposes status aggregation, task stats and Prometheus scraping.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/metrics.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/metrics.ts"
+        },
+        {
+          "path": "go/features/metrics.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/metrics.go"
+        }
+      ],
+      "priority": "P1",
+      "validation": [
+        "supported_metrics_preserve_cancelled_counts_queue_details_stats_and_text",
+        "integration_management_search_bulk_controls_and_resources"
+      ],
+      "remaining_limitations": [
+        "Pinned-engine legacy workflow and tenant queue metrics handlers are deprecated; their old SDK methods explicitly return UnsupportedOperation. Supported task metrics, task queues and task stats use current endpoints.",
+        "Prometheus text decoding is protocol-tested; the local live engine verifies the disabled-configuration error. A production Prometheus federation server and tenant entitlement are not configured in these tests."
+      ]
+    },
+    {
+      "id": "O1",
+      "area": "Tracing and task middleware",
+      "batch": 3,
+      "order": 1,
+      "status": "pending",
+      "acceptance": "No native OTel spans/context propagation or public middleware pipeline. User-written handler wrappers are possible but not equivalent built-in SDK support.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/client.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/client.ts"
+        },
+        {
+          "path": "typescript/src/clients/hatchet-client/client-config.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/clients/hatchet-client/client-config.ts"
+        },
+        {
+          "path": "go/opentelemetry/instrumentor.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/opentelemetry/instrumentor.go"
+        },
+        {
+          "path": "go/client.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/client.go"
+        }
+      ],
+      "priority": "P2"
+    },
+    {
+      "id": "N1",
+      "area": "Engine idempotency configuration",
+      "batch": 3,
+      "order": 2,
+      "status": "pending",
+      "acceptance": "No workflow/task idempotency key expression, TTL/status-based policy or collision-result handling. Error::DedupeViolation alone does not implement this behavior.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/task.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/task.ts"
+        },
+        {
+          "path": "go/workflow.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/workflow.go"
+        },
+        {
+          "path": "go/errors.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/errors.go"
+        }
+      ],
+      "priority": "P2"
+    },
+    {
+      "id": "M6",
+      "area": "Rate-limit pause",
+      "batch": 3,
+      "order": 3,
+      "status": "pending",
+      "acceptance": "List/upsert exist, but there is no pause-until API for holding queued runs behind a rate-limit key.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/ratelimits.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/ratelimits.ts"
+        },
+        {
+          "path": "go/features/ratelimits.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/features/ratelimits.go"
+        }
+      ],
+      "priority": "P2"
+    },
+    {
+      "id": "S1",
+      "area": "Per-run sticky routing",
+      "batch": 3,
+      "order": 4,
+      "status": "pending",
+      "acceptance": "Workflow sticky policy is rendered and durable child request uses opts.sticky as desired_worker_id. Normal gRPC run dispatch does not consume opts.sticky and explicitly sends desired_worker_id=None.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/admin.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/admin.ts"
+        },
+        {
+          "path": "go/workflow.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/workflow.go"
+        }
+      ],
+      "priority": "P2"
+    },
+    {
+      "id": "V1",
+      "area": "Parity and recovery evidence",
+      "batch": 3,
+      "order": 5,
+      "status": "pending",
+      "acceptance": "There is no CI-enforced mapping from official SDK operations to real-engine behavior tests. Twelve live tests cover core cases; durable eviction/restore/branch, engine restart recovery, large fanout, broad management APIs and full scheduling/concurrency/condition semantics do not have equivalent live coverage. This does not classify implemented but untested primitives as absent.",
+      "official_evidence": [],
+      "priority": "P2"
+    },
+    {
+      "id": "N2",
+      "area": "Engine-coalesced batch tasks",
+      "batch": 4,
+      "order": 1,
+      "status": "pending",
+      "acceptance": "No batch handler/configuration for size/time-based server coalescing and per-member results. Existing run_many/bulk triggering is a distinct capability. Upstream marks batch tasks preview/beta.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/client.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/client.ts"
+        },
+        {
+          "path": "typescript/src/v1/task.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/task.ts"
+        },
+        {
+          "path": "go/workflow.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/workflow.go"
+        },
+        {
+          "path": "go/batch.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/batch.go"
+        }
+      ],
+      "priority": "P3"
+    },
+    {
+      "id": "N3",
+      "area": "Per-error retry delay",
+      "batch": 4,
+      "order": 2,
+      "status": "pending",
+      "acceptance": "No RetryAfterError equivalent or completion-event retry-after encoding. Static retry counts and backoff exist. Go gates this feature at engine v0.111.0, above Rust v0.94.14.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/task.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/task.ts"
+        },
+        {
+          "path": "go/errors.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/errors.go"
+        },
+        {
+          "path": "go/engine_version.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/engine_version.go"
+        }
+      ],
+      "priority": "P3"
+    },
+    {
+      "id": "N5",
+      "area": "Durable topic streams",
+      "batch": 4,
+      "order": 3,
+      "status": "pending",
+      "acceptance": "No streams feature client for publish, resumable cursor-based events, reset and topic metadata. This is distinct from workflow event streaming and is currently a preview feature. Not counted as a Go feature-client gap.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/features/streams.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/features/streams.ts"
+        }
+      ],
+      "priority": "P3"
+    },
+    {
+      "id": "N4",
+      "area": "Embedded real-engine mode",
+      "batch": 4,
+      "order": 4,
+      "status": "pending",
+      "acceptance": "Rust has InMemoryTransport and Docker smoke scripts, but no supported API for booting an embedded real engine with persistence.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/embedded.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/embedded.ts"
+        },
+        {
+          "path": "go/embedded.go",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/embedded.go"
+        }
+      ],
+      "priority": "P3"
+    },
+    {
+      "id": "O2",
+      "area": "Runtime schema validation",
+      "batch": 4,
+      "order": 5,
+      "status": "pending",
+      "acceptance": "Rust has typed serde inputs/outputs and a handwritten schema subset covering type, enum, required, properties and items. It lacks broad constraint/composition/ref handling and automatic schema generation comparable to TS Zod integration.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/declaration.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/declaration.ts"
+        }
+      ],
+      "priority": "P3"
+    },
+    {
+      "id": "O4",
+      "area": "Health probe semantics",
+      "batch": 4,
+      "order": 6,
+      "status": "pending",
+      "acceptance": "Rust health server returns the same connection-dependent health response for every request path. It does not distinguish process liveness from readiness as TS /livez and /readyz do.",
+      "official_evidence": [
+        {
+          "path": "typescript/src/v1/client/worker/health-server.ts",
+          "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/worker/health-server.ts"
+        }
+      ],
+      "priority": "P3"
+    }
+  ],
+  "batch_1_status": "complete",
+  "priority_meaning": {
+    "P1": "Correctness and operational reliability on the supported engine.",
+    "P2": "Production integration and submission guarantees after capability checks.",
+    "P3": "Newer execution modes and developer conveniences, some requiring engine upgrades."
+  },
+  "batch_2_status": "complete",
+  "batch_1_validation_summary": {
+    "verified_at_utc": "2026-10-25T04:35:13.170244+00:00",
+    "engine": "v0.94.14",
+    "workspace_tests": 121,
+    "no_default_tests": 119,
+    "standalone_tests": 7,
+    "live_tests": 15,
+    "quality_gates": "format, strict Clippy, strict rustdoc, Rust 1.85 and exact-archive preflight passed",
+    "security_advisories": 0
+  },
+  "validation_summary": {
+    "verified_at_utc": "2026-10-25T05:09:04.643308+00:00",
+    "engines": {
+      "v0.94.14": 16,
+      "v0.111.0": 1
+    },
+    "workspace_tests": 133,
+    "no_default_tests": 131,
+    "standalone_tests": 7,
+    "live_tests": 17,
+    "quality_gates": "format, strict Clippy, strict rustdoc and Rust 1.85.1 passed; exact-archive preflight recorded in docs/parity/batch-2.md and local completion report",
+    "security_advisories": 0
+  }
+}

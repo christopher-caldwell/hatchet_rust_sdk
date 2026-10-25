@@ -16,7 +16,7 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::{Request, Status};
 
-use crate::clients::LogRecord;
+use crate::clients::{DurableBranchResult, LogRecord, RestoreTaskResult};
 use crate::config::{
     HatchetConfig, apply_namespace, apply_workflow_namespace, normalize_namespace,
 };
@@ -28,7 +28,7 @@ use crate::rest_client::RestApiClient;
 use crate::retry::{RetryConfig, retry};
 use crate::transport::{Transport, WorkerStartOpts, WorkflowRegistration};
 use crate::worker::TaskContextData;
-use crate::workflow::{WorkflowDeclaration, workflow_leaf_names};
+use crate::workflow::WorkflowDeclaration;
 
 const MAX_COMPLETED_RUNS: usize = 1_024;
 
@@ -48,11 +48,9 @@ pub struct GrpcTransport {
     retry_config: RetryConfig,
     /// Worker ID assigned after registration (set by the worker startup flow).
     worker_id: Arc<RwLock<Option<String>>>,
-    workflow_output_tasks: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    run_output_tasks: Arc<Mutex<HashMap<WorkflowRunId, Vec<String>>>>,
     completed: Arc<Mutex<HashMap<WorkflowRunId, Result<Value>>>>,
     log_records: Arc<Mutex<Vec<LogRecord>>>,
-    running_cancellations: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    running_cancellations: Arc<Mutex<HashMap<String, Arc<tokio_util::sync::CancellationToken>>>>,
     durable_listener:
         Arc<std::sync::RwLock<Option<Arc<crate::durable_listener::DurableListenerClient>>>>,
     rest_api_client: Arc<RestApiClient>,
@@ -82,10 +80,11 @@ impl GrpcTransport {
 
         let rest_client = build_rest_client(&config)?;
         let rest_base = format!("{}/api/v1", config.server_url.trim_end_matches('/'));
-        let rest_api_client = RestApiClient::new(
+        let rest_api_client = RestApiClient::new_with_namespace(
             rest_client.clone(),
             rest_base.clone(),
             config.tenant_id.clone(),
+            config.namespace.clone(),
         );
         Ok(Self {
             rest: rest_client,
@@ -100,8 +99,6 @@ impl GrpcTransport {
             v1_dispatcher: proto::v1::v1_dispatcher_client::V1DispatcherClient::new(channel),
             retry_config: RetryConfig::default(),
             worker_id: Arc::new(RwLock::new(None)),
-            workflow_output_tasks: Arc::new(RwLock::new(HashMap::new())),
-            run_output_tasks: Arc::new(Mutex::new(HashMap::new())),
             completed: Arc::new(Mutex::new(HashMap::new())),
             log_records: Arc::new(Mutex::new(Vec::new())),
             running_cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -118,7 +115,9 @@ impl GrpcTransport {
         &self.config
     }
 
-    /// Returns a cloned transport with a custom retry policy.
+    /// Returns a cloned transport with a custom retry policy for gRPC calls and
+    /// REST run metadata reads. Metadata requests time out after ten seconds;
+    /// `max_elapsed`, when set, also bounds each metadata read's full retry cycle.
     #[must_use]
     pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
         self.retry_config = retry_config;
@@ -170,6 +169,11 @@ impl GrpcTransport {
         labels: HashMap<String, String>,
         slot_config: HashMap<String, i32>,
     ) -> Result<proto::dispatcher::WorkerRegisterResponse> {
+        if !slot_config.is_empty() {
+            self.engine_version()
+                .await?
+                .require(crate::EngineFeature::SlotConfig)?;
+        }
         let worker_labels: HashMap<String, proto::dispatcher::WorkerLabels> = labels
             .into_iter()
             .map(|(key, value)| {
@@ -399,6 +403,29 @@ impl GrpcTransport {
 
 #[async_trait]
 impl Transport for GrpcTransport {
+    async fn run_details(
+        &self,
+        run_id: &WorkflowRunId,
+    ) -> Result<proto::v1::GetRunDetailsResponse> {
+        self.get_run_details(&run_id.0).await
+    }
+
+    async fn engine_version(&self) -> Result<crate::EngineVersion> {
+        let version = retry(
+            || async {
+                self.dispatcher
+                    .clone()
+                    .get_version(self.authed_request(proto::dispatcher::GetVersionRequest {}))
+                    .await
+                    .map(|response| response.into_inner().version)
+                    .map_err(grpc_error)
+            },
+            &self.retry_config,
+        )
+        .await?;
+        crate::EngineVersion::parse(&version)
+    }
+
     fn namespace(&self) -> Option<&str> {
         self.config.namespace.as_deref()
     }
@@ -418,8 +445,6 @@ impl Transport for GrpcTransport {
             let response = self
                 .trigger_top_level_v1(&workflow_name, &input, &opts)
                 .await?;
-            self.remember_run_output_tasks(&workflow_name, &response)
-                .await;
             return Ok(response);
         }
 
@@ -469,9 +494,6 @@ impl Transport for GrpcTransport {
             &self.retry_config,
         )
         .await?;
-
-        self.remember_run_output_tasks(&workflow_name, &response)
-            .await;
 
         Ok(response)
     }
@@ -560,9 +582,6 @@ impl Transport for GrpcTransport {
         )
         .await?;
 
-        self.remember_bulk_run_output_tasks(&workflow_name, &response)
-            .await;
-
         Ok(response)
     }
 
@@ -576,26 +595,12 @@ impl Transport for GrpcTransport {
             return result;
         }
 
-        // Engine-backed runs complete through Hatchet. This mirrors the
-        // TypeScript SDK's WorkflowRunRef, which waits through the run listener
-        // rather than an in-process channel.
-        let result = self.poll_run_result(run_id).await;
-        if result.is_ok() {
-            self.run_output_tasks.lock().await.remove(run_id);
-            let mut completed = self.completed.lock().await;
-            let oldest = (completed.len() >= MAX_COMPLETED_RUNS && !completed.contains_key(run_id))
-                .then(|| completed.keys().next().cloned())
-                .flatten();
-            if let Some(oldest) = oldest {
-                completed.remove(&oldest);
-            }
-            completed.insert(run_id.clone(), result.clone());
-        }
-        result
+        // A durable branch can reuse a run ID, including when another client
+        // initiates it. Do not permanently cache polled engine results.
+        self.poll_run_result(run_id).await
     }
 
     async fn resolve_result(&self, run_id: &WorkflowRunId, result: Result<Value>) {
-        self.run_output_tasks.lock().await.remove(run_id);
         let mut completed = self.completed.lock().await;
         let oldest = (completed.len() >= MAX_COMPLETED_RUNS && !completed.contains_key(run_id))
             .then(|| completed.keys().next().cloned())
@@ -610,7 +615,32 @@ impl Transport for GrpcTransport {
         self.rest_api_client.cancel_run(&run_id.0).await
     }
 
+    async fn branch_durable_task(
+        &self,
+        task_external_id: &str,
+        node_id: i64,
+        branch_id: i64,
+    ) -> Result<DurableBranchResult> {
+        let result = self
+            .rest_api_client
+            .branch_durable_task(task_external_id, node_id, branch_id)
+            .await?;
+        self.completed.lock().await.clear();
+        Ok(result)
+    }
+
+    async fn restore_task(&self, task_external_id: &str) -> Result<RestoreTaskResult> {
+        let result = self.rest_api_client.restore_task(task_external_id).await?;
+        self.completed.lock().await.clear();
+        Ok(result)
+    }
+
     async fn start_worker_loop(&self, opts: WorkerStartOpts) -> Result<()> {
+        if !opts.durable_task_dispatchers.is_empty() {
+            self.engine_version()
+                .await?
+                .require(crate::EngineFeature::DurableEviction)?;
+        }
         let mut actions = Vec::new();
         for action in opts.task_dispatchers.keys() {
             actions.push(worker_action_id(action));
@@ -818,7 +848,6 @@ impl Transport for GrpcTransport {
             .into_iter()
             .map(|event| apply_namespace(&event, self.config.namespace.as_deref()))
             .collect();
-        let output_tasks = workflow_leaf_names(&definition.steps);
         let registration =
             WorkflowRegistration::from_declaration(&definition, self.config.namespace.as_deref());
 
@@ -917,31 +946,36 @@ impl Transport for GrpcTransport {
         )
         .await?;
 
-        self.workflow_output_tasks
-            .write()
-            .await
-            .insert(registration.name, output_tasks);
-
         Ok(())
     }
 
-    async fn append_run_stream(&self, run_id: &WorkflowRunId, payload: Value) {
-        let task_run_id = run_id.0.clone();
-        let message = serde_json::to_vec(&payload).unwrap_or_default();
+    async fn append_run_stream(
+        &self,
+        _run_id: &WorkflowRunId,
+        task_run_id: &str,
+        payload: Value,
+    ) -> Result<()> {
+        let message = serde_json::to_vec(&payload)
+            .map_err(|error| Error::InputSerialization(format!("stream payload: {error}")))?;
 
         let mut events = self.events.clone();
         let request = self.authed_request(proto::events::PutStreamEventRequest {
-            task_run_external_id: task_run_id,
+            task_run_external_id: task_run_id.to_owned(),
             created_at: Some(prost_now()),
             message,
             metadata: "{}".to_owned(),
             event_index: None,
         });
 
-        let _ = events.put_stream_event(request).await;
+        events.put_stream_event(request).await.map_err(grpc_error)?;
+        Ok(())
     }
 
     async fn stream_run(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>> {
+        self.subscribe_run_stream(run_id).await?.collect_all().await
+    }
+
+    async fn subscribe_run_stream(&self, run_id: &WorkflowRunId) -> Result<crate::RunEventStream> {
         let mut dispatcher = self.dispatcher.clone();
         let request = self.authed_request(proto::dispatcher::SubscribeToWorkflowEventsRequest {
             workflow_run_id: Some(run_id.0.clone()),
@@ -955,29 +989,15 @@ impl Transport for GrpcTransport {
             .map_err(grpc_error)?
             .into_inner();
 
-        let mut events = Vec::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(500), stream.message())
-                .await
-            {
-                Ok(Ok(Some(event))) => {
-                    events.push(workflow_event_payload_to_json(&event));
-                    if event.hangup {
-                        break;
-                    }
+        Ok(crate::RunEventStream::new(async_stream::try_stream! {
+            while let Some(event) = stream.message().await.map_err(grpc_error)? {
+                let complete = event.hangup;
+                if event.event_type == proto::dispatcher::ResourceEventType::Stream as i32 {
+                    yield workflow_event_payload_to_json(&event);
                 }
-                Ok(Ok(None)) => break,
-                Ok(Err(error)) => return Err(grpc_error(error)),
-                Err(_) => {
-                    if !events.is_empty() {
-                        break;
-                    }
-                }
+                if complete { break; }
             }
-        }
-
-        Ok(events)
+        }))
     }
 
     async fn append_run_log(&self, run_id: &WorkflowRunId, level: LogLevel, message: String) {
@@ -1189,38 +1209,6 @@ impl Transport for GrpcTransport {
 }
 
 impl GrpcTransport {
-    async fn remember_run_output_tasks(&self, workflow_name: &str, run_id: &WorkflowRunId) {
-        let output_tasks = self
-            .workflow_output_tasks
-            .read()
-            .await
-            .get(workflow_name)
-            .cloned();
-
-        if let Some(output_tasks) = output_tasks {
-            self.run_output_tasks
-                .lock()
-                .await
-                .insert(run_id.clone(), output_tasks);
-        }
-    }
-
-    async fn remember_bulk_run_output_tasks(&self, workflow_name: &str, run_ids: &[WorkflowRunId]) {
-        let output_tasks = self
-            .workflow_output_tasks
-            .read()
-            .await
-            .get(workflow_name)
-            .cloned();
-
-        if let Some(output_tasks) = output_tasks {
-            let mut run_output_tasks = self.run_output_tasks.lock().await;
-            for run_id in run_ids {
-                run_output_tasks.insert(run_id.clone(), output_tasks.clone());
-            }
-        }
-    }
-
     async fn handle_assigned_action(
         &self,
         action: proto::dispatcher::AssignedAction,
@@ -1258,7 +1246,7 @@ impl GrpcTransport {
             let task_run_id = action.task_run_external_id.clone();
             let worker_id_clone = worker_id.to_owned();
             let transport = self.clone();
-            let cancel_token = tokio_util::sync::CancellationToken::new();
+            let cancel_token = Arc::new(tokio_util::sync::CancellationToken::new());
             self.running_cancellations
                 .lock()
                 .await
@@ -1312,7 +1300,7 @@ impl GrpcTransport {
             let input = decoded.input;
             let context = TaskContextData {
                 parent_outputs: decoded.parent_outputs,
-                cancel_token: Some(cancel_token.clone()),
+                cancel_token: Some(cancel_token.as_ref().clone()),
                 run_opts,
                 retry_count: u32::try_from(action.retry_count).unwrap_or_default(),
                 filter_payload: decoded.filter_payload,
@@ -1339,14 +1327,23 @@ impl GrpcTransport {
                         .await
                 };
 
-                let _ = transport
-                    .running_cancellations
-                    .lock()
-                    .await
-                    .remove(&task_run_id);
+                {
+                    let mut running = transport.running_cancellations.lock().await;
+                    if running
+                        .get(&task_run_id)
+                        .is_some_and(|token| Arc::ptr_eq(token, &cancel_token))
+                    {
+                        running.remove(&task_run_id);
+                    }
+                }
 
-                let (event_type, payload, should_not_retry) =
-                    completion_event_from_result(result, cancel_token.is_cancelled());
+                let Some((event_type, payload, should_not_retry)) =
+                    completion_event_from_result(result, cancel_token.is_cancelled())
+                else {
+                    // Hatchet already owns the cancellation outcome. Reporting
+                    // FAILED here can overwrite its CANCELLED state.
+                    return;
+                };
 
                 if let Err(error) = transport
                     .send_step_action_event(proto::dispatcher::StepActionEvent {
@@ -1380,32 +1377,59 @@ impl GrpcTransport {
     /// Polls the engine for run completion by calling `GetRunDetails` repeatedly.
     async fn poll_run_result(&self, run_id: &WorkflowRunId) -> Result<Value> {
         let poll_interval = std::time::Duration::from_millis(500);
+        let mut graph = None;
 
         loop {
             let details = self.get_run_details(&run_id.0).await?;
 
+            // Failure and cancellation do not need graph metadata. Preserve the
+            // engine outcome even when the REST read model is unavailable.
             if details.done {
                 match proto::v1::RunStatus::try_from(details.status) {
-                    Ok(proto::v1::RunStatus::Completed) => {
-                        let output_tasks = self.run_output_tasks.lock().await.get(run_id).cloned();
-                        return Ok(run_output_from_details(
-                            &details.task_runs,
-                            output_tasks.as_deref(),
-                        ));
-                    }
                     Ok(proto::v1::RunStatus::Failed) => {
-                        let error_msg = details
+                        let message = details
                             .task_runs
                             .values()
                             .find_map(|task| task.error.clone())
                             .unwrap_or_else(|| "workflow run failed".to_owned());
-                        return Err(Error::Transport(error_msg));
+                        return Err(Error::Transport(message));
                     }
                     Ok(proto::v1::RunStatus::Cancelled) => {
                         return Err(Error::Transport("workflow run was cancelled".to_owned()));
                     }
                     _ => {}
                 }
+            }
+
+            if graph.is_none() {
+                graph = Some(
+                    self.rest_api_client
+                        .run_graph(&run_id.0, &self.retry_config)
+                        .await?,
+                );
+            }
+            // v0.94.14 can leave an unused failure handler queued after the
+            // normal graph completes. It must not keep a successful run waiting.
+            if !details.done
+                && graph
+                    .as_ref()
+                    .is_some_and(|graph| graph.on_failure_task.is_some())
+            {
+                if let Some(output) = self
+                    .rest_api_client
+                    .completed_main_output(&run_id.0, &self.retry_config)
+                    .await?
+                {
+                    return Ok(output);
+                }
+            }
+            if details.done && details.status == proto::v1::RunStatus::Completed as i32 {
+                // Use the graph snapshot attached to this run, rather than
+                // registration state that may be absent or belong to a newer version.
+                return Ok(run_output_from_details(
+                    &details.task_runs,
+                    graph.as_ref().map(|graph| graph.output_tasks.as_slice()),
+                ));
             }
 
             tokio::time::sleep(poll_interval).await;
@@ -1599,16 +1623,12 @@ fn parse_task_output(task_detail: &proto::v1::TaskRunDetail) -> Option<Value> {
 fn completion_event_from_result(
     result: Result<Value>,
     cancelled: bool,
-) -> (proto::dispatcher::StepActionEventType, String, Option<bool>) {
+) -> Option<(proto::dispatcher::StepActionEventType, String, Option<bool>)> {
     if cancelled {
-        return (
-            proto::dispatcher::StepActionEventType::StepEventTypeFailed,
-            "task cancelled".to_owned(),
-            Some(true),
-        );
+        return None;
     }
 
-    match result {
+    Some(match result {
         Ok(val) => (
             proto::dispatcher::StepActionEventType::StepEventTypeCompleted,
             serde_json::to_string(&val).unwrap_or_default(),
@@ -1622,7 +1642,7 @@ fn completion_event_from_result(
                 Some(should_not_retry),
             )
         }
-    }
+    })
 }
 
 pub(crate) fn run_opt_label_to_proto(
@@ -2388,21 +2408,19 @@ mod tests {
     }
 
     #[test]
-    fn completion_event_marks_cancelled_runs_as_failed_even_on_success() {
-        let (event_type, payload, should_not_retry) =
-            completion_event_from_result(Ok(serde_json::json!({"ok":true})), true);
-        assert_eq!(
-            event_type,
-            crate::proto::dispatcher::StepActionEventType::StepEventTypeFailed
+    fn completion_event_preserves_engine_owned_cancellation() {
+        assert!(completion_event_from_result(Ok(serde_json::json!({"ok":true})), true).is_none());
+        assert!(
+            completion_event_from_result(Err(crate::Error::non_retryable("cancelled")), true)
+                .is_none()
         );
-        assert_eq!(payload, "task cancelled");
-        assert_eq!(should_not_retry, Some(true));
     }
 
     #[test]
     fn completion_event_preserves_non_retryable_errors() {
         let (_, _, should_not_retry) =
-            completion_event_from_result(Err(crate::Error::non_retryable("invalid input")), false);
+            completion_event_from_result(Err(crate::Error::non_retryable("invalid input")), false)
+                .unwrap();
         assert_eq!(should_not_retry, Some(true));
     }
 

@@ -8,7 +8,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
-use crate::clients::LogRecord;
+use crate::RunEventStream;
+use crate::clients::{DurableBranchResult, LogRecord, RestoreTaskResult};
 use crate::context::LogLevel;
 use crate::durable::{RenderedConditions, task_conditions_to_pb};
 use crate::durable_listener::DurableListenerClient;
@@ -121,6 +122,13 @@ pub enum WorkerConnectionState {
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Returns the workflow/event namespace configured by this transport.
+    /// Fetches the connected engine release, if this transport has an engine.
+    async fn engine_version(&self) -> Result<crate::EngineVersion> {
+        Err(Error::UnsupportedOperation(
+            "engine version requires an engine-backed transport".to_owned(),
+        ))
+    }
+
     fn namespace(&self) -> Option<&str> {
         None
     }
@@ -139,11 +147,37 @@ pub trait Transport: Send + Sync {
         opts: RunOpts,
     ) -> Result<Vec<WorkflowRunId>>;
 
+    async fn run_details(
+        &self,
+        _run_id: &WorkflowRunId,
+    ) -> Result<crate::proto::v1::GetRunDetailsResponse> {
+        Err(Error::UnsupportedOperation(
+            "run details require an engine-backed transport".to_owned(),
+        ))
+    }
+
     async fn register_result_channel(&self, run_id: &WorkflowRunId) -> Result<()>;
 
     async fn await_result(&self, run_id: &WorkflowRunId) -> Result<Value>;
 
     async fn resolve_result(&self, run_id: &WorkflowRunId, result: Result<Value>);
+
+    async fn branch_durable_task(
+        &self,
+        _task_external_id: &str,
+        _node_id: i64,
+        _branch_id: i64,
+    ) -> Result<DurableBranchResult> {
+        Err(Error::UnsupportedOperation(
+            "durable branching requires an engine-backed transport".to_owned(),
+        ))
+    }
+
+    async fn restore_task(&self, _task_external_id: &str) -> Result<RestoreTaskResult> {
+        Err(Error::UnsupportedOperation(
+            "task restoration requires an engine-backed transport".to_owned(),
+        ))
+    }
 
     async fn start_worker_loop(&self, opts: WorkerStartOpts) -> Result<()>;
 
@@ -152,9 +186,19 @@ pub trait Transport: Send + Sync {
         definition: WorkflowDeclaration<Value, Value>,
     ) -> Result<()>;
 
-    async fn append_run_stream(&self, run_id: &WorkflowRunId, payload: Value);
+    async fn append_run_stream(
+        &self,
+        run_id: &WorkflowRunId,
+        task_run_id: &str,
+        payload: Value,
+    ) -> Result<()>;
 
     async fn stream_run(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>>;
+
+    /// Live transports override this; the default adapts a finite snapshot.
+    async fn subscribe_run_stream(&self, run_id: &WorkflowRunId) -> Result<RunEventStream> {
+        Ok(RunEventStream::from_values(self.stream_run(run_id).await?))
+    }
 
     async fn append_run_log(&self, run_id: &WorkflowRunId, level: LogLevel, message: String);
 
@@ -248,6 +292,13 @@ pub trait Transport: Send + Sync {
     }
 }
 
+#[derive(Debug, Default)]
+struct MemoryRunStream {
+    values: Vec<Value>,
+    complete: bool,
+    notify: Arc<tokio::sync::Notify>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryTransport {
     counter: Arc<AtomicU64>,
@@ -255,7 +306,7 @@ pub struct InMemoryTransport {
     pending: Arc<Mutex<HashMap<WorkflowRunId, oneshot::Sender<Result<Value>>>>>,
     receivers: Arc<Mutex<HashMap<WorkflowRunId, oneshot::Receiver<Result<Value>>>>>,
     completed: Arc<Mutex<HashMap<WorkflowRunId, Result<Value>>>>,
-    streams: Arc<Mutex<HashMap<WorkflowRunId, Vec<Value>>>>,
+    streams: Arc<Mutex<HashMap<WorkflowRunId, MemoryRunStream>>>,
     logs: Arc<Mutex<HashMap<WorkflowRunId, Vec<LogRecord>>>>,
     task_dispatchers: Arc<RwLock<HashMap<String, Vec<WorkerDispatcher>>>>,
     durable_task_dispatchers: Arc<RwLock<HashMap<String, Vec<WorkerDispatcher>>>>,
@@ -649,6 +700,11 @@ impl Transport for InMemoryTransport {
             completed.remove(&oldest);
         }
         completed.insert(run_id.clone(), result);
+        drop(completed);
+        let mut streams = self.streams.lock().await;
+        let stream = streams.entry(run_id.clone()).or_default();
+        stream.complete = true;
+        stream.notify.notify_waiters();
     }
 
     async fn cancel_workflow_run(&self, run_id: &WorkflowRunId) -> Result<()> {
@@ -723,23 +779,57 @@ impl Transport for InMemoryTransport {
         Ok(())
     }
 
-    async fn append_run_stream(&self, run_id: &WorkflowRunId, payload: Value) {
-        self.streams
+    async fn append_run_stream(
+        &self,
+        run_id: &WorkflowRunId,
+        _task_run_id: &str,
+        payload: Value,
+    ) -> Result<()> {
+        let mut streams = self.streams.lock().await;
+        let stream = streams.entry(run_id.clone()).or_default();
+        stream.values.push(payload);
+        stream.notify.notify_waiters();
+        Ok(())
+    }
+
+    async fn stream_run(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>> {
+        self.subscribe_run_stream(run_id).await?.collect_all().await
+    }
+
+    async fn subscribe_run_stream(&self, run_id: &WorkflowRunId) -> Result<RunEventStream> {
+        let notify = self
+            .streams
             .lock()
             .await
             .entry(run_id.clone())
             .or_default()
-            .push(payload);
-    }
-
-    async fn stream_run(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>> {
-        Ok(self
-            .streams
-            .lock()
-            .await
-            .get(run_id)
-            .cloned()
-            .unwrap_or_default())
+            .notify
+            .clone();
+        let streams = Arc::clone(&self.streams);
+        let run_id = run_id.clone();
+        Ok(RunEventStream::new(async_stream::stream! {
+            let mut cursor = 0;
+            loop {
+                // Register before inspecting the state so a publication or
+                // completion between inspection and await cannot be lost.
+                let notified = notify.clone().notified_owned();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let (next, complete) = {
+                    let streams = streams.lock().await;
+                    let state = &streams[&run_id];
+                    (state.values.get(cursor).cloned(), state.complete)
+                };
+                if let Some(value) = next {
+                    cursor += 1;
+                    yield Ok(value);
+                } else if complete {
+                    break;
+                } else {
+                    notified.await;
+                }
+            }
+        }))
     }
 
     async fn append_run_log(&self, run_id: &WorkflowRunId, level: LogLevel, message: String) {

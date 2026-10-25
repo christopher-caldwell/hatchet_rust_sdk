@@ -14,9 +14,12 @@ mod client;
 mod clients;
 mod context;
 mod durable;
+mod engine_version;
 mod error;
+mod management;
 mod rest_client;
 mod run_ref;
+mod run_stream;
 mod task;
 mod transport;
 mod worker;
@@ -37,11 +40,14 @@ pub use another_hatchet_core::{
 pub use another_hatchet_macros::{durable_task, task, workflow};
 pub use client::{Client, DurableTaskHandle, TaskHandle, WorkflowHandle};
 pub use clients::{
-    CelClient, CelDebugResult, Cron, CronsClient, EventRecord, EventsClient, FilterDefinition,
-    FiltersClient, LogRecord, LogsClient, MetricsClient, QueueMetrics, RateLimitsClient, RunFilter,
-    RunRecord, RunStatus, RunsClient, Schedule, SchedulesClient, TenantClient, WebhookDefinition,
-    WebhooksClient, WorkerInfo, WorkersClient, WorkflowDefinition, WorkflowMetrics,
-    WorkflowsClient,
+    CelClient, CelDebugResult, Cron, CronsClient, DurableBranchResult, EventRecord, EventsClient,
+    FilterDefinition, FiltersClient, LogRecord, LogsClient, MetricsClient, QueueMetrics,
+    RateLimitsClient, RestoreTaskResult, RunFilter, RunRecord, RunStatus, RunsClient, Schedule,
+    SchedulesClient, TenantClient, WebhookDefinition, WebhooksClient, WorkerInfo, WorkersClient,
+    WorkflowDefinition, WorkflowMetrics, WorkflowsClient,
+};
+pub use clients::{
+    Pagination, RunListOptions, RunPage, RunQuery, RunSelection, TaskMutationResult,
 };
 pub use context::{Context, ContextExt, ContextIds, InMemoryContext, LogLevel, TriggerData};
 pub use durable::{
@@ -52,8 +58,11 @@ pub use durable::{
     SleepUntilMatchCondition, UserEventMatchCondition, conditions_to_rendered, or,
     render_conditions, task_conditions_to_pb,
 };
+pub use engine_version::{EngineFeature, EngineVersion};
 pub use error::{Error, Result};
+pub use management::*;
 pub use run_ref::{RunControl, WorkflowRunRef};
+pub use run_stream::RunEventStream;
 pub use task::{
     BackoffConfig, ConcurrencyConfig, ConcurrencyLimitStrategy, DesiredLabelConfig, LabelValue,
     RateLimit, RateLimitDuration, RateLimitKey, SlotType, TaskConfig, TaskConfigBuilder,

@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use another_hatchet_core::{RunOpts, WorkflowRunId};
 use async_trait::async_trait;
@@ -151,6 +151,14 @@ impl<T: Transport + 'static> Client<T> {
             Arc::clone(&self.transport),
             Arc::clone(&self.state),
         )
+    }
+
+    /// Fetches and parses the connected engine release.
+    ///
+    /// # Errors
+    /// Returns an error for transport failures, unknown versions or a local transport.
+    pub async fn engine_version(&self) -> Result<crate::EngineVersion> {
+        self.transport.engine_version().await
     }
 
     #[must_use]
@@ -343,6 +351,10 @@ impl<T: Transport> RunControl for Client<T> {
     async fn stream_run(&self, run_id: &WorkflowRunId) -> Result<Vec<Value>> {
         self.transport.stream_run(run_id).await
     }
+
+    async fn subscribe_run_stream(&self, run_id: &WorkflowRunId) -> Result<crate::RunEventStream> {
+        self.transport.subscribe_run_stream(run_id).await
+    }
 }
 
 pub struct WorkflowHandle<T: Transport, I, O> {
@@ -493,15 +505,16 @@ where
         Ok(outputs)
     }
 
-    /// Creates a schedule bound to this workflow.
+    /// Creates a schedule bound to this workflow at an absolute RFC 3339 timestamp.
+    /// Engine-backed schedules require input that serializes to a JSON object.
     ///
     /// # Errors
     ///
-    /// Returns an error when input serialization fails.
+    /// Returns an error when input serialization fails or the engine input is not a JSON object.
     pub async fn schedule(
         &self,
         name: impl Into<String>,
-        expression: impl Into<String>,
+        trigger_at: impl Into<String>,
         input: I,
     ) -> Result<Schedule> {
         let input = serde_json::to_value(input).map_err(|error| {
@@ -509,25 +522,35 @@ where
         })?;
 
         let name = name.into();
-        let expression = expression.into();
+        let trigger_at = trigger_at.into();
         SchedulesClient::new(Arc::clone(&self.transport), Arc::clone(&self.state))
-            .create(&self.workflow_name, &name, &expression, input)
+            .create(&self.workflow_name, &name, &trigger_at, input)
             .await
     }
 
     /// Creates a delayed schedule bound to this workflow.
+    /// Engine-backed schedules require input that serializes to a JSON object.
     ///
     /// # Errors
     ///
-    /// Returns an error when input serialization fails.
+    /// Returns an error when input serialization fails or the delay exceeds the system clock range.
     pub async fn delay(
         &self,
         name: impl Into<String>,
         delay: Duration,
         input: I,
     ) -> Result<Schedule> {
-        self.schedule(name, format!("in {}ms", delay.as_millis()), input)
-            .await
+        let trigger_at = SystemTime::now().checked_add(delay).ok_or_else(|| {
+            Error::InputValidation(vec![
+                "schedule delay exceeds the system clock range".to_owned(),
+            ])
+        })?;
+        self.schedule(
+            name,
+            crate::rest_client::system_time_to_iso(&trigger_at),
+            input,
+        )
+        .await
     }
 
     /// Creates a cron trigger bound to this workflow.
@@ -598,5 +621,22 @@ impl<I, O> DurableTaskHandle<I, O> {
     pub fn with_config(mut self, config: TaskConfig) -> Self {
         self.config = config;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::InMemoryTransport;
+
+    #[tokio::test]
+    async fn delay_schedules_the_requested_absolute_time() {
+        let client = Client::new(Arc::new(InMemoryTransport::new()));
+        let workflow = client.workflow::<(), ()>("delayed");
+        let duration = Duration::from_secs(30);
+        let earliest = crate::rest_client::system_time_to_iso(&(SystemTime::now() + duration));
+        let schedule = workflow.delay("later", duration, ()).await.unwrap();
+        let latest = crate::rest_client::system_time_to_iso(&(SystemTime::now() + duration));
+        assert!(schedule.expression >= earliest && schedule.expression <= latest);
     }
 }

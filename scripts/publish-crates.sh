@@ -224,21 +224,28 @@ publish = false
 
 [dependencies]
 another-hatchet-sdk = { path = "../${sdk_name}-${version}" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [patch.crates-io]
 another-hatchet-core = { path = "../${core_name}-${version}" }
 another-hatchet-macros = { path = "../${macros_name}-${version}" }
 CONSUMER_MANIFEST
-  cat >"$consumer_dir/src/lib.rs" <<'CONSUMER_SOURCE'
-use another_hatchet_sdk::RunOpts;
+  python3 - "$sdk_dir/README.md" "$consumer_dir/src/main.rs" <<'CONSUMER_SOURCE'
+from pathlib import Path
+import re
+import sys
 
-pub fn default_run_options() -> RunOpts {
-    RunOpts::default()
-}
+readme = Path(sys.argv[1]).read_text()
+quickstart = re.search(r"```rust\n(.*?)\n```", readme, re.DOTALL)
+if quickstart is None:
+    raise SystemExit("README is missing its executable Rust quickstart")
+Path(sys.argv[2]).write_text(quickstart.group(1) + "\n")
 CONSUMER_SOURCE
 
-  printf '%s\n' "==> Building a minimal downstream consumer of the exact SDK archive"
-  CARGO_TARGET_DIR="$temp_dir/target" cargo check \
+  printf '%s\n' "==> Running the README quickstart against the exact SDK archive"
+  CARGO_TARGET_DIR="$temp_dir/target" cargo run \
     --manifest-path "$consumer_dir/Cargo.toml"
 
   rm -rf "$temp_dir"
@@ -409,6 +416,7 @@ require_command cargo
 require_command git
 require_command grep
 require_command perl
+require_command python3
 require_command rustup
 require_command sed
 require_command tar

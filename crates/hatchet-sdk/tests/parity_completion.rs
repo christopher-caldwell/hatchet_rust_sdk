@@ -376,11 +376,18 @@ async fn worker_wait_until_ready_and_health_server() {
     let transport = Arc::new(InMemoryTransport::new());
     let client = Client::new(transport);
     let task = client.task::<serde_json::Value, serde_json::Value>("noop");
-    let port = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener.local_addr().unwrap().port(),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(error) => panic!("ephemeral port bind should succeed: {error}"),
-    };
+    // Reserve on the health server's wildcard address. A loopback-only bind can
+    // select a port already occupied on another interface. Use a low port when
+    // the host has exhausted its automatic source-port range.
+    let probe = TcpListener::bind("0.0.0.0:0")
+        .or_else(|error| {
+            (20_000..49_152)
+                .find_map(|port| TcpListener::bind(("0.0.0.0", port)).ok())
+                .ok_or(error)
+        })
+        .expect("reserve health port");
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
 
     let start_result = client
         .worker("healthy-worker")
@@ -389,22 +396,19 @@ async fn worker_wait_until_ready_and_health_server() {
         .build()
         .start();
 
-    let handle = match start_result {
-        Ok(handle) => handle,
-        Err(another_hatchet_sdk::Error::Worker(message))
-            if message.contains("Operation not permitted") =>
-        {
-            return;
-        }
-        Err(error) => panic!("worker start should succeed: {error}"),
-    };
+    let handle = start_result.expect("worker start should succeed");
 
     handle
         .wait_until_ready(Duration::from_secs(1))
         .await
         .unwrap();
 
-    let response = reqwest::get(format!("http://127.0.0.1:{port}/health"))
+    let response = reqwest::Client::builder()
+        .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .build()
+        .unwrap()
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .send()
         .await
         .unwrap()
         .json::<serde_json::Value>()
@@ -443,7 +447,7 @@ async fn workflow_handle_helpers_cover_run_many_and_scheduling() {
     assert_eq!(outputs, vec![2, 3]);
 
     let schedule = workflow
-        .schedule("daily", "0 0 * * *", 7_u32)
+        .schedule("later", "2099-01-01T00:00:00Z", 7_u32)
         .await
         .unwrap();
     assert_eq!(schedule.workflow_name, "helper.workflow");
@@ -452,7 +456,13 @@ async fn workflow_handle_helpers_cover_run_many_and_scheduling() {
         .delay("later", Duration::from_secs(30), 9_u32)
         .await
         .unwrap();
-    assert_eq!(delay.expression, "in 30000ms");
+    assert!(delay.expression.ends_with('Z'));
+    assert!(delay.expression.contains('T'));
+    let overflow = workflow.delay("overflow", Duration::MAX, 9_u32).await;
+    assert!(matches!(
+        overflow,
+        Err(another_hatchet_sdk::Error::InputValidation(_))
+    ));
 
     let cron = workflow.cron("nightly", "0 2 * * *").await.unwrap();
     assert_eq!(cron.workflow_name, "helper.workflow");

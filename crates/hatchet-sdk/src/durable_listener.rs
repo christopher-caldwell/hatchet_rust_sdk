@@ -6,7 +6,7 @@
 //! Mirrors the TS `DurableListenerClient` from `durable-listener-client.ts`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -76,7 +76,16 @@ enum AckResponse {
     Memo(MemoAckResult),
 }
 
-type PendingAcks = Arc<Mutex<HashMap<AckKey, oneshot::Sender<Result<AckResponse>>>>>;
+#[derive(Debug)]
+struct PendingAck {
+    sender: oneshot::Sender<Result<AckResponse>>,
+    // Keep the invocation serialized until the engine acknowledges the request,
+    // even when its caller has stopped waiting for the response.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+type PendingAcks = Arc<Mutex<HashMap<AckKey, PendingAck>>>;
+type AckLocks = std::sync::Mutex<HashMap<AckKey, Weak<Mutex<()>>>>;
 
 #[derive(Debug, Default)]
 struct CallbackRegistry {
@@ -94,6 +103,8 @@ pub struct EvictionNotice {
     pub task_external_id: String,
     pub invocation_count: i32,
     pub reason: String,
+    /// Server requests must be acknowledged; acknowledged local evictions must not.
+    pub requires_acknowledgment: bool,
 }
 
 /// The durable listener client manages the bidi stream lifecycle with reconnection.
@@ -102,6 +113,7 @@ pub struct DurableListenerClient {
     worker_id: String,
     request_tx: Arc<Mutex<Option<mpsc::Sender<v1::DurableTaskRequest>>>>,
     pending_acks: PendingAcks,
+    ack_locks: AckLocks,
     callbacks: Callbacks,
     inflight_requests: InflightRequests,
     evict_tx: broadcast::Sender<EvictionNotice>,
@@ -178,6 +190,7 @@ impl DurableListenerClient {
             worker_id,
             request_tx,
             pending_acks,
+            ack_locks: AckLocks::default(),
             callbacks,
             inflight_requests,
             evict_tx,
@@ -212,22 +225,7 @@ impl DurableListenerClient {
             )),
         };
 
-        let (tx, rx) = oneshot::channel();
-        self.pending_acks.lock().await.insert(key.clone(), tx);
-        self.inflight_requests
-            .lock()
-            .await
-            .insert(key.clone(), request.clone());
-
-        if let Err(error) = self.send_request(request).await {
-            self.pending_acks.lock().await.remove(&key);
-            self.inflight_requests.lock().await.remove(&key);
-            return Err(error);
-        }
-
-        let response = rx
-            .await
-            .map_err(|_| Error::Durable("ack channel closed".to_owned()))??;
+        let response = self.send_ack_request(key, request).await?;
 
         match response {
             AckResponse::WaitFor(result) => Ok(result),
@@ -261,22 +259,7 @@ impl DurableListenerClient {
             )),
         };
 
-        let (tx, rx) = oneshot::channel();
-        self.pending_acks.lock().await.insert(key.clone(), tx);
-        self.inflight_requests
-            .lock()
-            .await
-            .insert(key.clone(), request.clone());
-
-        if let Err(error) = self.send_request(request).await {
-            self.pending_acks.lock().await.remove(&key);
-            self.inflight_requests.lock().await.remove(&key);
-            return Err(error);
-        }
-
-        let response = rx
-            .await
-            .map_err(|_| Error::Durable("ack channel closed".to_owned()))??;
+        let response = self.send_ack_request(key, request).await?;
 
         match response {
             AckResponse::TriggerRuns(result) => Ok(result),
@@ -312,22 +295,7 @@ impl DurableListenerClient {
             )),
         };
 
-        let (tx, rx) = oneshot::channel();
-        self.pending_acks.lock().await.insert(ack_key.clone(), tx);
-        self.inflight_requests
-            .lock()
-            .await
-            .insert(ack_key.clone(), request.clone());
-
-        if let Err(error) = self.send_request(request).await {
-            self.pending_acks.lock().await.remove(&ack_key);
-            self.inflight_requests.lock().await.remove(&ack_key);
-            return Err(error);
-        }
-
-        let response = rx
-            .await
-            .map_err(|_| Error::Durable("ack channel closed".to_owned()))??;
+        let response = self.send_ack_request(ack_key, request).await?;
 
         match response {
             AckResponse::Memo(result) => Ok(result),
@@ -391,7 +359,8 @@ impl DurableListenerClient {
         }
     }
 
-    /// Sends a `evictInvocation` request.
+    /// Sends an `evictInvocation` control request without waiting behind normal acks.
+    /// Engine acknowledgments are delivered through `subscribe_evictions`.
     ///
     /// # Errors
     ///
@@ -402,7 +371,7 @@ impl DurableListenerClient {
         invocation_count: i32,
         reason: Option<String>,
     ) -> Result<()> {
-        self.send_request(v1::DurableTaskRequest {
+        let request = v1::DurableTaskRequest {
             message: Some(v1::durable_task_request::Message::EvictInvocation(
                 v1::DurableTaskEvictInvocationRequest {
                     invocation_count,
@@ -410,8 +379,8 @@ impl DurableListenerClient {
                     reason,
                 },
             )),
-        })
-        .await
+        };
+        self.send_request(request).await
     }
 
     /// Subscribes to server eviction notices.
@@ -419,16 +388,78 @@ impl DurableListenerClient {
         self.evict_tx.subscribe()
     }
 
-    async fn send_request(&self, request: v1::DurableTaskRequest) -> Result<()> {
-        let guard = self.request_tx.lock().await;
-        match &*guard {
-            Some(tx) => tx
-                .send(request)
+    async fn send_ack_request(
+        &self,
+        key: AckKey,
+        request: v1::DurableTaskRequest,
+    ) -> Result<AckResponse> {
+        // The protocol identifies acks only by task ID and invocation count.
+        // Different invocations can proceed independently, but requests within
+        // one invocation must not replace each other's acknowledgment sender.
+        let lock = {
+            let mut locks = self
+                .ack_locks
+                .lock()
+                .map_err(|_| Error::Durable("ack lock registry poisoned".to_owned()))?;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            match locks.get(&key).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    locks.insert(key.clone(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        let guard = lock.lock_owned().await;
+        let (sender, receiver) = oneshot::channel();
+        let pending_acks = Arc::clone(&self.pending_acks);
+        let inflight_requests = Arc::clone(&self.inflight_requests);
+        let request_tx = Arc::clone(&self.request_tx);
+        // Registering and sending must finish even if the caller is cancelled
+        // between these awaits. The pending entry owns the sequencing guard.
+        tokio::spawn(async move {
+            pending_acks.lock().await.insert(
+                key.clone(),
+                PendingAck {
+                    sender,
+                    _guard: guard,
+                },
+            );
+            inflight_requests
+                .lock()
                 .await
-                .map_err(|error| Error::Durable(format!("request channel closed: {error}"))),
-            None => Err(Error::Durable("durable stream not connected".to_owned())),
-        }
+                .insert(key.clone(), request.clone());
+            if let Err(error) = send_request(&request_tx, request).await {
+                inflight_requests.lock().await.remove(&key);
+                if let Some(pending) = pending_acks.lock().await.remove(&key) {
+                    let _ = pending.sender.send(Err(error));
+                }
+            }
+        });
+        receiver
+            .await
+            .map_err(|_| Error::Durable("ack channel closed".to_owned()))?
     }
+
+    async fn send_request(&self, request: v1::DurableTaskRequest) -> Result<()> {
+        send_request(&self.request_tx, request).await
+    }
+}
+
+async fn send_request(
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<v1::DurableTaskRequest>>>>,
+    request: v1::DurableTaskRequest,
+) -> Result<()> {
+    let sender = request_tx
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| Error::Durable("durable stream not connected".to_owned()))?;
+    sender
+        .send(request)
+        .await
+        .map_err(|error| Error::Durable(format!("request channel closed: {error}")))
 }
 
 enum CallbackWaiter {
@@ -671,11 +702,13 @@ async fn dispatch_response(
                     invocation_count: entry_ref.invocation_count,
                 };
                 inflight_requests.lock().await.remove(&key);
-                if let Some(tx) = pending_acks.lock().await.remove(&key) {
-                    let _ = tx.send(Ok(AckResponse::WaitFor(WaitForAckResult {
-                        branch_id: entry_ref.branch_id,
-                        node_id: entry_ref.node_id,
-                    })));
+                if let Some(pending) = pending_acks.lock().await.remove(&key) {
+                    let _ = pending
+                        .sender
+                        .send(Ok(AckResponse::WaitFor(WaitForAckResult {
+                            branch_id: entry_ref.branch_id,
+                            node_id: entry_ref.node_id,
+                        })));
                 }
             }
         }
@@ -685,7 +718,7 @@ async fn dispatch_response(
                 invocation_count: ack.invocation_count,
             };
             inflight_requests.lock().await.remove(&key);
-            if let Some(tx) = pending_acks.lock().await.remove(&key) {
+            if let Some(pending) = pending_acks.lock().await.remove(&key) {
                 let entries = ack
                     .run_entries
                     .into_iter()
@@ -695,9 +728,11 @@ async fn dispatch_response(
                         workflow_run_external_id: e.workflow_run_external_id,
                     })
                     .collect();
-                let _ = tx.send(Ok(AckResponse::TriggerRuns(TriggerRunsAckResult {
-                    run_entries: entries,
-                })));
+                let _ = pending
+                    .sender
+                    .send(Ok(AckResponse::TriggerRuns(TriggerRunsAckResult {
+                        run_entries: entries,
+                    })));
             }
         }
         v1::durable_task_response::Message::MemoAck(ack) => {
@@ -707,8 +742,8 @@ async fn dispatch_response(
                     invocation_count: entry_ref.invocation_count,
                 };
                 inflight_requests.lock().await.remove(&key);
-                if let Some(tx) = pending_acks.lock().await.remove(&key) {
-                    let _ = tx.send(Ok(AckResponse::Memo(MemoAckResult {
+                if let Some(pending) = pending_acks.lock().await.remove(&key) {
+                    let _ = pending.sender.send(Ok(AckResponse::Memo(MemoAckResult {
                         already_existed: ack.memo_already_existed,
                         cached_payload: ack.memo_result_payload,
                         branch_id: entry_ref.branch_id,
@@ -751,22 +786,28 @@ async fn dispatch_response(
                     invocation_count: entry_ref.invocation_count,
                 };
                 inflight_requests.lock().await.remove(&key);
-                if let Some(tx) = pending_acks.lock().await.remove(&key) {
-                    let _ = tx.send(Err(Error::Durable(format!(
+                if let Some(pending) = pending_acks.lock().await.remove(&key) {
+                    let _ = pending.sender.send(Err(Error::Durable(format!(
                         "durable error (type {:?}): {}",
                         error.error_type, error.error_message
                     ))));
                 }
             }
         }
-        v1::durable_task_response::Message::EvictionAck(_) => {
-            // Eviction acks are handled by the eviction manager (P1.3)
+        v1::durable_task_response::Message::EvictionAck(ack) => {
+            let _ = evict_tx.send(EvictionNotice {
+                task_external_id: ack.durable_task_external_id,
+                invocation_count: ack.invocation_count,
+                reason: "eviction acknowledged".to_owned(),
+                requires_acknowledgment: false,
+            });
         }
         v1::durable_task_response::Message::ServerEvict(notice) => {
             let _ = evict_tx.send(EvictionNotice {
                 task_external_id: notice.durable_task_external_id,
                 invocation_count: notice.invocation_count,
                 reason: notice.reason,
+                requires_acknowledgment: true,
             });
         }
         v1::durable_task_response::Message::RegisterWorker(_) => {
@@ -778,6 +819,149 @@ async fn dispatch_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_listener() -> (
+        Arc<DurableListenerClient>,
+        mpsc::Receiver<v1::DurableTaskRequest>,
+    ) {
+        let (tx, rx) = mpsc::channel(8);
+        let (evict_tx, _) = broadcast::channel(1);
+        let listener = DurableListenerClient {
+            worker_id: "worker-1".to_owned(),
+            request_tx: Arc::new(Mutex::new(Some(tx))),
+            pending_acks: Arc::new(Mutex::new(HashMap::new())),
+            ack_locks: AckLocks::default(),
+            callbacks: Arc::new(Mutex::new(CallbackRegistry::default())),
+            inflight_requests: Arc::new(Mutex::new(HashMap::new())),
+            evict_tx,
+            _reconnect_task: tokio::spawn(std::future::pending()),
+            _status_task: tokio::spawn(std::future::pending()),
+        };
+        (Arc::new(listener), rx)
+    }
+
+    #[tokio::test]
+    async fn eviction_control_bypasses_pending_memo_and_does_not_steal_its_ack() {
+        let (listener, mut requests) = test_listener();
+        let mut notices = listener.subscribe_evictions();
+        let memo = memo_request(&listener, 1);
+        let memo_request = requests.recv().await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            listener.send_evict_invocation("task-1", 1, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let eviction_request = requests.recv().await.unwrap();
+        assert!(matches!(
+            eviction_request.message,
+            Some(v1::durable_task_request::Message::EvictInvocation(_))
+        ));
+        assert!(notices.try_recv().is_err());
+        dispatch_response(
+            v1::DurableTaskResponse {
+                message: Some(v1::durable_task_response::Message::EvictionAck(
+                    v1::DurableTaskEvictionAckResponse {
+                        durable_task_external_id: "task-1".to_owned(),
+                        invocation_count: 1,
+                    },
+                )),
+            },
+            &listener.pending_acks,
+            &listener.callbacks,
+            &listener.inflight_requests,
+            &listener.evict_tx,
+        )
+        .await;
+        let notice = notices.recv().await.unwrap();
+        assert_eq!(notice.task_external_id, "task-1");
+        assert_eq!(notice.invocation_count, 1);
+        assert!(!notice.requires_acknowledgment);
+        assert!(!memo.is_finished());
+        acknowledge_memo(&listener, memo_request).await;
+        assert_eq!(memo.await.unwrap().unwrap().cached_payload, Some(vec![1]));
+        assert!(listener.pending_acks.lock().await.is_empty());
+        assert!(listener.inflight_requests.lock().await.is_empty());
+    }
+
+    fn memo_request(
+        listener: &Arc<DurableListenerClient>,
+        value: u8,
+    ) -> tokio::task::JoinHandle<Result<MemoAckResult>> {
+        let listener = Arc::clone(listener);
+        tokio::spawn(async move {
+            listener
+                .send_memo("task-1", 1, vec![value], Some(vec![value]))
+                .await
+        })
+    }
+
+    async fn acknowledge_memo(listener: &DurableListenerClient, request: v1::DurableTaskRequest) {
+        let Some(v1::durable_task_request::Message::Memo(memo)) = request.message else {
+            panic!("expected a memo request");
+        };
+        dispatch_response(
+            v1::DurableTaskResponse {
+                message: Some(v1::durable_task_response::Message::MemoAck(
+                    v1::DurableTaskEventMemoAckResponse {
+                        r#ref: Some(v1::DurableEventLogEntryRef {
+                            durable_task_external_id: memo.durable_task_external_id,
+                            invocation_count: memo.invocation_count,
+                            branch_id: 0,
+                            node_id: i64::from(memo.key[0]),
+                        }),
+                        memo_already_existed: true,
+                        memo_result_payload: memo.payload,
+                    },
+                )),
+            },
+            &listener.pending_acks,
+            &listener.callbacks,
+            &listener.inflight_requests,
+            &listener.evict_tx,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn overlapping_memos_keep_their_own_acknowledgments() {
+        let (listener, mut requests) = test_listener();
+        let first = memo_request(&listener, 1);
+        let first_request = requests.recv().await.unwrap();
+        let second = memo_request(&listener, 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), requests.recv())
+                .await
+                .is_err()
+        );
+        acknowledge_memo(&listener, first_request).await;
+        assert_eq!(first.await.unwrap().unwrap().cached_payload, Some(vec![1]));
+        let second_request = requests.recv().await.unwrap();
+        acknowledge_memo(&listener, second_request).await;
+        assert_eq!(second.await.unwrap().unwrap().cached_payload, Some(vec![2]));
+        assert!(listener.pending_acks.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_memo_waiters_do_not_steal_the_next_acknowledgment() {
+        let (listener, mut requests) = test_listener();
+        let first = memo_request(&listener, 1);
+        let first_request = requests.recv().await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let second = memo_request(&listener, 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), requests.recv())
+                .await
+                .is_err()
+        );
+        acknowledge_memo(&listener, first_request).await;
+        let second_request = requests.recv().await.unwrap();
+        acknowledge_memo(&listener, second_request).await;
+        assert_eq!(second.await.unwrap().unwrap().cached_payload, Some(vec![2]));
+        assert!(listener.pending_acks.lock().await.is_empty());
+    }
 
     #[tokio::test]
     async fn completion_is_buffered_until_waiter_registration() {
