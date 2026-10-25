@@ -699,7 +699,11 @@ impl<T: Transport + 'static> Worker<T> {
                         }
                         let connection_state = connection_rx.borrow().clone();
                         match connection_state {
-                            WorkerConnectionState::Starting => {}
+                            WorkerConnectionState::Starting => {
+                                if let Some(health_state) = &health_state_for_transport {
+                                    health_state.write().await.healthy = false;
+                                }
+                            }
                             WorkerConnectionState::Ready => {
                                 if let Some(health_state) = &health_state_for_transport {
                                     health_state.write().await.healthy = true;

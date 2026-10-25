@@ -80,6 +80,10 @@ by `HATCHET_NODE`:
 | `rust-orders-worker` | `HATCHET_NODE=orders` | `/health` on `$PORT` |
 | `rust-notifications-worker` | `HATCHET_NODE=notifications` | `/health` on `$PORT` |
 
+The workers also serve `/readyz` (200 only when connected) and `/livez` (200
+while the process responds). Use these for separate readiness and liveness
+probes; `/health` retains its detailed JSON and existing 200/503 behavior.
+
 Both require `HATCHET_CLIENT_TOKEN`,
 `HATCHET_CLIENT_HOST_PORT=hatchet-orchestrator.railway.internal:7077`,
 `HATCHET_CLIENT_SERVER_URL=http://hatchet-orchestrator.railway.internal:8888`,

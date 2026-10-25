@@ -60,6 +60,7 @@ dependencies = [
  "base64",
  "futures-core",
  "h2",
+ "httparse",
  "jsonschema",
  "opentelemetry",
  "opentelemetry_sdk",

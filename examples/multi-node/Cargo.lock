@@ -59,6 +59,7 @@ dependencies = [
  "async-trait",
  "base64",
  "futures-core",
+ "httparse",
  "jsonschema",
  "opentelemetry",
  "opentelemetry_sdk",

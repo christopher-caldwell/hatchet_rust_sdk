@@ -1420,20 +1420,40 @@
         "status": "absent"
       },
       "rust": {
-        "status": "missing",
+        "status": "supported",
         "sources": [
-          "crates/hatchet-sdk/src/health.rs"
+          "crates/hatchet-sdk/src/health.rs",
+          "crates/hatchet-sdk/src/worker.rs"
         ],
         "tests": [
           {
-            "file": "crates/hatchet-sdk/tests/parity_completion.rs",
-            "name": "worker_wait_until_ready_and_health_server",
-            "engines": []
+            "file": "crates/hatchet-sdk/tests/health_probes.rs",
+            "name": "liveness_is_independent_of_readiness_and_legacy_health_preserves_json"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/health_probes.rs",
+            "name": "probe_http_routes_methods_and_head_follow_their_status_contracts"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/health_probes.rs",
+            "name": "fragmented_probe_requests_complete_and_shutdown_closes_pending_connections"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/health_probes.rs",
+            "name": "incomplete_probe_requests_have_a_bounded_lifetime"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/recovery_engine.rs",
+            "name": "durable_wait_and_checkpoint_survive_engine_restart",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
           }
         ]
       },
       "engine": "Baseline v0.94.14",
-      "notes": "Current health support is connection-dependent for all paths; /livez versus /readyz semantics remain missing."
+      "notes": "Distinct /livez (200 independent of connection/state lock) and /readyz (200 connected, 503 otherwise); legacy Rust /health JSON/status retained. GET/HEAD routing, bounded fragmented request parsing and connection cleanup. Real restart verifies 200\u2192503\u2192200 readiness with livez200 during outage. See health-probes.md."
     }
   ]
 }

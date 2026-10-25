@@ -1,6 +1,8 @@
 //! Explicit disposable-container restart proof; never targets a remote production engine.
 #![cfg(feature = "integration")]
 use another_hatchet_sdk::*;
+#[path = "support/health.rs"]
+mod probes;
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -24,8 +26,18 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
     let started = Arc::new(tokio::sync::Notify::new());
     let invocations = Arc::new(AtomicUsize::new(0));
     let task_id = Arc::new(tokio::sync::Mutex::new(None));
+    let reservation = std::net::TcpListener::bind("0.0.0.0:0")
+        .or_else(|error| {
+            (20000..49000)
+                .find_map(|port| std::net::TcpListener::bind(("0.0.0.0", port)).ok())
+                .ok_or(error)
+        })
+        .unwrap();
+    let health_port = reservation.local_addr().unwrap().port();
+    drop(reservation);
     let worker = client
         .worker("restart-checkpoint-worker")
+        .health_port(health_port)
         .register_durable_task(&task, {
             let started = Arc::clone(&started);
             let invocations = Arc::clone(&invocations);
@@ -62,6 +74,11 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
         .wait_until_ready(Duration::from_secs(15))
         .await
         .unwrap();
+    assert!(
+        probes::request(health_port, b"GET /readyz HTTP/1.1\r\nHost: local\r\n\r\n")
+            .await
+            .starts_with("HTTP/1.1 200 OK")
+    );
     client
         .register_workflow(
             WorkflowDeclaration::<Value, Value>::new("restart-checkpoint-workflow")
@@ -79,14 +96,31 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let status = tokio::task::spawn_blocking(move || {
+    let restart = tokio::task::spawn_blocking(move || {
         std::process::Command::new("docker")
             .args(["restart", "--", &engine])
             .output()
             .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if probes::request(health_port, b"GET /readyz HTTP/1.1\r\nHost: local\r\n\r\n")
+                .await
+                .starts_with("HTTP/1.1 503 Service Unavailable")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     })
     .await
-    .unwrap();
+    .expect("readiness must fail while the engine listener is disconnected");
+    assert!(
+        probes::request(health_port, b"GET /livez HTTP/1.1\r\nHost: local\r\n\r\n")
+            .await
+            .starts_with("HTTP/1.1 200 OK")
+    );
+    let status = restart.await.unwrap();
     assert!(
         status.status.success(),
         "{}",
@@ -106,6 +140,11 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
         .wait_until_ready(Duration::from_secs(60))
         .await
         .unwrap();
+    assert!(
+        probes::request(health_port, b"GET /readyz HTTP/1.1\r\nHost: local\r\n\r\n")
+            .await
+            .starts_with("HTTP/1.1 200 OK")
+    );
     client
         .events()
         .push(EventRecord::new("parity.restart.resume", json!({"resumed":true})).with_scope(&scope))

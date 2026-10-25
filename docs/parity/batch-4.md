@@ -207,3 +207,59 @@ outside the documented offline schema contract.
 The workspace suite passes **181** tests; strict Clippy/rustdoc, Rust **1.85.1**
 workspace/standalone checks and both lockfile audits pass. Final batch-wide checks
 follow O4. Detailed evidence is retained under `target/parity-batch4-20261025/o2/`.
+
+## O4: distinct liveness and readiness
+
+Implemented the latest TS `/livez` and `/readyz` operational contract while
+preserving Rust's legacy `/health` JSON and 200/503 behavior. Liveness does not
+acquire worker state or depend on its connection; readiness follows the existing
+transport listener state. HEAD/routing, invalid/oversized HTTP, fragmented
+requests and bounded connection cleanup are covered in [health-probes.md](health-probes.md).
+
+Four real TCP tests and the 30 existing parity tests pass. Testing exposed a
+platform TCP-reset issue when rejecting oversized headers with unread request
+bytes; the server now sends its write-side FIN then drains under the existing
+two-second deadline. Independent review checked that handling, lifecycle ownership
+and the status contracts and independently reran all 34 tests; no actionable
+findings remained.
+
+The disposable checkpoint restart proof now additionally observes readiness
+200 → 503 → 200, and liveness 200 during the real listener outage. It passes on
+both **v0.94.14** and **v0.114.0**. Full runs pass **20** baseline and **32** current
+live contracts with complete cleanup, including the ordinary hard sticky test
+before the explicitly isolated late restart phases. The unresolved S1 recovery
+limitation remains partial. Latest official package/source/artifact checks are
+current; no newer official revision was silently substituted.
+
+All six batch entries now have independent review clearance. The 39-row matrix
+contains **30 supported**, **9 partial** and **0 missing** entries. Partial entries
+retain their operational or evidence limits, including exporter setup, scheduling
+coverage, real TLS/federation proofs, remote CI and hard sticky recovery. This is
+not an assertion of exhaustive SDK parity or production capacity.
+
+## Final verification and packaging
+
+The final source passes **185** workspace tests, **182** SDK tests without default
+features, **7** standalone example tests and **9** Python support-claim guards.
+Format, strict workspace/standalone Clippy, strict rustdoc, doctests and Rust
+**1.85.1** workspace/standalone checks pass. Both lockfile RustSec audits report
+zero vulnerabilities and zero warnings against the recorded advisory database.
+The final live runs pass **20** baseline and **32** current engine contracts; the
+separate N4 native cold/offline-warm proof remains four post-fix live executions.
+
+Release preflight's quality stages passed, then its package-content guard exposed
+a stale expected protobuf count: durable streams adds the eighth build input.
+The guard now enforces eight files. The streams reviewer independently checked
+the exact package list against all eight `build.rs` inputs and cleared the change.
+The unchanged packaging, exact-archive test/doc, README consumer and registry
+dry-run functions were resumed after that correction and all passed. Core/macros
+registry dry runs pass; the SDK registry dry run remains deferred until those
+unpublished sibling versions exist in the registry. Nothing was published.
+
+Official versions/main and embedded release/source/assets were rechecked and
+remain current. Origin main was fetched successfully through the scoped VPN
+workaround. No VPN/system settings were changed. Final local check logs and
+archive evidence are under `target/parity-batch4-20261025/final/`; engine reports
+are under `o4/`. Remote GitHub Actions, official TS/Go suites, real TLS/federation
+coverage, production load and the other matrix partials are not asserted by
+these results.

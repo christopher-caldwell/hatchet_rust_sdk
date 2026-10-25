@@ -112,6 +112,9 @@ async fn live_client() -> Result<Client<GrpcTransport>> {
 
 Use TLS for production endpoints. A worker reports ready only after registration
 and its required streams are connected; it becomes unhealthy while reconnecting.
+With `.health_port(port)`, use `/readyz` for connection readiness and `/livez` for
+process liveness. Existing `/health` JSON and status codes are preserved. See
+[worker health probes](docs/parity/health-probes.md).
 `WorkerHandle::shutdown` is bounded by the configured cancellation grace
 period.
 

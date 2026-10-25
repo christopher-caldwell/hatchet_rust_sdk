@@ -642,15 +642,22 @@
       "area": "Health probe semantics",
       "batch": 4,
       "order": 6,
-      "status": "pending",
-      "acceptance": "Rust health server returns the same connection-dependent health response for every request path. It does not distinguish process liveness from readiness as TS /livez and /readyz do.",
+      "status": "complete",
+      "acceptance": "Distinct /livez always200 while responsive and /readyz connection-dependent200/503; preserves legacy Rust /health JSON/status. Bounded HTTP handling, HEAD/routes and owned cleanup. Actual restart readiness transition and liveness verified on baseline/current. See health-probes.md.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/worker/health-server.ts",
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/typescript/src/v1/client/worker/health-server.ts"
         }
       ],
-      "priority": "P3"
+      "priority": "P3",
+      "validation": [
+        "liveness_is_independent_of_readiness_and_legacy_health_preserves_json",
+        "probe_http_routes_methods_and_head_follow_their_status_contracts",
+        "fragmented_probe_requests_complete_and_shutdown_closes_pending_connections",
+        "incomplete_probe_requests_have_a_bounded_lifetime",
+        "durable_wait_and_checkpoint_survive_engine_restart"
+      ]
     }
   ],
   "batch_1_status": "complete",
@@ -687,6 +694,86 @@
     "security_advisories": 0
   },
   "validation_summary": {
+    "verified_at_utc": "2026-10-25T18:17:17.986161+00:00",
+    "workspace_tests": 185,
+    "no_default_tests": 182,
+    "standalone_tests": 7,
+    "live_engine": "v0.114.0",
+    "live_tests": 32,
+    "code_review": "All six gap reviews cleared: N2/N3/N5/N4/O2/O4. Reviewer findings were fixed and independently retested.",
+    "quality_gates": "Workspace/standalone format, strict Clippy, strict rustdoc, doctests and Rust 1.85.1 passed. Exact packaged SDK tests/docs and README consumer passed; sibling registry dry runs passed. SDK registry dry run is deferred until sibling publication.",
+    "live_support_floor": {
+      "v0.111.0": 1
+    },
+    "baseline_live_tests": 20,
+    "security_advisories": 0,
+    "new_limit": "S1 partial: hard sticky scheduling immediately after engine restart remains unresolved; normal routing and isolated restart contracts pass.",
+    "native_sidecar": {
+      "version": "v0.110.5",
+      "platform": "darwin_arm64",
+      "post_fix_live_executions": 4,
+      "cold_and_offline_warm": true
+    },
+    "python_support_claim_tests": 9,
+    "matrix": {
+      "rows": 39,
+      "supported": 30,
+      "partial": 9,
+      "missing": 0
+    },
+    "security_warnings": 0,
+    "release_preflight": "Original quality stages passed. Stale protobuf count guard fixed from7 to8 and independently reviewed; unchanged exact packaging/archive/consumer/dry-run functions resumed and passed.",
+    "github_actions": "Definitions supplied and suites pass locally; remote execution awaits push.",
+    "upstream": "Official SDK versions, main source and embedded source/release/assets rechecked current."
+  },
+  "batch_4_progress": {
+    "completed": [
+      "N2",
+      "N3",
+      "N5",
+      "N4",
+      "O2",
+      "O4"
+    ],
+    "remaining": [],
+    "review_policy": "A separate read-only code review is required after each gap before the next begins.",
+    "new_recovery_limit": "S1 partial: hard sticky task remained queued immediately after early engine restart in two runs; desired worker/action and active listener/heartbeat/configured capacity matched, root cause unconfirmed."
+  },
+  "batch_4_validation_summary": {
+    "verified_at_utc": "2026-10-25T18:17:17.986161+00:00",
+    "workspace_tests": 185,
+    "no_default_tests": 182,
+    "standalone_tests": 7,
+    "live_engine": "v0.114.0",
+    "live_tests": 32,
+    "code_review": "All six gap reviews cleared: N2/N3/N5/N4/O2/O4. Reviewer findings were fixed and independently retested.",
+    "quality_gates": "Workspace/standalone format, strict Clippy, strict rustdoc, doctests and Rust 1.85.1 passed. Exact packaged SDK tests/docs and README consumer passed; sibling registry dry runs passed. SDK registry dry run is deferred until sibling publication.",
+    "live_support_floor": {
+      "v0.111.0": 1
+    },
+    "baseline_live_tests": 20,
+    "security_advisories": 0,
+    "new_limit": "S1 partial: hard sticky scheduling immediately after engine restart remains unresolved; normal routing and isolated restart contracts pass.",
+    "native_sidecar": {
+      "version": "v0.110.5",
+      "platform": "darwin_arm64",
+      "post_fix_live_executions": 4,
+      "cold_and_offline_warm": true
+    },
+    "python_support_claim_tests": 9,
+    "matrix": {
+      "rows": 39,
+      "supported": 30,
+      "partial": 9,
+      "missing": 0
+    },
+    "security_warnings": 0,
+    "release_preflight": "Original quality stages passed. Stale protobuf count guard fixed from7 to8 and independently reviewed; unchanged exact packaging/archive/consumer/dry-run functions resumed and passed.",
+    "github_actions": "Definitions supplied and suites pass locally; remote execution awaits push.",
+    "upstream": "Official SDK versions, main source and embedded source/release/assets rechecked current."
+  },
+  "batch_4_status": "complete_with_explicit_evidence_limits",
+  "batch_3_validation_summary": {
     "verified_at_utc": "2026-10-25T15:27:17.700606+00:00",
     "engine_live_executions": {
       "v0.94.14": 19,
@@ -702,42 +789,5 @@
     "python_support_claim_tests": 6,
     "security_advisories": 0,
     "github_actions": "Definitions supplied and suites pass locally; remote execution awaits push."
-  },
-  "batch_4_progress": {
-    "completed": [
-      "N2",
-      "N3",
-      "N5",
-      "N4",
-      "O2"
-    ],
-    "remaining": [
-      "O4"
-    ],
-    "review_policy": "A separate read-only code review is required after each gap before the next begins.",
-    "new_recovery_limit": "S1 partial: hard sticky task remained queued immediately after early engine restart in two runs; desired worker/action and active listener/heartbeat/configured capacity matched, root cause unconfirmed."
-  },
-  "batch_4_validation_summary": {
-    "verified_at_utc": "2026-10-25T18:03:06.657884+00:00",
-    "workspace_tests": 181,
-    "no_default_tests": 171,
-    "standalone_tests": 7,
-    "live_engine": "v0.114.0",
-    "live_tests": 32,
-    "code_review": "N2/N3/N5/N4/O2 cleared; schema diagnostic property-name leaks and full batch-message bounds fixed",
-    "quality_gates": "All ten workspace/standalone format, Clippy, rustdoc, doctest and Rust 1.85.1 checks passed; matrix guard tests passed.",
-    "live_support_floor": {
-      "v0.111.0": 1
-    },
-    "baseline_live_tests": 20,
-    "security_advisories": 0,
-    "new_limit": "S1 partial: hard sticky scheduling immediately after engine restart remains unresolved; normal routing and isolated restart contracts pass.",
-    "native_sidecar": {
-      "version": "v0.110.5",
-      "platform": "darwin_arm64",
-      "post_fix_live_executions": 4,
-      "cold_and_offline_warm": true
-    },
-    "python_support_claim_tests": 9
   }
 }
