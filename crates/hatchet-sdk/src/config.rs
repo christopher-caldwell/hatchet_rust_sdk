@@ -25,6 +25,24 @@ pub enum TlsConfig {
     },
 }
 
+impl TlsConfig {
+    fn validate(&self) -> Result<()> {
+        if let Self::Custom {
+            client_cert,
+            client_key,
+            ..
+        } = self
+        {
+            if client_cert.is_some() != client_key.is_some() {
+                return Err(Error::Config(
+                    "client certificate and client key must be supplied together".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Log level for the SDK's internal logging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SdkLogLevel {
@@ -163,17 +181,32 @@ impl HatchetConfig {
     }
 
     pub(crate) async fn connect_channel(&self) -> Result<tonic::transport::Channel> {
+        self.tls.validate()?;
         let endpoint_url = self.endpoint_url();
         let mut endpoint =
             tonic::transport::Channel::from_shared(endpoint_url.clone()).map_err(|error| {
                 Error::Transport(format!("invalid endpoint URL '{endpoint_url}': {error}"))
             })?;
 
+        // http::Uri retains IPv6 brackets; rustls ServerName requires the raw
+        // IP address. Preserve certificate verification for IP SANs, including
+        // the System path, rather than handing tonic an invalid default name.
+        let tls_domain = endpoint
+            .uri()
+            .host()
+            .unwrap_or_default()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned();
         match &self.tls {
             TlsConfig::Insecure => {}
             TlsConfig::System => {
                 endpoint = endpoint
-                    .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
+                    .tls_config(
+                        tonic::transport::ClientTlsConfig::new()
+                            .domain_name(tls_domain.clone())
+                            .with_native_roots(),
+                    )
                     .map_err(|error| {
                         Error::Transport(format!("system TLS config failed: {error}"))
                     })?;
@@ -188,7 +221,9 @@ impl HatchetConfig {
                     Error::Transport(format!("failed to read CA cert: {error}"))
                 })?;
                 let ca = tonic::transport::Certificate::from_pem(ca_pem);
-                let mut tls = tonic::transport::ClientTlsConfig::new().ca_certificate(ca);
+                let mut tls = tonic::transport::ClientTlsConfig::new()
+                    .domain_name(tls_domain)
+                    .ca_certificate(ca);
 
                 if let (Some(cert_path), Some(key_path)) = (client_cert, client_key) {
                     let cert_pem = tokio::fs::read(cert_path).await.map_err(|error| {
@@ -328,7 +363,9 @@ impl HatchetConfigBuilder {
             .host_port
             .ok_or_else(|| Error::Transport("host_port is required".to_owned()))?;
 
-        let scheme = match self.tls.as_ref().unwrap_or(&TlsConfig::System) {
+        let tls = self.tls.unwrap_or(TlsConfig::System);
+        tls.validate()?;
+        let scheme = match &tls {
             TlsConfig::Insecure => "http",
             _ => "https",
         };
@@ -340,7 +377,7 @@ impl HatchetConfigBuilder {
             host_port,
             server_url,
             token,
-            tls: self.tls.unwrap_or(TlsConfig::System),
+            tls,
             namespace: self.namespace.as_deref().and_then(normalize_namespace),
             tenant_id,
             log_level: self.log_level.unwrap_or_default(),
@@ -600,5 +637,84 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(!debug.contains(secret));
         assert!(debug.contains("[REDACTED]"));
+    }
+    #[tokio::test]
+    async fn incomplete_client_identity_is_rejected_before_file_or_network_access() {
+        for (client_cert, client_key) in [
+            (Some(PathBuf::from("missing-cert")), None),
+            (None, Some(PathBuf::from("missing-key"))),
+        ] {
+            let tls = TlsConfig::Custom {
+                ca_cert: PathBuf::from("missing-ca"),
+                client_cert,
+                client_key,
+                server_name: None,
+            };
+            assert!(matches!(
+                HatchetConfig::builder()
+                    .host_port("127.0.0.1:9")
+                    .tenant_id("t")
+                    .token("synthetic")
+                    .tls(tls.clone())
+                    .build(),
+                Err(Error::Config(_))
+            ));
+            let mut config = HatchetConfig::builder()
+                .host_port("127.0.0.1:9")
+                .tenant_id("t")
+                .token("synthetic")
+                .tls(TlsConfig::Insecure)
+                .build()
+                .unwrap();
+            config.tls = tls;
+            assert!(matches!(
+                config.connect_channel().await,
+                Err(Error::Config(_))
+            ));
+        }
+    }
+    #[tokio::test]
+    async fn ipv6_tls_defaults_reach_a_real_socket_and_send_a_client_hello() {
+        use tokio::io::AsyncReadExt;
+        let empty_ca = tempfile::NamedTempFile::new().unwrap();
+        for tls in [
+            TlsConfig::System,
+            TlsConfig::Custom {
+                ca_cert: empty_ca.path().to_owned(),
+                client_cert: None,
+                client_key: None,
+                server_name: None,
+            },
+        ] {
+            let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+            let config = HatchetConfig::builder()
+                .host_port(listener.local_addr().unwrap().to_string())
+                .tenant_id("t")
+                .token("synthetic")
+                .tls(tls)
+                .build()
+                .unwrap();
+            let mut connection = tokio::spawn(async move { config.connect_channel().await });
+            let (mut socket,_)=tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                tokio::select! {
+                    accepted=listener.accept()=>accepted.unwrap(),
+                    result=&mut connection=>panic!("TLS failed before opening IPv6 socket: {result:?}"),
+                }
+            }).await.unwrap();
+            let mut byte = [0];
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                socket.read_exact(&mut byte),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                byte[0], 0x16,
+                "expected TLS handshake, never plaintext fallback"
+            );
+            connection.abort();
+            assert!(connection.await.unwrap_err().is_cancelled());
+        }
     }
 }

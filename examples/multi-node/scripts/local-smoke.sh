@@ -8,6 +8,7 @@ NETWORK="$RUN_KEY"
 POSTGRES="$RUN_KEY-postgres"
 HATCHET="$RUN_KEY-hatchet"
 VOLUME="$RUN_KEY-config"
+TLS_DIR=""
 ORDERS_PID=""
 NOTIFICATIONS_PID=""
 HATCHET_IMAGE="${SMOKE_HATCHET_IMAGE:-ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.94.14@sha256:b8d6b7e9b96d354f1a252590d1480d3bb70f01604cc6cba1fd97ff7aaa2cb07c}"
@@ -35,6 +36,7 @@ perform_cleanup() {
   docker rm -f "$HATCHET" "$POSTGRES" >/dev/null 2>&1 || true
   docker volume rm "$VOLUME" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  if [[ -n "$TLS_DIR" ]]; then rm -rf "$TLS_DIR"; fi
   CLEANED_UP=1
 }
 
@@ -59,6 +61,16 @@ if [[ -n "${SMOKE_TEST_CLEANUP_ONLY:-}" ]]; then
 fi
 
 mkdir -p "$EXAMPLE/target/smoke"
+TLS_ARGS=()
+GRPC_INSECURE=true
+if [[ "${SMOKE_TLS:-0}" == "1" ]]; then
+  TLS_DIR=$(mktemp -d "$EXAMPLE/target/tls-owned.XXXXXX")
+  bash "$ROOT/scripts/generate-test-tls.sh" "$TLS_DIR"
+  GRPC_INSECURE=false
+  TLS_ARGS=(-v "$TLS_DIR:/tls:ro" -e SERVER_TLS_STRATEGY=tls
+    -e SERVER_TLS_CERT_FILE=/tls/server.pem -e SERVER_TLS_KEY_FILE=/tls/server.key
+    -e SERVER_TLS_ROOT_CA_FILE=/tls/ca.pem)
+fi
 CURRENT_STAGE=worker_build
 cargo build --locked --manifest-path "$EXAMPLE/Cargo.toml" --bins
 EXAMPLE_TARGET=$(cargo metadata --locked --manifest-path "$EXAMPLE/Cargo.toml" \
@@ -91,7 +103,7 @@ docker run -d --name "$HATCHET" --network "$NETWORK" \
   -e ADMIN_PASSWORD='LocalHatchet2026!' -e DEFAULT_TENANT_NAME='Rust SDK Demo' \
   -e DEFAULT_TENANT_SLUG=rust-sdk-demo -e DEFAULT_TENANT_ID=707d0855-80ab-4e1f-a156-f1c4546cbf52 \
   -e SERVER_GRPC_BIND_ADDRESS=0.0.0.0 -e SERVER_GRPC_PORT=7077 \
-  -e SERVER_GRPC_INSECURE=true -e SERVER_GRPC_BROADCAST_ADDRESS=localhost:7077 \
+  -e SERVER_GRPC_INSECURE="$GRPC_INSECURE" -e SERVER_GRPC_BROADCAST_ADDRESS=localhost:7077 \
   -e SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS=localhost:7077 \
   -e SERVER_DEFAULT_ENGINE_VERSION=V1 \
   -e SERVER_OPTIMISTIC_SCHEDULING_ENABLED=false \
@@ -99,7 +111,7 @@ docker run -d --name "$HATCHET" --network "$NETWORK" \
   -e SERVER_AUTH_COOKIE_INSECURE=true -e SERVER_AUTH_SET_EMAIL_VERIFIED=true \
   -e SERVER_ALLOW_SIGNUP=false -e SERVER_ALLOW_INVITES=false \
   -e LITE_RUNTIME_PORT=8888 -e SERVER_HEALTHCHECK_PORT=8733 \
-  "$HATCHET_IMAGE" >/dev/null
+  "${TLS_ARGS[@]}" "$HATCHET_IMAGE" >/dev/null
 
 CURRENT_STAGE=hatchet_readiness
 for _ in $(seq 1 120); do
@@ -124,6 +136,12 @@ export HATCHET_CLIENT_TOKEN="$TOKEN"
 export HATCHET_CLIENT_HOST_PORT=localhost:17077
 export HATCHET_CLIENT_SERVER_URL=http://localhost:18888
 export HATCHET_CLIENT_TLS_STRATEGY=none
+if [[ "${SMOKE_TLS:-0}" == "1" ]]; then
+  export HATCHET_CLIENT_TLS_STRATEGY=tls
+  export HATCHET_CLIENT_TLS_ROOT_CA_FILE="$TLS_DIR/ca.pem"
+  export HATCHET_TEST_TLS_CA_FILE="$TLS_DIR/ca.pem"
+  export HATCHET_TEST_TLS_WRONG_CA_FILE="$TLS_DIR/wrong-ca.pem"
+fi
 export HATCHET_CLIENT_NAMESPACE=local-demo
 export HATCHET_CLIENT_LOG_LEVEL=info
 
@@ -169,6 +187,7 @@ if [[ "${SMOKE_RUN_SDK_INTEGRATION:-1}" != "0" ]]; then
   (
     cd "$ROOT"
     SDK_TEST_TARGETS=(--test integration)
+    if [[ "${SMOKE_TLS:-0}" == "1" ]]; then SDK_TEST_TARGETS+=(--test tls_engine); fi
     if [[ "${SMOKE_RUN_MODERN_TESTS:-0}" == "1" ]]; then SDK_TEST_TARGETS+=(--test modern_engine); fi
     if [[ "${SMOKE_RUN_RECOVERY_TESTS:-0}" == "1" ]]; then SDK_TEST_TARGETS+=(--test recovery_engine --test sticky_recovery_engine --test worker_crash_engine); fi
     export HATCHET_TEST_ENGINE_CONTAINER="$HATCHET"

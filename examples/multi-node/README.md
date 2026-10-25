@@ -224,3 +224,10 @@ live topology, two completed run IDs, 10-minute measurements, and final settings
 requires the container name exported by the runner and never targets a remote
 engine. Reports sum successful tests across the selected suites. See the root
 [feature matrix](../../docs/parity/feature-support.md) for support floors and limits.
+
+For a disposable native gRPC TLS proof, run
+`SMOKE_TLS=1 SMOKE_RUN_RECOVERY_TESTS=0 examples/multi-node/scripts/local-smoke.sh`.
+The runner generates its own short-lived CA/leaf, mounts them into the engine,
+runs the SDK suite and trusted/untrusted/name-verification probes, then deletes
+the fixtures during owned cleanup. It never changes the machine trust store.
+REST stays on local HTTP in this fixture.

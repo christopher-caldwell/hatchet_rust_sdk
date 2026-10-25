@@ -110,7 +110,9 @@ async fn live_client() -> Result<Client<GrpcTransport>> {
 }
 ```
 
-Use TLS for production endpoints. A worker reports ready only after registration
+Use TLS for production endpoints. Custom client identities require both the
+certificate and private-key paths. IPv6 endpoints retain certificate IP-name
+verification. A worker reports ready only after registration
 and its required streams are connected; it becomes unhealthy while reconnecting.
 With `.health_port(port)`, use `/readyz` for connection readiness and `/livez` for
 process liveness. Existing `/health` JSON and status codes are preserved. See

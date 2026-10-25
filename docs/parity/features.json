@@ -414,7 +414,7 @@
     },
     {
       "id": "C13",
-      "feature": "Platform TLS roots",
+      "feature": "gRPC TLS verification and native/custom roots",
       "typescript": {
         "status": "supported",
         "source": "src/clients/hatchet-client/client-config.ts"
@@ -424,20 +424,31 @@
         "source": "client.go"
       },
       "rust": {
-        "status": "partial",
+        "status": "supported",
         "sources": [
           "crates/hatchet-sdk/src/config.rs"
         ],
         "tests": [
           {
             "file": "crates/hatchet-sdk/src/config.rs",
-            "name": "endpoint_url_uses_https_for_tls",
-            "engines": []
+            "name": "ipv6_tls_defaults_reach_a_real_socket_and_send_a_client_hello"
+          },
+          {
+            "file": "crates/hatchet-sdk/src/config.rs",
+            "name": "incomplete_client_identity_is_rejected_before_file_or_network_access"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/tls_engine.rs",
+            "name": "real_engine_tls_verifies_custom_and_native_roots_and_rejects_wrong_ca_and_hostname",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
           }
         ]
       },
       "engine": "Baseline v0.94.14",
-      "notes": "TLS transport and system-root setup are implemented. Live engine proofs use disposable plaintext local services."
+      "notes": "Native engine gRPC TLS passes trusted custom/native CA, wrongCA and wronghostname rejection, authenticated workflow execution on baseline/current. Fixes default IPv6 verification name for tonic0.14.2 and rejects incomplete client identity pairs beforeIO. Native success uses process-scoped SSL_CERT_FILE; no hosttrust changes. Local Darwin proof and supplied LinuxCI; HTTPS REST, full platform/mTLS fleet and rotation notclaimed. See batch-5.md."
     },
     {
       "id": "S2",

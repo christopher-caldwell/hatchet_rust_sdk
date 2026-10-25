@@ -796,11 +796,10 @@
     "completed": [
       "Exact workflow name lookup pagination; management read/mutation safety",
       "S1 eventual restart recovery regression and bounded official submission comparison",
-      "Actual worker-process crash/replacement with normal/durable retry recovery and persistent memo"
+      "Actual worker-process crash/replacement with normal/durable retry recovery and persistent memo",
+      "Native engine gRPC TLS trust/name verification; fixed IPv6 default name and incomplete client identity; reviewed permanent IPv6 wire regression"
     ],
-    "remaining_focus": [
-      "TLS connection verification"
-    ],
-    "status": "in_progress"
+    "remaining_focus": [],
+    "status": "final_validation"
   }
 }

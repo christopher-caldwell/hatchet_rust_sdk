@@ -63,3 +63,39 @@ The parent's Rust **1.85.1** check also passes. The actual crash parent is inclu
 in the existing baseline/current disposable recovery targets; no external runtime
 is needed. V1 remains partial for remote CI and its other explicit limits.
 Evidence: `target/parity-batch5-20261025/crash/`.
+
+## Native engine TLS and configuration fixes
+
+The runner now supports opt-in native engine **gRPC TLS**, with an owned
+short-lived CA/leaf fixture, server TLS configuration and SDK trust configuration.
+There is no TLS terminator. Both **v0.94.14** and **v0.114.0** pass **20** live
+checks each: 19 ordinary SDK contracts plus the TLS case. The latter checks
+trusted custom CA, rejected wrong CA and wrong hostname, an authenticated workflow
+round trip, default native-store rejection of the fresh CA and successful native
+root loading through a child-process-only `SSL_CERT_FILE`. Host trust stores,
+user environment and VPN settings are never changed; owned fixture keys are
+removed by cleanup. REST remains local HTTP.
+
+The first real run exposed tonic 0.14.2 passing a bracketed IPv6 URI host to
+rustls as the default verification name. The SDK now supplies the unbracketed IP
+in both Custom and System paths, preserving IP SAN checks and explicit hostname
+overrides. A second defect silently omitted a requested client identity when
+only its certificate or key was supplied. Builder validation and channel creation
+now reject incomplete pairs before file/network access, including configurations
+mutated through the public TLS field.
+
+Independent review found a test gap: canonical CI connects to `localhost`, so its
+live case alone would miss regression of the IPv6 fix. A new network-level unit
+case requires both default TLS modes to open an IPv6 listener connection and send
+a TLS ClientHello, then aborts/joins the deliberately incomplete handshake. The
+old bracket failure occurs before connecting and fails that regression. Both live
+CA-verification and wire tests complement each other; the latter does not claim
+a completed verified handshake by itself. The reviewer independently reran the
+config/wire/helper checks and strict Clippy, inspected both live profiles and
+cleared all findings.
+
+A pinned current-engine TLS CI profile is supplied alongside the existing plain
+profiles; remote CI remains unexecuted. C13 now records the exercised gRPC TLS
+contract as supported, with explicit limits for HTTPS REST, OS/platform fleets,
+trust-store installation, full mTLS lifecycle and rotation. Those operations were
+not exercised by this fixture. Evidence: `target/parity-batch5-20261025/tls/`.
