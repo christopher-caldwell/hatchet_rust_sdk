@@ -285,6 +285,11 @@ impl<T: Transport + 'static> Client<T> {
                     declaration.name
                 ))
             })?;
+        crate::schema::InputValidator::compile(materialized.input_schema.as_ref())?;
+        materialized.task_defaults.validate_input_schema()?;
+        for step in &materialized.steps {
+            step.config.validate_input_schema()?;
+        }
         if let Some(config) = &materialized.idempotency {
             config.ttl_ms()?;
         }

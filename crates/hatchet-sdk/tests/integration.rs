@@ -1551,3 +1551,154 @@ async fn integration_native_tracing_and_middleware_propagate_across_child_runs()
     provider.shutdown().unwrap();
     global::set_tracer_provider(opentelemetry::trace::noop::NoopTracerProvider::new());
 }
+
+#[derive(Debug)]
+struct SchemaInvocationProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait::async_trait]
+impl another_hatchet_sdk::TaskMiddleware for SchemaInvocationProbe {
+    async fn handle(
+        &self,
+        invocation: another_hatchet_sdk::TaskInvocation,
+        next: another_hatchet_sdk::Next,
+    ) -> another_hatchet_sdk::Result<serde_json::Value> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        next.run(invocation).await
+    }
+}
+#[derive(serde::Deserialize)]
+struct SchemaNarrowInput {
+    value: u8,
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a live Hatchet engine"]
+async fn integration_rich_input_schemas_enforce_normal_durable_and_decode_failures_without_retries()
+{
+    use another_hatchet_sdk::*;
+    use serde_json::{Value, json};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    let client = Client::new(Arc::new(
+        GrpcTransport::from_config(HatchetConfig::from_env().unwrap())
+            .await
+            .unwrap(),
+    ));
+    let schema = json!({"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{"count":{"type":"integer","minimum":1,"maximum":5}},"type":"object","required":["count","email"],"additionalProperties":false,"properties":{"count":{"$ref":"#/$defs/count"},"email":{"type":"string","format":"email"}}});
+    let config = TaskConfig::builder()
+        .input_schema(schema)
+        .retries(3)
+        .build();
+    let plain = TaskConfig::builder().retries(3).build();
+    let normal = client
+        .task::<Value, Value>("rich-schema-normal")
+        .with_config(config.clone());
+    let durable = client
+        .durable_task::<Value, Value>("rich-schema-durable")
+        .with_config(config.clone());
+    let narrow = client
+        .task::<SchemaNarrowInput, Value>("rich-schema-narrow")
+        .with_config(plain.clone());
+    for declaration in [
+        WorkflowDeclaration::<Value, Value>::new("rich-schema-normal-wf")
+            .step(&normal, config.clone()),
+        WorkflowDeclaration::<Value, Value>::new("rich-schema-durable-wf")
+            .durable_step(&durable, config),
+        WorkflowDeclaration::<Value, Value>::new("rich-schema-narrow-wf").step(&narrow, plain),
+    ] {
+        client.register_workflow(declaration).await.unwrap();
+    }
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&calls);
+    let dcount = Arc::clone(&calls);
+    let ncount = Arc::clone(&calls);
+    let worker = client
+        .worker("rich-schema-worker")
+        .middleware(SchemaInvocationProbe(Arc::clone(&attempts)))
+        .register_task(&normal, move |value, _: InMemoryContext<GrpcTransport>| {
+            count.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(value) }
+        })
+        .register_durable_task(
+            &durable,
+            move |value, _: InMemoryDurableContext<GrpcTransport>| {
+                dcount.fetch_add(1, Ordering::SeqCst);
+                async move { Ok(value) }
+            },
+        )
+        .register_task(
+            &narrow,
+            move |value: SchemaNarrowInput, _: InMemoryContext<GrpcTransport>| {
+                ncount.fetch_add(1, Ordering::SeqCst);
+                async move { Ok(json!({"value":value.value})) }
+            },
+        )
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(15))
+        .await
+        .unwrap();
+    for (name, input, valid) in [
+        (
+            "rich-schema-normal-wf",
+            json!({"count":2,"email":"a@example.com"}),
+            true,
+        ),
+        (
+            "rich-schema-normal-wf",
+            json!({"count":0,"email":"private-invalid-secret"}),
+            false,
+        ),
+        (
+            "rich-schema-durable-wf",
+            json!({"count":3,"email":"a@example.com"}),
+            true,
+        ),
+        (
+            "rich-schema-durable-wf",
+            json!({"count":3,"email":"private-invalid-secret"}),
+            false,
+        ),
+        ("rich-schema-narrow-wf", json!({"value":7}), true),
+        ("rich-schema-narrow-wf", json!({"value":300}), false),
+    ] {
+        let run = client
+            .workflow::<Value, Value>(name)
+            .run_no_wait(input.clone(), RunOpts::default())
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(30), run.output())
+            .await
+            .unwrap();
+        if valid {
+            assert_eq!(result.unwrap(), input);
+        } else {
+            let error = result.unwrap_err();
+            assert!(!error.to_string().contains("private-invalid-secret"));
+            assert_eq!(
+                client.runs().get_status(run.run_id()).await.unwrap(),
+                RunStatus::Failed
+            );
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        6,
+        "invalid inputs must not consume the configured3retries"
+    );
+    worker.shutdown().await.unwrap();
+    for name in [
+        "rich-schema-normal-wf",
+        "rich-schema-durable-wf",
+        "rich-schema-narrow-wf",
+    ] {
+        client.workflows().delete(name).await.unwrap();
+    }
+}

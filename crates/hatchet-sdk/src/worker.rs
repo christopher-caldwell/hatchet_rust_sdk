@@ -26,12 +26,14 @@ type BoxFutureResult = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'stat
 const DEFAULT_CANCELLATION_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 trait ErasedTaskFn<T: Transport>: Send + Sync {
+    fn validate_config(&self) -> Result<()>;
     fn concurrency_limit(&self) -> Option<Arc<Semaphore>>;
     fn matches_worker_labels(&self, worker_labels: &BTreeMap<String, String>) -> bool;
     fn call(&self, input: Value, ctx: InMemoryContext<T>) -> BoxFutureResult;
 }
 
 trait ErasedDurableTaskFn<T: Transport>: Send + Sync {
+    fn validate_config(&self) -> Result<()>;
     fn concurrency_limit(&self) -> Option<Arc<Semaphore>>;
     fn matches_worker_labels(&self, worker_labels: &BTreeMap<String, String>) -> bool;
     fn call(&self, input: Value, ctx: InMemoryDurableContext<T>) -> BoxFutureResult;
@@ -40,6 +42,7 @@ trait ErasedDurableTaskFn<T: Transport>: Send + Sync {
 struct TypedTaskHandler<T: Transport, I, O, F> {
     func: Arc<F>,
     config: TaskConfig,
+    validator: Result<Option<crate::schema::InputValidator>>,
     concurrency: Option<Arc<Semaphore>>,
     io: std::marker::PhantomData<fn(I) -> O>,
     transport: std::marker::PhantomData<fn() -> T>,
@@ -48,6 +51,7 @@ struct TypedTaskHandler<T: Transport, I, O, F> {
 struct TypedDurableTaskHandler<T: Transport, I, O, F> {
     func: Arc<F>,
     config: TaskConfig,
+    validator: Result<Option<crate::schema::InputValidator>>,
     concurrency: Option<Arc<Semaphore>>,
     io: std::marker::PhantomData<fn(I) -> O>,
     transport: std::marker::PhantomData<fn() -> T>,
@@ -61,6 +65,13 @@ where
     F: Fn(I, InMemoryContext<T>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<O>> + Send + 'static,
 {
+    fn validate_config(&self) -> Result<()> {
+        self.validator.as_ref().map_err(Clone::clone)?;
+        if let Some(batch) = &self.config.batch {
+            batch.validate()?;
+        }
+        Ok(())
+    }
     fn concurrency_limit(&self) -> Option<Arc<Semaphore>> {
         self.concurrency.as_ref().map(Arc::clone)
     }
@@ -71,9 +82,11 @@ where
 
     fn call(&self, input: Value, ctx: InMemoryContext<T>) -> BoxFutureResult {
         let func = Arc::clone(&self.func);
-        let config = self.config.clone();
+        let validator = self.validator.clone();
+        let batch = self.config.batch.clone();
         Box::pin(async move {
-            let validation_errors = if let Some(batch) = &config.batch {
+            let validator = validator?;
+            let validation_errors = if let Some(batch) = &batch {
                 batch.validate()?;
                 let members = input
                     .as_object()
@@ -84,14 +97,18 @@ where
                 members
                     .iter()
                     .flat_map(|(id, value)| {
-                        config
-                            .validate_input_value(value)
+                        crate::schema::errors(validator.as_ref(), value)
                             .into_iter()
-                            .map(move |error| format!("batch member {id}: {error}"))
+                            .map(move |error| {
+                                crate::schema::diagnostic(format_args!(
+                                    "batch member {id}: {error}"
+                                ))
+                            })
                     })
+                    .take(crate::schema::MAX_ERRORS)
                     .collect::<Vec<_>>()
             } else {
-                config.validate_input_value(&input)
+                crate::schema::errors(validator.as_ref(), &input)
             };
             if !validation_errors.is_empty() {
                 return Err(Error::InputValidation(validation_errors));
@@ -100,12 +117,15 @@ where
                 .as_object()
                 .map(|m| m.keys().cloned().collect::<Vec<_>>())
                 .unwrap_or_default();
-            let decoded = serde_json::from_value::<I>(input)
-                .map_err(|error| Error::Worker(format!("task input decode failed: {error}")))?;
+            let decoded = serde_json::from_value::<I>(input).map_err(|_| {
+                Error::InputValidation(vec![
+                    "task input cannot be decoded as its declared type".into(),
+                ])
+            })?;
             let output = (func)(decoded, ctx).await?;
             let value = serde_json::to_value(output)
                 .map_err(|error| Error::Worker(format!("task output encode failed: {error}")))?;
-            if let Some(batch) = config.batch {
+            if let Some(batch) = batch {
                 crate::batch::outputs(&member_ids, value, batch.broadcast_output)
             } else {
                 Ok(value)
@@ -122,6 +142,15 @@ where
     F: Fn(I, InMemoryDurableContext<T>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<O>> + Send + 'static,
 {
+    fn validate_config(&self) -> Result<()> {
+        self.validator.as_ref().map_err(Clone::clone)?;
+        if self.config.batch.is_some() {
+            return Err(Error::InputValidation(vec![
+                "batch tasks cannot be durable".into(),
+            ]));
+        }
+        Ok(())
+    }
     fn concurrency_limit(&self) -> Option<Arc<Semaphore>> {
         self.concurrency.as_ref().map(Arc::clone)
     }
@@ -132,19 +161,24 @@ where
 
     fn call(&self, input: Value, ctx: InMemoryDurableContext<T>) -> BoxFutureResult {
         let func = Arc::clone(&self.func);
-        let config = self.config.clone();
+        let validator = self.validator.clone();
+        let is_batch = self.config.batch.is_some();
         Box::pin(async move {
-            if config.batch.is_some() {
+            if is_batch {
                 return Err(Error::InputValidation(vec![
                     "batch tasks cannot be durable".into(),
                 ]));
             }
-            let validation_errors = config.validate_input_value(&input);
+            let validator = validator?;
+            let validation_errors = crate::schema::errors(validator.as_ref(), &input);
             if !validation_errors.is_empty() {
                 return Err(Error::InputValidation(validation_errors));
             }
-            let decoded = serde_json::from_value::<I>(input)
-                .map_err(|error| Error::Worker(format!("durable input decode failed: {error}")))?;
+            let decoded = serde_json::from_value::<I>(input).map_err(|_| {
+                Error::InputValidation(vec![
+                    "durable input cannot be decoded as its declared type".into(),
+                ])
+            })?;
             let output = (func)(decoded, ctx).await?;
             serde_json::to_value(output)
                 .map_err(|error| Error::Worker(format!("durable output encode failed: {error}")))
@@ -458,6 +492,7 @@ impl<T: Transport + 'static> WorkerBuilder<T> {
             task.task_name().to_owned(),
             Arc::new(TypedTaskHandler::<T, I, O, F> {
                 func: Arc::new(handler),
+                validator: crate::schema::InputValidator::compile(config.input_schema.as_ref()),
                 concurrency: config
                     .concurrency
                     .as_ref()
@@ -488,6 +523,7 @@ impl<T: Transport + 'static> WorkerBuilder<T> {
             task.task_name().to_owned(),
             Arc::new(TypedDurableTaskHandler::<T, I, O, F> {
                 func: Arc::new(handler),
+                validator: crate::schema::InputValidator::compile(config.input_schema.as_ref()),
                 concurrency: config
                     .concurrency
                     .as_ref()
@@ -540,6 +576,12 @@ impl<T: Transport + 'static> Worker<T> {
     ///
     /// Returns an error if the runtime task cannot be started.
     pub fn start(self) -> Result<WorkerHandle> {
+        for handler in self.non_durable_registry.values() {
+            handler.validate_config()?;
+        }
+        for handler in self.durable_registry.values() {
+            handler.validate_config()?;
+        }
         let (tx, rx) = mpsc::channel(256);
         let dispatcher = WorkerDispatcher::new(tx.clone());
         let paused = Arc::new(RwLock::new(false));

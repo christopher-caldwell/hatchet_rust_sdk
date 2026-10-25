@@ -53,13 +53,24 @@ impl TaskConfig {
         self
     }
 
+    /// Generates a draft 2020-12 schema for the type's Serde deserialization form.
+    #[must_use]
+    pub fn with_input_schema_for<I: schemars::JsonSchema>(self) -> Self {
+        self.with_input_schema_value(crate::schema::generated::<I>())
+    }
+    /// Checks schema syntax/references offline, without validating an input.
+    /// # Errors
+    /// Returns invalid schema or unsupported external-reference configuration.
+    pub fn validate_input_schema(&self) -> crate::Result<()> {
+        crate::schema::InputValidator::compile(self.input_schema.as_ref()).map(|_| ())
+    }
+
     #[must_use]
     pub fn validate_input_value(&self, input: &Value) -> Vec<String> {
-        let mut errors = Vec::new();
-        if let Some(schema) = &self.input_schema {
-            validate_schema(schema, input, "$", &mut errors);
+        match crate::schema::InputValidator::compile(self.input_schema.as_ref()) {
+            Ok(validator) => crate::schema::errors(validator.as_ref(), input),
+            Err(error) => vec![error.to_string()],
         }
-        errors
     }
 }
 
@@ -114,6 +125,13 @@ impl TaskConfigBuilder {
     #[must_use]
     pub fn batch(mut self, config: crate::BatchConfig) -> Self {
         self.inner.batch = Some(config);
+        self
+    }
+
+    /// Generates the input schema from a Serde-compatible JsonSchema type.
+    #[must_use]
+    pub fn input_schema_for<I: schemars::JsonSchema>(mut self) -> Self {
+        self.inner.input_schema = Some(crate::schema::generated::<I>());
         self
     }
 
@@ -326,56 +344,4 @@ pub enum ConcurrencyLimitStrategy {
     CancelInProgress,
     CancelNewest,
     GroupRoundRobin,
-}
-
-fn validate_schema(schema: &Value, input: &Value, path: &str, errors: &mut Vec<String>) {
-    if let Some(expected_type) = schema.get("type").and_then(Value::as_str) {
-        let matches = match expected_type {
-            "object" => input.is_object(),
-            "array" => input.is_array(),
-            "string" => input.is_string(),
-            "integer" => input.is_i64() || input.is_u64(),
-            "number" => input.is_number(),
-            "boolean" => input.is_boolean(),
-            "null" => input.is_null(),
-            _ => true,
-        };
-
-        if !matches {
-            errors.push(format!("{path}: expected {expected_type}"));
-            return;
-        }
-    }
-
-    if schema
-        .get("enum")
-        .and_then(Value::as_array)
-        .is_some_and(|enum_values| !enum_values.iter().any(|candidate| candidate == input))
-    {
-        errors.push(format!("{path}: value is not in enum"));
-    }
-
-    if let Some(object) = input.as_object() {
-        if let Some(required) = schema.get("required").and_then(Value::as_array) {
-            for key in required.iter().filter_map(Value::as_str) {
-                if !object.contains_key(key) {
-                    errors.push(format!("{path}.{key}: required field missing"));
-                }
-            }
-        }
-
-        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-            for (key, property_schema) in properties {
-                if let Some(value) = object.get(key) {
-                    validate_schema(property_schema, value, &format!("{path}.{key}"), errors);
-                }
-            }
-        }
-    }
-
-    if let Some((items_schema, items)) = schema.get("items").zip(input.as_array()) {
-        for (index, item) in items.iter().enumerate() {
-            validate_schema(items_schema, item, &format!("{path}[{index}]"), errors);
-        }
-    }
 }

@@ -175,3 +175,35 @@ and warnings are zero. Nine Python support-claim guards pass, including embedded
 release/source/artifact drift and native CI pin checks. Upstream versions/main
 were queried again and are current. Native parent SIGKILL during initialization,
 external DB/RabbitMQ fleets and forced-kill database cleanup are NOT EXERCISED.
+
+## O2: runtime input schemas and generation
+
+Replaced the handwritten subset with reusable offline `jsonschema` 0.60.1
+validators and Serde-deserialization schema generation through Schemars 1.2.3.
+Both preserve Rust 1.85 compatibility. Normal, durable and individual batch inputs
+are validated after middleware and before typed decode/handler execution; invalid
+schema configuration fails before worker startup or workflow registration mutation.
+Workflow schemas remain explicit metadata. See [input-schemas.md](input-schemas.md).
+
+Seven focused contracts cover constraints/composition/conditionals/recursive local
+references, generated Serde names/defaults/enums, exact registration metadata,
+pre-mutation errors, blocked external retrieval and handler/decode boundaries. A
+separate SDK-only consumer builds and runs the re-exported derive API. A live
+test observes all attempts through middleware: three valid and three rejected
+inputs produce six attempts, only three handler calls and no retries despite a
+configured three-retry policy. Both baseline v0.94.14 and current v0.114.0 pass.
+The full runs pass **20** baseline and **32** current live contracts with complete
+cleanup, preserving the separately documented S1 restart/routing limitation.
+
+Independent review found a nested property-name value leak through the validator's
+masked renderer, then a batch member prefix that bypassed message truncation.
+Diagnostics now render only schema/instance locations and cap the complete message
+(including member identity) at 512 bytes plus an ellipsis, with UTF-8-safe truncation
+and at most 16 messages. Both regressions pass; the reviewer independently reran
+all seven contracts and cleared the source. No official SDK or exhaustive JSON
+Schema conformance suite is claimed; external resources and Zod callbacks remain
+outside the documented offline schema contract.
+
+The workspace suite passes **181** tests; strict Clippy/rustdoc, Rust **1.85.1**
+workspace/standalone checks and both lockfile audits pass. Final batch-wide checks
+follow O4. Detailed evidence is retained under `target/parity-batch4-20261025/o2/`.

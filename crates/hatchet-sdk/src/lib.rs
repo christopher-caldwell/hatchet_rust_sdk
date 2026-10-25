@@ -25,6 +25,7 @@ mod rest_client;
 mod retry_after;
 mod run_ref;
 mod run_stream;
+mod schema;
 mod streams;
 mod task;
 mod telemetry;
@@ -78,6 +79,7 @@ pub use rate_pause::RateLimitPauseResult;
 pub use retry_after::RetryAfterError;
 pub use run_ref::{RunControl, WorkflowRunRef};
 pub use run_stream::RunEventStream;
+pub use schemars;
 pub use streams::{
     StreamEvent, StreamOptions, StreamTopicMetadata, StreamsClient, TopicEventStream,
 };

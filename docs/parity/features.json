@@ -1354,7 +1354,7 @@
     },
     {
       "id": "O2",
-      "feature": "Broad runtime schema/Zod-equivalent validation",
+      "feature": "Runtime input schemas and Serde-compatible generation",
       "typescript": {
         "status": "supported",
         "source": "src/v1/declaration.ts"
@@ -1363,20 +1363,51 @@
         "status": "absent"
       },
       "rust": {
-        "status": "partial",
+        "status": "supported",
         "sources": [
-          "crates/hatchet-sdk/src/task.rs"
+          "crates/hatchet-sdk/src/schema.rs",
+          "crates/hatchet-sdk/src/task.rs",
+          "crates/hatchet-sdk/src/worker.rs",
+          "crates/hatchet-sdk/src/workflow.rs"
         ],
         "tests": [
           {
-            "file": "crates/hatchet-sdk/tests/feature_set_6_validation.rs",
-            "name": "validates_task_config_and_workflow_declaration_builders",
+            "file": "crates/hatchet-sdk/tests/schema_contracts.rs",
+            "name": "schema_constraints_composition_refs_formats_and_boolean_schemas_are_enforced",
             "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/schema_contracts.rs",
+            "name": "generated_schemas_follow_serde_names_defaults_enums_and_local_definitions",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/schema_contracts.rs",
+            "name": "runtime_validates_normal_durable_and_each_batch_member_before_handler_and_decode_is_not_retried",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/schema_contracts.rs",
+            "name": "schema_diagnostics_omit_nested_values_and_bound_error_count_and_path_bytes",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/schema_contracts.rs",
+            "name": "invalid_worker_schemas_fail_before_start_and_external_resources_are_never_retrieved",
+            "engines": []
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/integration.rs",
+            "name": "integration_rich_input_schemas_enforce_normal_durable_and_decode_failures_without_retries",
+            "engines": [
+              "v0.94.14",
+              "v0.114.0"
+            ]
           }
         ]
       },
       "engine": "Baseline v0.94.14",
-      "notes": "Serde typing plus a JSON-schema subset exist. Composition/ref/broad constraints and automatic schema generation remain incomplete; Zod is TS-specific."
+      "notes": "Reusable offline JSON Schema validation (jsonschema 0.60.1) and Serde-deserialization schema generation (schemars 1.2.3). Normal/durable/member inputs checked before decode/handler; invalid schema rejected before registration/start. Generated workflow schema is metadata only. No Zod callback/coercion/transform execution; external refs disabled, diagnostics bounded. See input-schemas.md."
     },
     {
       "id": "O4",

@@ -232,6 +232,13 @@ impl<I, O> WorkflowDeclaration<I, O> {
         self
     }
 
+    /// Generates workflow input metadata for the backend/dashboard. Runtime task
+    /// enforcement is configured separately on the task's TaskConfig.
+    #[must_use]
+    pub fn input_schema_for<S: schemars::JsonSchema>(self) -> Self {
+        self.input_schema(crate::schema::generated::<S>())
+    }
+
     /// Sets an optional workflow-level input schema.
     #[must_use]
     pub fn input_schema(mut self, schema: Value) -> Self {

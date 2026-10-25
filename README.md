@@ -345,3 +345,6 @@ They require the engine streams service and the durable-streams tenant entitleme
 
 [Embedded mode](docs/parity/embedded.md) manages the official real-engine sidecar
 and bundled persistent Postgres, with checksum verification and awaited shutdown.
+
+[Input schemas](docs/parity/input-schemas.md) support broad offline JSON Schema
+validation and Serde-compatible generation, with cached worker validators.
