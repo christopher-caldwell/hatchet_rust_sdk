@@ -6,7 +6,7 @@
     "official_go_revision": "aef20b00755da5b1e7e69197e7189848309afb20",
     "official_ts_release": "1.43.0"
   },
-  "scope": "Batches 1\u20133 are implemented with explicit support/evidence limits in feature-support.md. Batch 4 remains follow-up work.",
+  "scope": "Batches 1\u20133 and batch 4 N2 are implemented with explicit support/evidence limits in feature-support.md. Remaining batch 4 gaps continue in order with a separate code review after each.",
   "batch_rationale": {
     "1": "Correct existing public contracts that can replay the wrong work or truncate data; all are supported by the pinned engine.",
     "2": "Complete operational controls and run discovery; negotiate engine capabilities before enabling newer controls.",
@@ -501,8 +501,8 @@
       "area": "Engine-coalesced batch tasks",
       "batch": 4,
       "order": 1,
-      "status": "pending",
-      "acceptance": "No batch handler/configuration for size/time-based server coalescing and per-member results. Existing run_many/bulk triggering is a distinct capability. Upstream marks batch tasks preview/beta.",
+      "status": "complete",
+      "acceptance": "Preview server coalescing, exact member results, broadcast, failure and cancellation supported on verified engine v0.114.0. Worker and workflow configurations must match; durable and local-engine simulation unsupported. See batch-tasks.md and feature-support.md.",
       "official_evidence": [
         {
           "path": "typescript/src/v1/client/client.ts",
@@ -521,7 +521,16 @@
           "url": "https://github.com/hatchet-dev/hatchet/blob/af128ec1672adaf8e3cc4afd339ce5c2c6f08c35/sdks/go/batch.go"
         }
       ],
-      "priority": "P3"
+      "priority": "P3",
+      "original_gap": "No batch handler/configuration for size/time-based server coalescing and per-member results. Existing run_many/bulk triggering is a distinct capability. Upstream marks batch tasks preview/beta.",
+      "validation": [
+        "batch_registration_preserves_config_and_disables_member_retries",
+        "acknowledged_batch_cancel_synchronously_cancels_transport_guard_but_rejection_does_not",
+        "server_batches_coalesce_by_size_and_group_and_flush_on_interval",
+        "server_batch_broadcast_and_whole_batch_failure_preserve_member_outcomes",
+        "server_batch_member_cancellation_preserves_other_members_and_all_cancel_stops_handler",
+        "server_batch_handler_cancel_then_return_keeps_every_member_cancelled"
+      ]
     },
     {
       "id": "N3",
@@ -660,5 +669,28 @@
     "python_support_claim_tests": 6,
     "security_advisories": 0,
     "github_actions": "Definitions supplied and suites pass locally; remote execution awaits push."
+  },
+  "batch_4_progress": {
+    "completed": [
+      "N2"
+    ],
+    "remaining": [
+      "N3",
+      "N5",
+      "N4",
+      "O2",
+      "O4"
+    ],
+    "review_policy": "A separate read-only code review is required after each gap before the next begins."
+  },
+  "batch_4_validation_summary": {
+    "verified_at_utc": "2026-10-25T16:03:26.498597+00:00",
+    "workspace_tests": 149,
+    "no_default_tests": 146,
+    "standalone_tests": 7,
+    "live_engine": "v0.114.0",
+    "live_tests": 28,
+    "code_review": "N2 cleared after fixing synchronous batch cancellation propagation",
+    "quality_gates": "All ten workspace/standalone format, Clippy, rustdoc, doctest and Rust 1.85.1 checks passed; matrix guard tests passed."
   }
 }

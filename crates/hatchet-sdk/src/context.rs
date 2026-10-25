@@ -104,7 +104,12 @@ pub trait Context {
         labels: std::collections::BTreeMap<String, LabelValue>,
     ) -> Result<()>;
 
-    /// Cancels the current workflow run.
+    /// Member task-run UUIDs for a server-coalesced batch; empty for normal tasks.
+    /// Batch context identity names the batch, not an individual workflow run.
+    fn batch_member_ids(&self) -> &[String] {
+        &[]
+    }
+    /// Cancels the current workflow run, or all members of the current batch.
     async fn cancel(&self) -> Result<()>;
 }
 
@@ -126,6 +131,8 @@ pub struct InMemoryContext<T: Transport> {
     trigger_data: TriggerData,
     errors: std::collections::HashMap<String, String>,
     cancel_token: CancellationToken,
+    batch_member_ids: Vec<String>,
+    batch_cancel_token: Option<CancellationToken>,
     logs: tokio::sync::Mutex<Vec<(LogLevel, String)>>,
     stream: tokio::sync::Mutex<Vec<Value>>,
 }
@@ -150,9 +157,21 @@ impl<T: Transport> InMemoryContext<T> {
             trigger_data: TriggerData::default(),
             errors: std::collections::HashMap::new(),
             cancel_token: CancellationToken::new(),
+            batch_member_ids: Vec::new(),
+            batch_cancel_token: None,
             logs: tokio::sync::Mutex::new(Vec::new()),
             stream: tokio::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn with_batch_member_ids(
+        mut self,
+        ids: Vec<String>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Self {
+        self.batch_member_ids = ids;
+        self.batch_cancel_token = cancel_token;
+        self
     }
 
     pub(crate) fn transport_namespace(&self) -> Option<&str> {
@@ -612,7 +631,22 @@ impl<T: Transport> Context for InMemoryContext<T> {
         Ok(())
     }
 
+    fn batch_member_ids(&self) -> &[String] {
+        &self.batch_member_ids
+    }
     async fn cancel(&self) -> Result<()> {
+        if !self.batch_member_ids.is_empty() {
+            self.transport
+                .cancel_task_runs(&self.batch_member_ids)
+                .await?;
+            // Publish cancellation synchronously to the transport completion guard.
+            // WorkerRuntime's combined token only propagates cancellation inward.
+            if let Some(token) = &self.batch_cancel_token {
+                token.cancel();
+            }
+            self.cancel_token.cancel();
+            return Ok(());
+        }
         self.cancel_token.cancel();
         self.transport
             .cancel_workflow_run(&self.ids.workflow_run_id)
@@ -725,3 +759,97 @@ pub trait ContextExt: Context {
 }
 
 impl<T: Context + ?Sized> ContextExt for T {}
+
+#[cfg(test)]
+mod batch_cancellation_tests {
+    use super::*;
+    struct CancelTransport {
+        fail: bool,
+    }
+    #[async_trait]
+    impl Transport for CancelTransport {
+        async fn cancel_task_runs(&self, ids: &[String]) -> Result<()> {
+            assert_eq!(ids, &["member-1", "member-2"]);
+            if self.fail {
+                Err(Error::Transport("cancellation rejected".into()))
+            } else {
+                Ok(())
+            }
+        }
+        async fn run_workflow(&self, _: &str, _: Value, _: RunOpts) -> Result<WorkflowRunId> {
+            unreachable!()
+        }
+        async fn run_workflows(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: RunOpts,
+        ) -> Result<Vec<WorkflowRunId>> {
+            unreachable!()
+        }
+        async fn register_result_channel(&self, _: &WorkflowRunId) -> Result<()> {
+            unreachable!()
+        }
+        async fn await_result(&self, _: &WorkflowRunId) -> Result<Value> {
+            unreachable!()
+        }
+        async fn resolve_result(&self, _: &WorkflowRunId, _: Result<Value>) {
+            unreachable!()
+        }
+        async fn start_worker_loop(&self, _: crate::transport::WorkerStartOpts) -> Result<()> {
+            unreachable!()
+        }
+        async fn register_workflow_definition(
+            &self,
+            _: crate::WorkflowDeclaration<Value, Value>,
+        ) -> Result<()> {
+            unreachable!()
+        }
+        async fn append_run_stream(&self, _: &WorkflowRunId, _: &str, _: Value) -> Result<()> {
+            unreachable!()
+        }
+        async fn stream_run(&self, _: &WorkflowRunId) -> Result<Vec<Value>> {
+            unreachable!()
+        }
+        async fn append_run_log(&self, _: &WorkflowRunId, _: LogLevel, _: String) {
+            unreachable!()
+        }
+        async fn refresh_timeout(&self, _: &str, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        async fn release_slot(&self, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        async fn list_logs(&self, _: &str) -> Result<Vec<crate::clients::LogRecord>> {
+            unreachable!()
+        }
+    }
+    #[tokio::test]
+    async fn acknowledged_batch_cancel_synchronously_cancels_transport_guard_but_rejection_does_not()
+     {
+        for fail in [false, true] {
+            let original = CancellationToken::new();
+            let combined = CancellationToken::new();
+            let ctx = InMemoryContext::new(
+                ContextIds {
+                    workflow_name: String::new(),
+                    task_name: "batch".into(),
+                    workflow_run_id: WorkflowRunId(String::new()),
+                    task_run_id: "batch-id".into(),
+                    workflow_id: None,
+                    workflow_version_id: None,
+                },
+                Arc::new(CancelTransport { fail }),
+            )
+            .with_cancel_token(combined.clone())
+            .with_batch_member_ids(
+                vec!["member-1".into(), "member-2".into()],
+                Some(original.clone()),
+            );
+            assert_eq!(ctx.cancel().await.is_err(), fail);
+            // No yield: a late engine CANCEL action cannot satisfy these assertions.
+            assert_eq!(original.is_cancelled(), !fail);
+            assert_eq!(combined.is_cancelled(), !fail);
+        }
+    }
+}

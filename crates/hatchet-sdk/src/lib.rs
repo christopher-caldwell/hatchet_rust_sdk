@@ -10,6 +10,7 @@
 //!
 //! For runnable end-to-end usage, see the examples workspace binaries.
 
+mod batch;
 mod client;
 mod clients;
 mod context;
@@ -42,6 +43,7 @@ pub use another_hatchet_core::{
     WorkerLabelComparator as RunWorkerLabelComparator, WorkflowRunId,
 };
 pub use another_hatchet_macros::{durable_task, task, workflow};
+pub use batch::BatchConfig;
 pub use client::{Client, DurableTaskHandle, TaskHandle, WorkflowHandle};
 pub use clients::{
     CelClient, CelDebugResult, Cron, CronsClient, DurableBranchResult, EventRecord, EventsClient,

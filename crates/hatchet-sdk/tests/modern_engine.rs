@@ -381,3 +381,304 @@ async fn explicit_sticky_worker_routing_reaches_the_selected_worker_for_single_a
     second.shutdown().await.unwrap();
     client.workflows().delete(name).await.unwrap();
 }
+
+fn batch_task_config(broadcast_output: bool) -> TaskConfig {
+    TaskConfig::builder()
+        .batch(BatchConfig {
+            max_size: 3,
+            max_interval: Some(Duration::from_secs(2)),
+            group_key: Some("input.group".into()),
+            group_max_runs: Some(1),
+            broadcast_output,
+        })
+        .retries(5)
+        .build()
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a live Hatchet engine v0.114.0 or later"]
+async fn server_batches_coalesce_by_size_and_group_and_flush_on_interval() {
+    use std::collections::BTreeMap;
+    let client = real_client().await;
+    let config = batch_task_config(false);
+    let name = "modern-batches";
+    let task = client
+        .task::<BTreeMap<String, Value>, BTreeMap<String, Value>>("modern-batches-task")
+        .with_config(config.clone());
+    client
+        .register_workflow(WorkflowDeclaration::<Value, Value>::new(name).step(&task, config))
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let worker = client
+        .worker("modern-batches-worker")
+        .register_task(
+            &task,
+            move |input: BTreeMap<String, Value>, ctx: InMemoryContext<GrpcTransport>| {
+                assert_eq!(ctx.batch_member_ids().len(), input.len());
+                let group = input.values().next().unwrap()["group"].clone();
+                assert!(input.values().all(|v| v["group"] == group));
+                tx.send((input.len(), group)).unwrap();
+                async move {
+                    Ok(input
+                        .into_iter()
+                        .map(|(id, v)| (id, json!({"n":v["n"]})))
+                        .collect())
+                }
+            },
+        )
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(15))
+        .await
+        .unwrap();
+    let wf = client.workflow::<Value, Value>(name);
+    let runs = wf
+        .run_many_no_wait(
+            (0..6).map(|n| json!({"n":n,"group":if n%2==0 {"a"} else {"b"}})),
+            RunOpts::default(),
+        )
+        .await
+        .unwrap();
+    for (n, run) in runs.iter().enumerate() {
+        assert_eq!(output(run).await, json!({"n":n}));
+    }
+    let mut sizes = Vec::new();
+    for _ in 0..2 {
+        sizes.push(
+            tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+        );
+    }
+    assert_eq!(sizes, vec![3, 3]);
+    let start = std::time::Instant::now();
+    let lone = wf
+        .run_no_wait(json!({"n":9,"group":"alone"}), RunOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(output(&lone).await, json!({"n":9}));
+    assert!(start.elapsed() >= Duration::from_secs(1));
+    assert_eq!(rx.recv().await.unwrap().0, 1);
+    worker.shutdown().await.unwrap();
+    client.workflows().delete(name).await.unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a live Hatchet engine v0.114.0 or later"]
+async fn server_batch_broadcast_and_whole_batch_failure_preserve_member_outcomes() {
+    use std::collections::BTreeMap;
+    let client = real_client().await;
+    let name = "modern-batch-broadcast";
+    let config = batch_task_config(true);
+    let task = client
+        .task::<BTreeMap<String, Value>, Value>("modern-batch-broadcast-task")
+        .with_config(config.clone());
+    client
+        .register_workflow(WorkflowDeclaration::<Value, Value>::new(name).step(&task, config))
+        .await
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&calls);
+    let worker = client
+        .worker("modern-batch-broadcast-worker")
+        .register_task(
+            &task,
+            move |input: BTreeMap<String, Value>, _: InMemoryContext<GrpcTransport>| {
+                count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if input.values().any(|v| v["group"] == "failure") {
+                        Err(Error::Worker("whole batch failed".into()))
+                    } else {
+                        Ok(json!({"shared":true}))
+                    }
+                }
+            },
+        )
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(15))
+        .await
+        .unwrap();
+    let wf = client.workflow::<Value, Value>(name);
+    let good = wf
+        .run_many_no_wait((0..3).map(|_| json!({"group":"ok"})), RunOpts::default())
+        .await
+        .unwrap();
+    for run in good {
+        assert_eq!(output(&run).await, json!({"shared":true}));
+    }
+    let failed = wf
+        .run_many_no_wait(
+            (0..3).map(|_| json!({"group":"failure"})),
+            RunOpts::default(),
+        )
+        .await
+        .unwrap();
+    for run in failed {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), run.output())
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("whole batch failed")
+        );
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "batch retries must be disabled"
+    );
+    worker.shutdown().await.unwrap();
+    client.workflows().delete(name).await.unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a live Hatchet engine v0.114.0 or later"]
+async fn server_batch_member_cancellation_preserves_other_members_and_all_cancel_stops_handler() {
+    use std::collections::BTreeMap;
+    let client = real_client().await;
+    let name = "modern-batch-cancel";
+    let config = batch_task_config(false);
+    let task = client
+        .task::<BTreeMap<String, Value>, BTreeMap<String, Value>>("modern-batch-cancel-task")
+        .with_config(config.clone());
+    client
+        .register_workflow(WorkflowDeclaration::<Value, Value>::new(name).step(&task, config))
+        .await
+        .unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::clone(&release);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&cancelled);
+    let worker=client.worker("modern-batch-cancel-worker").register_task(&task,move |input:BTreeMap<String,Value>,ctx:InMemoryContext<GrpcTransport>| {
+        let release=Arc::clone(&released);let tx=tx.clone();let observed=Arc::clone(&observed);
+        async move { tx.send(()).unwrap();tokio::select! { _=release.notified()=>Ok(input), _=ctx.cancelled()=>{ observed.fetch_add(1,Ordering::SeqCst);Err(Error::non_retryable("cancelled")) } } }
+    }).build().start().unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(15))
+        .await
+        .unwrap();
+    let wf = client.workflow::<Value, Value>(name);
+    let runs = wf
+        .run_many_no_wait(
+            (0..3).map(|n| json!({"n":n,"group":"partial"})),
+            RunOpts::default(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    runs[0].cancel().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if client.runs().get_status(runs[0].run_id()).await.unwrap() == RunStatus::Cancelled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release.notify_one();
+    for (n, run) in runs.iter().enumerate().skip(1) {
+        assert_eq!(output(run).await, json!({"n":n,"group":"partial"}));
+    }
+    assert!(runs[0].output().await.is_err());
+    assert_eq!(cancelled.load(Ordering::SeqCst), 0);
+    let runs = wf
+        .run_many_no_wait(
+            (0..3).map(|n| json!({"n":n,"group":"all"})),
+            RunOpts::default(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    for run in &runs {
+        run.cancel().await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while cancelled.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    worker.shutdown().await.unwrap();
+    client.workflows().delete(name).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a live Hatchet engine v0.114.0 or later"]
+async fn server_batch_handler_cancel_then_return_keeps_every_member_cancelled() {
+    use std::collections::BTreeMap;
+    let client = real_client().await;
+    let name = "modern-batch-self-cancel";
+    let config = batch_task_config(false);
+    let task = client
+        .task::<BTreeMap<String, Value>, BTreeMap<String, Value>>("modern-batch-self-cancel-task")
+        .with_config(config.clone());
+    client
+        .register_workflow(WorkflowDeclaration::<Value, Value>::new(name).step(&task, config))
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let worker = client
+        .worker("modern-batch-self-cancel-worker")
+        .register_task(
+            &task,
+            move |input: BTreeMap<String, Value>, ctx: InMemoryContext<GrpcTransport>| {
+                let tx = tx.clone();
+                async move {
+                    ctx.cancel().await?;
+                    assert!(ctx.is_cancelled());
+                    tx.send(()).unwrap();
+                    Ok(input)
+                }
+            },
+        )
+        .build()
+        .start()
+        .unwrap();
+    worker
+        .wait_until_ready(Duration::from_secs(15))
+        .await
+        .unwrap();
+    let runs = client
+        .workflow::<Value, Value>(name)
+        .run_many_no_wait(
+            (0..3).map(|n| json!({"n":n,"group":"self"})),
+            RunOpts::default(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    for run in runs {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(15), run.output())
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(
+            client.runs().get_status(run.run_id()).await.unwrap(),
+            RunStatus::Cancelled
+        );
+    }
+    worker.shutdown().await.unwrap();
+    client.workflows().delete(name).await.unwrap();
+}

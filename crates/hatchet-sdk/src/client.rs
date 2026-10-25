@@ -281,6 +281,21 @@ impl<T: Transport + 'static> Client<T> {
         if let Some(config) = &materialized.idempotency {
             config.ttl_ms()?;
         }
+        if materialized.on_failure.is_some() && materialized.task_defaults.batch.is_some() {
+            return Err(Error::InputValidation(vec![
+                "batch configuration is not supported on failure handlers".into(),
+            ]));
+        }
+        for step in &materialized.steps {
+            if let Some(batch) = &step.config.batch {
+                batch.validate()?;
+                if step.is_durable {
+                    return Err(Error::InputValidation(vec![
+                        "batch tasks cannot be durable".into(),
+                    ]));
+                }
+            }
+        }
         let validation_errors = materialized
             .steps
             .iter()

@@ -21,6 +21,7 @@ service Dispatcher {
     rpc SubscribeToWorkflowRuns(stream SubscribeToWorkflowRunsRequest) returns (stream WorkflowRunEvent) {}
 
     rpc SendStepActionEvent(StepActionEvent) returns (ActionEventResponse) {}
+    rpc SendBatchActionEvent(BatchActionEvent) returns (ActionEventResponse) {}
 
     rpc SendGroupKeyActionEvent(GroupKeyActionEvent) returns (ActionEventResponse) {}
 
@@ -124,6 +125,7 @@ enum ActionType {
     START_STEP_RUN = 0;
     CANCEL_STEP_RUN = 1;
     START_GET_GROUP_KEY = 2;
+    START_BATCH = 3;
 }
 
 message AssignedAction {
@@ -189,6 +191,11 @@ message AssignedAction {
 
     // (optional) the invocation count for durable task events (required for durable events, otherwise null)
     optional int32 durable_task_invocation_count = 21;
+    optional string batch_id = 24;
+    optional int32 batchSize = 25;
+    optional int32 batchIndex = 26;
+    optional BatchStartPayload batchStartPayload = 27;
+    optional string batchKey = 28;
 }
 
 message WorkerListenRequest {
@@ -430,4 +437,48 @@ message GetVersionRequest {}
 
 message GetVersionResponse {
     string version = 1;
+}
+
+message BatchStartPayload {
+    string triggerReason = 1;
+    google.protobuf.Timestamp triggerTime = 2;
+    int32 expectedSize = 3;
+}
+
+
+message BatchActionEventItem {
+    // the task external run id
+    string task_run_external_id = 1;
+
+    // the event payload (e.g. serialized error for FAILED; unused for STARTED/CANCELLED)
+    string event_payload = 2;
+
+    // the retry count (falls back to the task's current retry count if unset)
+    optional int32 retry_count = 3;
+
+    // a flag indicating if the task should _not_ be retried (FAILED only)
+    optional bool should_not_retry = 4;
+
+}
+
+message BatchActionEvent {
+    // the id of the worker
+    string worker_id = 1;
+
+    // the id of the job (shared across all items in the batch)
+    string job_id = 2;
+
+    // the action id (shared across all items in the batch)
+    string action_id = 3;
+
+    // (optional) the batch identifier, for observability
+    optional string batch_id = 4;
+
+    google.protobuf.Timestamp event_timestamp = 5;
+
+    // the task event type -- applies uniformly to every item in this batch
+    StepActionEventType event_type = 6;
+
+    // the items in this batch
+    repeated BatchActionEventItem items = 7;
 }

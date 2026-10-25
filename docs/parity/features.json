@@ -1132,12 +1132,57 @@
         "source": "batch.go"
       },
       "rust": {
-        "status": "missing",
-        "sources": [],
-        "tests": []
+        "status": "supported",
+        "sources": [
+          "crates/hatchet-sdk/src/batch.rs",
+          "crates/hatchet-sdk/src/grpc_transport.rs",
+          "crates/hatchet-sdk/src/worker.rs"
+        ],
+        "tests": [
+          {
+            "file": "crates/hatchet-sdk/tests/batch_contracts.rs",
+            "name": "batch_registration_preserves_config_and_disables_member_retries"
+          },
+          {
+            "file": "crates/hatchet-sdk/src/context.rs",
+            "name": "acknowledged_batch_cancel_synchronously_cancels_transport_guard_but_rejection_does_not"
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "server_batches_coalesce_by_size_and_group_and_flush_on_interval",
+            "engines": [
+              "v0.114.0"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "server_batch_broadcast_and_whole_batch_failure_preserve_member_outcomes",
+            "engines": [
+              "v0.114.0"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "server_batch_member_cancellation_preserves_other_members_and_all_cancel_stops_handler",
+            "engines": [
+              "v0.114.0"
+            ]
+          },
+          {
+            "file": "crates/hatchet-sdk/tests/modern_engine.rs",
+            "name": "server_batch_handler_cancel_then_return_keeps_every_member_cancelled",
+            "engines": [
+              "v0.114.0"
+            ]
+          }
+        ]
       },
-      "engine": "Baseline v0.94.14",
-      "notes": "Bulk triggering is implemented but is distinct from engine-coalesced batch execution."
+      "engine": "Requires engine >= v0.114.0",
+      "notes": "Preview, matching official SDKs: server size/interval/CEL grouping, mapped or broadcast outputs, retries forced to zero. Not durable; in-memory registration rejects batches. Batch context identifies member UUIDs and supports whole-batch cancellation; it has no single member workflow identity. See batch-tasks.md.",
+      "engine_requirement": {
+        "feature": "BatchTasks",
+        "version": "0.114.0"
+      }
     },
     {
       "id": "N3",

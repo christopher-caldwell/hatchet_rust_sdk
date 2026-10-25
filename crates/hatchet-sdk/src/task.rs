@@ -13,6 +13,8 @@ pub struct TaskConfig {
     pub desired_worker_labels: Vec<(String, DesiredLabelConfig)>,
     pub concurrency: Option<ConcurrencyConfig>,
     pub input_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<crate::BatchConfig>,
     /// Slot requests — allows a task to request multiple worker slots.
     /// Key is the slot type (`Default` or `Durable`), value is the number of
     /// slots consumed. Mirrors the TS `slotRequests: Record<SlotType, number>`.
@@ -106,6 +108,12 @@ impl TaskConfigBuilder {
     #[must_use]
     pub fn concurrency(mut self, concurrency: ConcurrencyConfig) -> Self {
         self.inner.concurrency = Some(concurrency);
+        self
+    }
+
+    #[must_use]
+    pub fn batch(mut self, config: crate::BatchConfig) -> Self {
+        self.inner.batch = Some(config);
         self
     }
 

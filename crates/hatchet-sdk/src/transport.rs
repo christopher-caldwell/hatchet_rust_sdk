@@ -42,6 +42,7 @@ pub struct TaskRegistration {
     pub slot_requests: HashMap<SlotType, u32>,
     pub conditions: RenderedConditions,
     pub is_durable: bool,
+    pub batch: Option<crate::BatchConfig>,
 }
 
 /// The fully-resolved shape sent during `putWorkflow`.
@@ -83,6 +84,7 @@ impl WorkflowRegistration {
                 slot_requests: step.config.slot_requests.clone(),
                 conditions: task_conditions_to_pb(step, namespace),
                 is_durable: step.is_durable,
+                batch: step.config.batch.clone(),
             })
             .collect();
         Self {
@@ -230,6 +232,12 @@ pub trait Transport: Send + Sync {
     async fn refresh_timeout(&self, task_run_id: &str, increment: &str) -> Result<()>;
 
     async fn release_slot(&self, task_run_id: &str) -> Result<()>;
+
+    async fn cancel_task_runs(&self, _ids: &[String]) -> Result<()> {
+        Err(Error::UnsupportedOperation(
+            "batch cancellation requires an engine-backed transport".into(),
+        ))
+    }
 
     async fn cancel_workflow_run(&self, _run_id: &WorkflowRunId) -> Result<()> {
         Err(Error::UnsupportedOperation(
@@ -802,6 +810,15 @@ impl Transport for InMemoryTransport {
         &self,
         definition: WorkflowDeclaration<Value, Value>,
     ) -> Result<()> {
+        if definition
+            .steps
+            .iter()
+            .any(|step| step.config.batch.is_some())
+        {
+            return Err(Error::UnsupportedOperation(
+                "server-coalesced batches require an engine-backed transport".into(),
+            ));
+        }
         if definition.idempotency.is_some() {
             return Err(Error::UnsupportedOperation(
                 "idempotency requires an engine-backed transport".to_owned(),

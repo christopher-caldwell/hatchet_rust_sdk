@@ -18,6 +18,8 @@ pub enum EngineFeature {
     Idempotency,
     /// Requires the newer PauseRateLimit RPC, present in v0.114.0.
     RateLimitPause,
+    /// Conservative preview support floor, verified against v0.114.0.
+    BatchTasks,
 }
 
 impl EngineFeature {
@@ -28,7 +30,7 @@ impl EngineFeature {
             Self::DurableEviction => "0.80.0",
             Self::Observability => "0.82.0",
             Self::RetryAfter | Self::WorkflowPause | Self::Idempotency => "0.111.0",
-            Self::RateLimitPause => "0.114.0",
+            Self::RateLimitPause | Self::BatchTasks => "0.114.0",
         }
     }
 }

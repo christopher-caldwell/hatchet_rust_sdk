@@ -73,15 +73,43 @@ where
         let func = Arc::clone(&self.func);
         let config = self.config.clone();
         Box::pin(async move {
-            let validation_errors = config.validate_input_value(&input);
+            let validation_errors = if let Some(batch) = &config.batch {
+                batch.validate()?;
+                let members = input
+                    .as_object()
+                    .filter(|members| !members.is_empty())
+                    .ok_or_else(|| {
+                        Error::Worker("batch input must be a nonempty member map".into())
+                    })?;
+                members
+                    .iter()
+                    .flat_map(|(id, value)| {
+                        config
+                            .validate_input_value(value)
+                            .into_iter()
+                            .map(move |error| format!("batch member {id}: {error}"))
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                config.validate_input_value(&input)
+            };
             if !validation_errors.is_empty() {
                 return Err(Error::InputValidation(validation_errors));
             }
+            let member_ids = input
+                .as_object()
+                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
             let decoded = serde_json::from_value::<I>(input)
                 .map_err(|error| Error::Worker(format!("task input decode failed: {error}")))?;
             let output = (func)(decoded, ctx).await?;
-            serde_json::to_value(output)
-                .map_err(|error| Error::Worker(format!("task output encode failed: {error}")))
+            let value = serde_json::to_value(output)
+                .map_err(|error| Error::Worker(format!("task output encode failed: {error}")))?;
+            if let Some(batch) = config.batch {
+                crate::batch::outputs(&member_ids, value, batch.broadcast_output)
+            } else {
+                Ok(value)
+            }
         })
     }
 }
@@ -106,6 +134,11 @@ where
         let func = Arc::clone(&self.func);
         let config = self.config.clone();
         Box::pin(async move {
+            if config.batch.is_some() {
+                return Err(Error::InputValidation(vec![
+                    "batch tasks cannot be durable".into(),
+                ]));
+            }
             let validation_errors = config.validate_input_value(&input);
             if !validation_errors.is_empty() {
                 return Err(Error::InputValidation(validation_errors));
@@ -234,6 +267,7 @@ pub(crate) struct TaskContextData {
     pub worker_id: Option<String>,
     pub trigger_data: TriggerData,
     pub errors: HashMap<String, String>,
+    pub batch_member_ids: Vec<String>,
 }
 
 impl WorkerDispatcher {
@@ -1131,7 +1165,13 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
             worker_id,
             trigger_data,
             errors,
+            batch_member_ids,
         } = context;
+        let batch_cancel_token = if batch_member_ids.is_empty() {
+            None
+        } else {
+            cancel_token.clone()
+        };
         let cancel_token = combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
         let workflow_run_id = ids.workflow_run_id.clone();
         let resolve_run = ids.workflow_name == ids.task_name;
@@ -1177,7 +1217,8 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                             .with_cancel_token(cancel_token)
                             .with_parent_outputs(parent_outputs)
                             .with_trigger_data(trigger_data)
-                            .with_errors(errors);
+                            .with_errors(errors)
+                            .with_batch_member_ids(batch_member_ids, batch_cancel_token);
                         if let Some(payload) = filter_payload {
                             ctx = ctx.with_filter_payload(payload);
                         }
@@ -1249,6 +1290,7 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
             worker_id,
             trigger_data,
             errors,
+            batch_member_ids: _,
         } = context;
         let transport_cancel_token = cancel_token.clone();
         let mut cancel_token =

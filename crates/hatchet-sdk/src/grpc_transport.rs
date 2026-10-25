@@ -584,6 +584,13 @@ impl Transport for GrpcTransport {
         completed.insert(run_id.clone(), result);
     }
 
+    async fn cancel_task_runs(&self, ids: &[String]) -> Result<()> {
+        self.rest_api_client
+            .mutate_runs("cancel", &crate::RunSelection::ExternalIds(ids.to_vec()))
+            .await?;
+        Ok(())
+    }
+
     async fn cancel_workflow_run(&self, run_id: &WorkflowRunId) -> Result<()> {
         self.rest_api_client.cancel_run(&run_id.0).await
     }
@@ -820,6 +827,11 @@ impl Transport for GrpcTransport {
                 .await?
                 .require(crate::EngineFeature::Idempotency)?;
         }
+        if definition.steps.iter().any(|s| s.config.batch.is_some()) {
+            self.engine_version()
+                .await?
+                .require(crate::EngineFeature::BatchTasks)?;
+        }
         definition.name =
             apply_workflow_namespace(&definition.name, self.config.namespace.as_deref());
         definition.on_events = definition
@@ -853,6 +865,7 @@ impl Transport for GrpcTransport {
                     slot_requests: config.slot_requests.clone(),
                     conditions: RenderedConditions::default(),
                     is_durable: definition.on_failure_is_durable,
+                    batch: None,
                 },
                 &registration,
             )
@@ -1249,20 +1262,28 @@ impl GrpcTransport {
         lifecycle_failure_tx: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Result<()> {
         if action.action_type == proto::dispatcher::ActionType::CancelStepRun as i32 {
-            if let Some(token) = self
-                .running_cancellations
-                .lock()
-                .await
-                .remove(&action.task_run_external_id)
-            {
+            if let Some(token) = self.running_cancellations.lock().await.remove(
+                if action.task_run_external_id.is_empty() {
+                    action.batch_id.as_deref().unwrap_or_default()
+                } else {
+                    &action.task_run_external_id
+                },
+            ) {
                 token.cancel();
             }
             return Ok(());
         }
-        if action.action_type != proto::dispatcher::ActionType::StartStepRun as i32 {
+        if action.action_type != proto::dispatcher::ActionType::StartStepRun as i32
+            && action.action_type != proto::dispatcher::ActionType::StartBatch as i32
+        {
             return Ok(());
         }
 
+        if action.action_type == proto::dispatcher::ActionType::StartBatch as i32 {
+            return self
+                .handle_assigned_batch(action, worker_id, opts, lifecycle_failure_tx)
+                .await;
+        }
         let task_name = resolve_action_task_name(&action, opts);
 
         let is_durable = opts.durable_task_dispatchers.contains_key(&task_name);
@@ -1338,6 +1359,7 @@ impl GrpcTransport {
                 worker_id: Some(worker_id_clone.clone()),
                 trigger_data: decoded.trigger_data,
                 errors: decoded.errors,
+                batch_member_ids: Vec::new(),
             };
 
             // Spawn execution
@@ -1403,6 +1425,174 @@ impl GrpcTransport {
                 "engine assigned unregistered task '{task_name}'"
             )))
         }
+    }
+
+    async fn batch_event(
+        &self,
+        action: &proto::dispatcher::AssignedAction,
+        worker_id: &str,
+        event: proto::dispatcher::StepActionEventType,
+        items: Vec<proto::dispatcher::BatchActionEventItem>,
+    ) -> Result<()> {
+        self.dispatcher
+            .clone()
+            .send_batch_action_event(self.authed_request(proto::dispatcher::BatchActionEvent {
+                worker_id: worker_id.to_owned(),
+                job_id: action.job_id.clone(),
+                action_id: action.action_id.clone(),
+                batch_id: action.batch_id.clone(),
+                event_timestamp: Some(prost_now()),
+                event_type: event as i32,
+                items,
+            }))
+            .await
+            .map_err(grpc_error)?;
+        Ok(())
+    }
+
+    async fn handle_assigned_batch(
+        &self,
+        action: proto::dispatcher::AssignedAction,
+        worker_id: &str,
+        opts: &WorkerStartOpts,
+        failure_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<()> {
+        use proto::dispatcher::{BatchActionEventItem as Item, StepActionEventType as Event};
+        let inputs = crate::batch::decode(&action.action_payload)?;
+        let member_ids = inputs.keys().cloned().collect::<Vec<_>>();
+        let name = resolve_action_task_name(&action, opts);
+        let dispatcher = opts
+            .task_dispatchers
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| Error::Worker(format!("unregistered batch action {name}")))?;
+        let batch_id = action
+            .batch_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Error::Worker("batch assignment omitted batch ID".into()))?;
+        self.batch_event(
+            &action,
+            worker_id,
+            Event::StepEventTypeStarted,
+            member_ids
+                .iter()
+                .map(|id| Item {
+                    task_run_external_id: id.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+        .await?;
+        let group = Arc::new(tokio_util::sync::CancellationToken::new());
+        let tokens = member_ids
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    Arc::new(tokio_util::sync::CancellationToken::new()),
+                )
+            })
+            .collect::<Vec<_>>();
+        {
+            let mut running = self.running_cancellations.lock().await;
+            running.insert(batch_id.clone(), Arc::clone(&group));
+            for (id, token) in &tokens {
+                running.insert(id.clone(), Arc::clone(token));
+            }
+        }
+        let transport = self.clone();
+        let worker_id = worker_id.to_owned();
+        tokio::spawn(async move {
+            let watcher = {
+                let tokens = tokens.clone();
+                let group = Arc::clone(&group);
+                tokio::spawn(async move {
+                    loop {
+                        if tokens.iter().all(|(_, token)| token.is_cancelled()) {
+                            group.cancel();
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                })
+            };
+            let ids = crate::ContextIds {
+                workflow_name: action.job_name.clone(),
+                task_name: name.clone(),
+                workflow_run_id: WorkflowRunId(action.workflow_run_id.clone()),
+                task_run_id: batch_id.clone(),
+                workflow_id: action.workflow_id.clone(),
+                workflow_version_id: action.workflow_version_id.clone(),
+            };
+            let context = TaskContextData {
+                cancel_token: Some(group.as_ref().clone()),
+                worker_id: Some(worker_id.clone()),
+                batch_member_ids: member_ids.clone(),
+                run_opts: RunOpts {
+                    additional_metadata: action
+                        .additional_metadata
+                        .as_deref()
+                        .and_then(|m| serde_json::from_str(m).ok())
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let input = Value::Object(inputs.into_iter().collect());
+            let result = dispatcher
+                .run_task_json_with_context(&name, input, ids, context)
+                .await
+                .and_then(|value| crate::batch::outputs(&member_ids, value, false));
+            watcher.abort();
+            let mut completed = Vec::new();
+            let mut failed = Vec::new();
+            if !group.is_cancelled() {
+                for (id, token) in &tokens {
+                    if token.is_cancelled() {
+                        continue;
+                    }
+                    match &result {
+                        Ok(values) => completed.push(Item {
+                            task_run_external_id: id.clone(),
+                            event_payload: values[id].to_string(),
+                            ..Default::default()
+                        }),
+                        Err(error) => failed.push(Item {
+                            task_run_external_id: id.clone(),
+                            event_payload: serde_json::json!({"message":error.to_string()})
+                                .to_string(),
+                            should_not_retry: Some(!error.is_retryable()),
+                            ..Default::default()
+                        }),
+                    }
+                }
+            }
+            for (event, items) in [
+                (Event::StepEventTypeCompleted, completed),
+                (Event::StepEventTypeFailed, failed),
+            ] {
+                if !items.is_empty() {
+                    if let Err(error) = transport
+                        .batch_event(&action, &worker_id, event, items)
+                        .await
+                    {
+                        let _ =
+                            failure_tx.send(format!("failed reporting batch completion: {error}"));
+                    }
+                }
+            }
+            let mut running = transport.running_cancellations.lock().await;
+            for (id, token) in tokens.into_iter().chain(std::iter::once((batch_id, group))) {
+                if running
+                    .get(&id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &token))
+                {
+                    running.remove(&id);
+                }
+            }
+        });
+        Ok(())
     }
 
     /// Polls the engine for run completion by calling `GetRunDetails` repeatedly.
@@ -1478,6 +1668,15 @@ fn resolve_action_task_name(
             .contains_key(&action.action_id)
     {
         return action.action_id.clone();
+    }
+    // START_BATCH carries only the action ID; unlike START_STEP_RUN it omits
+    // task_name. Resolve the same default integration prefix we advertised.
+    if let Some(name) = action.action_id.strip_prefix("default:") {
+        if opts.task_dispatchers.contains_key(name)
+            || opts.durable_task_dispatchers.contains_key(name)
+        {
+            return name.to_owned();
+        }
     }
     action.task_name.clone()
 }
@@ -1870,7 +2069,18 @@ fn rendered_to_proto_task(
         }),
         inputs: String::new(),
         parents: task.parents.clone(),
-        retries: task.retries.map_or(0, u32_to_i32_saturating),
+        retries: if task.batch.is_some() {
+            0
+        } else {
+            task.retries.map_or(0, u32_to_i32_saturating)
+        },
+        batch: task.batch.as_ref().map(|b| proto::v1::TaskBatchConfig {
+            batch_max_size: b.max_size as i32,
+            batch_max_interval_ms: b.max_interval.map(|d| d.as_millis() as i32),
+            batch_group_key: b.group_key.clone(),
+            batch_group_max_runs: b.group_max_runs.map(|n| n as i32),
+            broadcast_output: Some(b.broadcast_output),
+        }),
         rate_limits: task.rate_limits.iter().map(rate_limit_to_proto).collect(),
         worker_labels: task
             .worker_labels
@@ -2556,9 +2766,21 @@ mod tests {
             workflow_id: None,
             workflow_version_id: None,
             durable_task_invocation_count: None,
+            ..Default::default()
         };
         assert_eq!(resolve_action_task_name(&action, &opts), "wf:step");
 
+        let mut batch_opts = opts.clone();
+        batch_opts.task_dispatchers.clear();
+        batch_opts
+            .task_dispatchers
+            .insert("step".to_owned(), dispatcher.clone());
+        let batch = crate::proto::dispatcher::AssignedAction {
+            action_id: "default:step".to_owned(),
+            action_type: crate::proto::dispatcher::ActionType::StartBatch as i32,
+            ..Default::default()
+        };
+        assert_eq!(resolve_action_task_name(&batch, &batch_opts), "step");
         let mut opts_without_action = opts.clone();
         opts_without_action.task_dispatchers.clear();
         assert_eq!(
