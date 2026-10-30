@@ -106,7 +106,7 @@ verify_release_metadata() {
 
 package_list() {
   local package="$1"
-  cargo package -p "$package" --list "${cargo_dirty_flag[@]}"
+  cargo package -p "$package" --list ${cargo_dirty_flag[@]+"${cargo_dirty_flag[@]}"}
 }
 
 verify_package_contents() {
@@ -174,11 +174,11 @@ create_package_archives() {
         -p "$package" \
         --locked \
         --no-verify \
-        "${cargo_dirty_flag[@]}" \
+        ${cargo_dirty_flag[@]+"${cargo_dirty_flag[@]}"} \
         --config "patch.crates-io.${core_name}.path=\"$repo_root/crates/hatchet-core\"" \
         --config "patch.crates-io.${macros_name}.path=\"$repo_root/crates/hatchet-macros\""
     else
-      cargo package -p "$package" --locked "${cargo_dirty_flag[@]}"
+      cargo package -p "$package" --locked ${cargo_dirty_flag[@]+"${cargo_dirty_flag[@]}"}
     fi
   done
 }
@@ -262,7 +262,7 @@ registry_has_version() {
 
 publish_dry_run() {
   local package="$1"
-  cargo publish --dry-run -p "$package" --locked "${cargo_dirty_flag[@]}"
+  cargo publish --dry-run -p "$package" --locked ${cargo_dirty_flag[@]+"${cargo_dirty_flag[@]}"}
 }
 
 run_publish_checks() {
