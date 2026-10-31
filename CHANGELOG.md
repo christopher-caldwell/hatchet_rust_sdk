@@ -83,6 +83,19 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - Track the actual smoke-worker processes and bound their shutdown so failed
   local proofs cannot leave workers running against a later test engine.
 
+## [0.1.1] - 2026-10-31
+
+### Added
+
+- Worker connection diagnostics on stderr, each line with its own time: connection changes, the
+  name of any reconnect or heartbeat call still pending after 30 seconds or slower than a second,
+  and a status line about every five minutes. They observe only; no timeouts were added.
+
+### Changed
+
+- The health server listens on IPv6 as well as IPv4, so a platform's IPv6-only private network can
+  reach the probes. It falls back to IPv4 where the host has no IPv6.
+
 ## [0.1.0] - 2026-07-16
 
 First public release of the unofficial Rust Hatchet SDK.

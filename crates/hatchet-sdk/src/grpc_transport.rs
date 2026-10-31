@@ -21,6 +21,7 @@ use crate::config::{
     HatchetConfig, apply_namespace, apply_workflow_namespace, normalize_namespace,
 };
 use crate::context::{LogLevel, TriggerData};
+use crate::diag;
 use crate::durable::RenderedConditions;
 use crate::error::{Error, Result};
 use crate::proto;
@@ -31,6 +32,8 @@ use crate::worker::TaskContextData;
 use crate::workflow::WorkflowDeclaration;
 
 const MAX_COMPLETED_RUNS: usize = 1_024;
+/// One status line about every five minutes, at one heartbeat every four seconds.
+const HEARTBEATS_PER_STATUS_LINE: u32 = 75;
 
 /// gRPC transport that connects to a real Hatchet engine.
 ///
@@ -626,7 +629,7 @@ impl Transport for GrpcTransport {
 
     async fn start_worker_loop(&self, opts: WorkerStartOpts) -> Result<()> {
         if !opts.durable_task_dispatchers.is_empty() {
-            self.engine_version()
+            diag::traced("engine_version", self.engine_version())
                 .await?
                 .require(crate::EngineFeature::DurableEviction)?;
         }
@@ -645,14 +648,16 @@ impl Transport for GrpcTransport {
                 return Ok(());
             }
 
-            let response = match self
-                .register_worker(
+            let response = match diag::traced(
+                "register_worker",
+                self.register_worker(
                     &opts.worker_name,
                     actions.clone(),
                     opts.labels.clone(),
                     opts.slot_config.clone(),
-                )
-                .await
+                ),
+            )
+            .await
             {
                 Ok(response) => response,
                 Err(error) if !connected_once => return Err(error),
@@ -674,9 +679,12 @@ impl Transport for GrpcTransport {
             let mut durable_listener = if opts.durable_task_dispatchers.is_empty() {
                 None
             } else {
-                match crate::durable_listener::DurableListenerClient::start(
-                    self.config.clone(),
-                    worker_id.clone(),
+                match diag::traced(
+                    "durable_listener_start",
+                    crate::durable_listener::DurableListenerClient::start(
+                        self.config.clone(),
+                        worker_id.clone(),
+                    ),
                 )
                 .await
                 {
@@ -728,7 +736,7 @@ impl Transport for GrpcTransport {
                         }
                     }
                     _ = heartbeat.tick() => {
-                        if let Err(error) = self.heartbeat().await {
+                        if let Err(error) = diag::traced("heartbeat", self.heartbeat()).await {
                             break Err(error);
                         }
                         if !ready_sent {
@@ -773,6 +781,8 @@ impl Transport for GrpcTransport {
                 };
             let (lifecycle_failure_tx, mut lifecycle_failure_rx) =
                 tokio::sync::mpsc::unbounded_channel();
+            let mut heartbeats_sent = 0_u32;
+            let mut slowest_heartbeat = std::time::Duration::ZERO;
             let disconnect_reason = loop {
                 tokio::select! {
                     _ = opts.cancel_token.cancelled() => return Ok(()),
@@ -782,8 +792,19 @@ impl Transport for GrpcTransport {
                         });
                     }
                     _ = heartbeat.tick() => {
-                        if let Err(error) = self.heartbeat().await {
+                        let started = std::time::Instant::now();
+                        if let Err(error) = diag::traced("heartbeat", self.heartbeat()).await {
                             break format!("worker heartbeat failed: {error}");
+                        }
+                        slowest_heartbeat = slowest_heartbeat.max(started.elapsed());
+                        heartbeats_sent += 1;
+                        if heartbeats_sent == HEARTBEATS_PER_STATUS_LINE {
+                            diag::log(format!(
+                                "worker alive heartbeats={heartbeats_sent} slowest_ms={}",
+                                slowest_heartbeat.as_millis()
+                            ));
+                            heartbeats_sent = 0;
+                            slowest_heartbeat = std::time::Duration::ZERO;
                         }
                     }
                     message = stream.message() => {

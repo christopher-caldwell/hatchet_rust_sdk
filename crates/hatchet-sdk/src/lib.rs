@@ -14,6 +14,7 @@ mod batch;
 mod client;
 mod clients;
 mod context;
+mod diag;
 mod durable;
 mod engine_version;
 mod error;

@@ -22,7 +22,7 @@ After the first registry release, the corresponding installation will be:
 
 ```toml
 [dependencies]
-another-hatchet-sdk = "0.1.0"
+another-hatchet-sdk = "0.1.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

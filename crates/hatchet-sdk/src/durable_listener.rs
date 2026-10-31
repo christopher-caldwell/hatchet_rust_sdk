@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tonic::metadata::MetadataValue;
 
 use crate::config::HatchetConfig;
+use crate::diag;
 use crate::error::{Error, Result};
 use crate::proto::v1;
 
@@ -537,7 +538,7 @@ async fn open_durable_stream(
     mpsc::Sender<v1::DurableTaskRequest>,
     tonic::Streaming<v1::DurableTaskResponse>,
 )> {
-    let channel = config.connect_channel().await?;
+    let channel = diag::traced("durable_connect", config.connect_channel()).await?;
 
     let mut client = v1::v1_dispatcher_client::V1DispatcherClient::new(channel);
     let (tx, rx) = mpsc::channel::<v1::DurableTaskRequest>(256);
@@ -564,15 +565,14 @@ async fn open_durable_stream(
         request.metadata_mut().insert("authorization", value);
     }
 
-    let response = client
-        .durable_task(request)
+    let response = diag::traced("durable_stream_open", client.durable_task(request))
         .await
         .map_err(|error| Error::Transport(format!("durable task stream failed: {error}")))?;
 
     let mut inbound = response.into_inner();
 
     // Wait for register ack
-    match inbound.message().await {
+    match diag::traced("durable_register_ack", inbound.message()).await {
         Ok(Some(msg)) => match msg.message {
             Some(v1::durable_task_response::Message::RegisterWorker(_)) => {}
             _ => {
@@ -626,6 +626,7 @@ async fn reconnect_loop(
 
         match open_durable_stream(&config, &worker_id).await {
             Ok((tx, inbound)) => {
+                diag::log("durable stream reconnected");
                 backoff = Duration::from_secs(1);
                 *request_tx.lock().await = Some(tx.clone());
 
@@ -649,7 +650,7 @@ async fn reconnect_loop(
                 *request_tx.lock().await = None;
             }
             Err(error) => {
-                eprintln!("durable stream reconnect failed: {error}");
+                diag::log(format!("durable stream reconnect failed: {error}"));
             }
         }
     }
@@ -676,7 +677,7 @@ async fn receive_loop(
             }
             Ok(None) => break,
             Err(error) => {
-                eprintln!("durable stream error: {error}");
+                diag::log(format!("durable stream error: {error}"));
                 break;
             }
         }

@@ -36,6 +36,13 @@ pub struct HealthServer {
     join: Option<JoinHandle<()>>,
 }
 
+/// Binds every interface over both IP versions, so a platform's IPv6-only private network can reach
+/// the probes. Falls back to IPv4 where the host has no IPv6.
+fn bind_any_address(port: u16) -> std::io::Result<std::net::TcpListener> {
+    std::net::TcpListener::bind(format!("[::]:{port}"))
+        .or_else(|_| std::net::TcpListener::bind(format!("0.0.0.0:{port}")))
+}
+
 impl HealthServer {
     /// Creates and starts the health server on the given port without
     /// requiring an async constructor at the callsite.
@@ -44,7 +51,7 @@ impl HealthServer {
     ///
     /// Returns an error if the TCP listener cannot bind.
     pub fn start_detached(port: u16, state: Arc<RwLock<HealthState>>) -> std::io::Result<Self> {
-        let listener = std::net::TcpListener::bind(format!("0.0.0.0:{port}"))?;
+        let listener = bind_any_address(port)?;
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
         let listener = TcpListener::from_std(listener)?;
