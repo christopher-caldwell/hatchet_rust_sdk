@@ -705,15 +705,18 @@ impl<T: Transport + 'static> Worker<T> {
                                 }
                             }
                             WorkerConnectionState::Ready => {
+                                crate::diag::log(format!(
+                                    "worker '{worker_name_for_start}' connected"
+                                ));
                                 if let Some(health_state) = &health_state_for_transport {
                                     health_state.write().await.healthy = true;
                                 }
                                 let _ = ready_tx.send(WorkerLifecycleState::Ready);
                             }
                             WorkerConnectionState::Reconnecting(message) => {
-                                eprintln!(
+                                crate::diag::log(format!(
                                     "worker '{worker_name_for_start}' reconnecting: {message}"
-                                );
+                                ));
                                 if let Some(health_state) = &health_state_for_transport {
                                     health_state.write().await.healthy = false;
                                 }

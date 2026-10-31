@@ -25,6 +25,28 @@ async fn get(port: u16, path: &str) -> String {
     )
     .await
 }
+/// A platform's private network can be IPv6-only, so the probes must answer there as well.
+#[tokio::test]
+async fn probes_answer_over_ipv6_and_ipv4() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        return; // This host has no IPv6.
+    }
+    let mut server = HealthServer::start(0, state()).await.unwrap();
+    for host in ["[::1]", "127.0.0.1"] {
+        let mut stream = tokio::net::TcpStream::connect(format!("{host}:{}", server.port()))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /livez HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{host}: {response}");
+    }
+    server.stop().await;
+}
 #[tokio::test]
 async fn liveness_is_independent_of_readiness_and_legacy_health_preserves_json() {
     let mut server = HealthServer::start(0, state()).await.unwrap();
