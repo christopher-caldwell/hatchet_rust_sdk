@@ -14,6 +14,28 @@ use std::{
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a disposable local engine and HATCHET_TEST_ENGINE_CONTAINER"]
 async fn durable_wait_and_checkpoint_survive_engine_restart() {
+    engine_recovery(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a disposable local engine and HATCHET_TEST_ENGINE_CONTAINER"]
+async fn durable_wait_and_checkpoint_survive_engine_freeze() {
+    engine_recovery(true).await;
+}
+
+// A failed freeze assertion must not leave the owned fixture paused.
+struct UnpauseOnDrop(Option<String>);
+impl Drop for UnpauseOnDrop {
+    fn drop(&mut self) {
+        if let Some(engine) = self.0.take() {
+            let _ = std::process::Command::new("docker")
+                .args(["unpause", "--", &engine])
+                .output();
+        }
+    }
+}
+
+async fn engine_recovery(freeze: bool) {
     let engine =
         std::env::var("HATCHET_TEST_ENGINE_CONTAINER").expect("use the disposable smoke runner");
     assert!(engine.starts_with("hatchet-rust-") && engine.ends_with("-hatchet"));
@@ -22,7 +44,13 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
             .await
             .unwrap(),
     ));
-    let task = client.durable_task::<Value, Value>("restart-checkpoint-task");
+    // Action names also need isolation: a namespace scopes workflow names, but
+    // an unfinished task from another run may still target the same action.
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let task_name = format!("restart-checkpoint-task-{suffix}");
+    let workflow_name = format!("restart-checkpoint-workflow-{suffix}");
+    let worker_name = format!("restart-checkpoint-worker-{suffix}");
+    let task = client.durable_task::<Value, Value>(&task_name);
     let started = Arc::new(tokio::sync::Notify::new());
     let invocations = Arc::new(AtomicUsize::new(0));
     let task_id = Arc::new(tokio::sync::Mutex::new(None));
@@ -36,7 +64,7 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
     let health_port = reservation.local_addr().unwrap().port();
     drop(reservation);
     let worker = client
-        .worker("restart-checkpoint-worker")
+        .worker(&worker_name)
         .health_port(health_port)
         .register_durable_task(&task, {
             let started = Arc::clone(&started);
@@ -81,14 +109,14 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
     );
     client
         .register_workflow(
-            WorkflowDeclaration::<Value, Value>::new("restart-checkpoint-workflow")
+            WorkflowDeclaration::<Value, Value>::new(&workflow_name)
                 .durable_step(&task, TaskConfig::default()),
         )
         .await
         .unwrap();
     let scope = uuid::Uuid::new_v4().to_string();
     let run = client
-        .workflow::<Value, Value>("restart-checkpoint-workflow")
+        .workflow::<Value, Value>(&workflow_name)
         .run_no_wait(json!({"scope":scope}), RunOpts::default())
         .await
         .unwrap();
@@ -96,13 +124,15 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut unpause = UnpauseOnDrop(if freeze { Some(engine.clone()) } else { None });
+    let target = engine.clone();
     let restart = tokio::task::spawn_blocking(move || {
         std::process::Command::new("docker")
-            .args(["restart", "--", &engine])
+            .args([if freeze { "pause" } else { "restart" }, "--", &target])
             .output()
             .unwrap()
     });
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(Duration::from_secs(if freeze { 65 } else { 20 }), async {
         loop {
             if probes::request(health_port, b"GET /readyz HTTP/1.1\r\nHost: local\r\n\r\n")
                 .await
@@ -121,6 +151,22 @@ async fn durable_wait_and_checkpoint_survive_engine_restart() {
             .starts_with("HTTP/1.1 200 OK")
     );
     let status = restart.await.unwrap();
+    if freeze {
+        let target = engine.clone();
+        let resumed = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("docker")
+                .args(["unpause", "--", &target])
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            resumed.status.success(),
+            "could not resume the local engine"
+        );
+        unpause.0 = None;
+    }
     assert!(
         status.status.success(),
         "{}",

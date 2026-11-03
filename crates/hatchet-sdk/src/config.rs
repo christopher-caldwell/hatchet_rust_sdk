@@ -245,7 +245,14 @@ impl HatchetConfig {
             }
         }
 
+        // Keepalive detects a half-open connection even when a stream is waiting
+        // indefinitely for its first assignment. A unary request deadline cannot
+        // do that, and an Endpoint::timeout would also expire ListenV2.
         endpoint
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+            .keep_alive_timeout(std::time::Duration::from_secs(10))
+            .keep_alive_while_idle(true)
             .connect()
             .await
             .map_err(|error| Error::Transport(format!("gRPC connect failed: {error}")))

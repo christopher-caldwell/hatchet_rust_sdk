@@ -167,6 +167,13 @@ health checks, a trigger utility, and local/Railway smoke scripts.
 - Result metadata reads retry transient REST failures and replication lag using
   `GrpcTransport::with_retry_config`. Each request has a ten-second timeout;
   `max_elapsed` also bounds the full retry cycle when configured.
+- `GrpcTransport` unary gRPC attempts have a ten-second deadline, including response-body reads.
+  The existing retry policy still applies; a timed-out mutation may have reached the
+  engine and is not an exactly-once delivery guarantee. `ListenV2`, run event streams
+  and durable streams have no whole-stream deadline. HTTP/2 keepalive probes after
+  thirty seconds of inactivity and closes an unresponsive connection after ten more
+  seconds, allowing the channel and worker registration to recover. A pending
+  heartbeat does not block stream errors or worker cancellation.
 - `runs().get_task_external_id(run_id, task_name)` resolves engine state even
   for a fresh client; tasks that have not started return `None`.
 - Durable recovery takes a **task external ID**, not a workflow run ID.

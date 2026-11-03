@@ -32,8 +32,23 @@ use crate::worker::TaskContextData;
 use crate::workflow::WorkflowDeclaration;
 
 const MAX_COMPLETED_RUNS: usize = 1_024;
+/// Per-attempt budget for unary RPCs; streaming subscriptions have no RPC deadline.
+const CONTROL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// One status line about every five minutes, at one heartbeat every four seconds.
 const HEARTBEATS_PER_STATUS_LINE: u32 = 75;
+
+/// Request metadata informs the peer; this also bounds response-body reads locally.
+async fn control_rpc<T>(
+    call: impl std::future::Future<Output = std::result::Result<tonic::Response<T>, Status>>,
+) -> std::result::Result<tonic::Response<T>, Status> {
+    tokio::time::timeout(CONTROL_CALL_TIMEOUT, call)
+        .await
+        .unwrap_or_else(|_| {
+            Err(Status::deadline_exceeded(
+                "unary control RPC exceeded its deadline",
+            ))
+        })
+}
 
 /// gRPC transport that connects to a real Hatchet engine.
 ///
@@ -154,13 +169,19 @@ impl GrpcTransport {
     }
 
     /// Creates a tonic `Request` with the bearer token attached.
-    fn authed_request<T>(&self, payload: T) -> Request<T> {
+    fn streaming_request<T>(&self, payload: T) -> Request<T> {
         let mut request = Request::new(payload);
         if let Ok(value) = format!("Bearer {}", self.config.token())
             .parse::<MetadataValue<tonic::metadata::Ascii>>()
         {
             request.metadata_mut().insert("authorization", value);
         }
+        request
+    }
+
+    fn authed_request<T>(&self, payload: T) -> Request<T> {
+        let mut request = self.streaming_request(payload);
+        request.set_timeout(CONTROL_CALL_TIMEOUT);
         request
     }
 
@@ -218,7 +239,7 @@ impl GrpcTransport {
                 let mut client = dispatcher.clone();
                 let authed = self.authed_request(req);
                 async move {
-                    let res = client.register(authed).await;
+                    let res = control_rpc(client.register(authed)).await;
                     res.map(|response| response.into_inner())
                         .map_err(grpc_error)
                 }
@@ -251,8 +272,7 @@ impl GrpcTransport {
                     heartbeat_at: Some(prost_now()),
                 });
                 async move {
-                    client
-                        .heartbeat(authed)
+                    control_rpc(client.heartbeat(authed))
                         .await
                         .map(|_| ())
                         .map_err(grpc_error)
@@ -282,8 +302,7 @@ impl GrpcTransport {
                 let mut client = dispatcher.clone();
                 let authed = self.authed_request(req);
                 async move {
-                    client
-                        .send_step_action_event(authed)
+                    control_rpc(client.send_step_action_event(authed))
                         .await
                         .map(|_| ())
                         .map_err(grpc_error)
@@ -309,8 +328,7 @@ impl GrpcTransport {
                     increment_timeout_by: increment.to_owned(),
                 });
                 async move {
-                    client
-                        .refresh_timeout(authed)
+                    control_rpc(client.refresh_timeout(authed))
                         .await
                         .map(|_| ())
                         .map_err(grpc_error)
@@ -335,8 +353,7 @@ impl GrpcTransport {
                     task_run_external_id: task_run_external_id.to_owned(),
                 });
                 async move {
-                    client
-                        .release_slot(authed)
+                    control_rpc(client.release_slot(authed))
                         .await
                         .map(|_| ())
                         .map_err(grpc_error)
@@ -357,7 +374,7 @@ impl GrpcTransport {
         worker_id: &str,
     ) -> Result<tonic::Streaming<proto::dispatcher::AssignedAction>> {
         let mut dispatcher = self.dispatcher.clone();
-        let request = self.authed_request(proto::dispatcher::WorkerListenRequest {
+        let request = self.streaming_request(proto::dispatcher::WorkerListenRequest {
             worker_id: worker_id.to_owned(),
         });
 
@@ -379,8 +396,7 @@ impl GrpcTransport {
                     external_id: run_id.to_owned(),
                 });
                 async move {
-                    client
-                        .get_run_details(authed)
+                    control_rpc(client.get_run_details(authed))
                         .await
                         .map(|response| response.into_inner())
                         .map_err(grpc_error)
@@ -408,12 +424,14 @@ impl Transport for GrpcTransport {
     async fn engine_version(&self) -> Result<crate::EngineVersion> {
         let version = retry(
             || async {
-                self.dispatcher
-                    .clone()
-                    .get_version(self.authed_request(proto::dispatcher::GetVersionRequest {}))
-                    .await
-                    .map(|response| response.into_inner().version)
-                    .map_err(grpc_error)
+                control_rpc(
+                    self.dispatcher
+                        .clone()
+                        .get_version(self.authed_request(proto::dispatcher::GetVersionRequest {})),
+                )
+                .await
+                .map(|response| response.into_inner().version)
+                .map_err(grpc_error)
             },
             &self.retry_config,
         )
@@ -469,8 +487,7 @@ impl Transport for GrpcTransport {
                 let mut client = workflows.clone();
                 let authed = self.authed_request(req);
                 async move {
-                    client
-                        .trigger_workflow(authed)
+                    control_rpc(client.trigger_workflow(authed))
                         .await
                         .map(|response| WorkflowRunId(response.into_inner().workflow_run_id))
                         .map_err(grpc_error)
@@ -549,8 +566,7 @@ impl Transport for GrpcTransport {
                 let mut client = workflows.clone();
                 let authed = self.authed_request(req);
                 async move {
-                    client
-                        .bulk_trigger_workflow(authed)
+                    control_rpc(client.bulk_trigger_workflow(authed))
                         .await
                         .map(|response| {
                             response
@@ -629,9 +645,14 @@ impl Transport for GrpcTransport {
 
     async fn start_worker_loop(&self, opts: WorkerStartOpts) -> Result<()> {
         if !opts.durable_task_dispatchers.is_empty() {
-            diag::traced("engine_version", self.engine_version())
-                .await?
-                .require(crate::EngineFeature::DurableEviction)?;
+            let Some(version) = opts
+                .cancel_token
+                .run_until_cancelled(diag::traced("engine_version", self.engine_version()))
+                .await
+            else {
+                return Ok(());
+            };
+            version?.require(crate::EngineFeature::DurableEviction)?;
         }
         let mut actions = Vec::new();
         for action in opts.task_dispatchers.keys() {
@@ -648,20 +669,23 @@ impl Transport for GrpcTransport {
                 return Ok(());
             }
 
-            let response = match diag::traced(
-                "register_worker",
-                self.register_worker(
-                    &opts.worker_name,
-                    actions.clone(),
-                    opts.labels.clone(),
-                    opts.slot_config.clone(),
-                ),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(error) if !connected_once => return Err(error),
-                Err(error) => {
+            let registration = opts
+                .cancel_token
+                .run_until_cancelled(diag::traced(
+                    "register_worker",
+                    self.register_worker(
+                        &opts.worker_name,
+                        actions.clone(),
+                        opts.labels.clone(),
+                        opts.slot_config.clone(),
+                    ),
+                ))
+                .await;
+            let response = match registration {
+                None => return Ok(()),
+                Some(Ok(response)) => response,
+                Some(Err(error)) if !connected_once => return Err(error),
+                Some(Err(error)) => {
                     let _ = opts.connection_tx.send(
                         crate::transport::WorkerConnectionState::Reconnecting(error.to_string()),
                     );
@@ -679,18 +703,21 @@ impl Transport for GrpcTransport {
             let mut durable_listener = if opts.durable_task_dispatchers.is_empty() {
                 None
             } else {
-                match diag::traced(
-                    "durable_listener_start",
-                    crate::durable_listener::DurableListenerClient::start(
-                        self.config.clone(),
-                        worker_id.clone(),
-                    ),
-                )
-                .await
-                {
-                    Ok(listener) => Some(Arc::new(listener)),
-                    Err(error) if !connected_once => return Err(error),
-                    Err(error) => {
+                let listener_start = opts
+                    .cancel_token
+                    .run_until_cancelled(diag::traced(
+                        "durable_listener_start",
+                        crate::durable_listener::DurableListenerClient::start(
+                            self.config.clone(),
+                            worker_id.clone(),
+                        ),
+                    ))
+                    .await;
+                match listener_start {
+                    None => return Ok(()),
+                    Some(Ok(listener)) => Some(Arc::new(listener)),
+                    Some(Err(error)) if !connected_once => return Err(error),
+                    Some(Err(error)) => {
                         let _ = opts.connection_tx.send(
                             crate::transport::WorkerConnectionState::Reconnecting(
                                 error.to_string(),
@@ -720,6 +747,11 @@ impl Transport for GrpcTransport {
             let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(4));
             let mut stream = None;
             let mut ready_sent = false;
+            // Keep the heartbeat in the select, rather than awaiting inside a
+            // branch: stream failure and cancellation must remain observable
+            // while a control RPC is waiting for a response.
+            let mut heartbeat_call = None;
+            let mut heartbeat_started = std::time::Instant::now();
 
             let stream_result = loop {
                 tokio::select! {
@@ -735,8 +767,13 @@ impl Transport for GrpcTransport {
                             Err(error) => break Err(error),
                         }
                     }
-                    _ = heartbeat.tick() => {
-                        if let Err(error) = diag::traced("heartbeat", self.heartbeat()).await {
+                    _ = heartbeat.tick(), if heartbeat_call.is_none() => {
+                        heartbeat_started = std::time::Instant::now();
+                        heartbeat_call = Some(Box::pin(diag::traced("heartbeat", self.heartbeat())));
+                    }
+                    result = async { heartbeat_call.as_mut().expect("guarded heartbeat").await }, if heartbeat_call.is_some() => {
+                        heartbeat_call = None;
+                        if let Err(error) = result {
                             break Err(error);
                         }
                         if !ready_sent {
@@ -791,12 +828,16 @@ impl Transport for GrpcTransport {
                             "worker lifecycle failure channel closed".to_owned()
                         });
                     }
-                    _ = heartbeat.tick() => {
-                        let started = std::time::Instant::now();
-                        if let Err(error) = diag::traced("heartbeat", self.heartbeat()).await {
+                    _ = heartbeat.tick(), if heartbeat_call.is_none() => {
+                        heartbeat_started = std::time::Instant::now();
+                        heartbeat_call = Some(Box::pin(diag::traced("heartbeat", self.heartbeat())));
+                    }
+                    result = async { heartbeat_call.as_mut().expect("guarded heartbeat").await }, if heartbeat_call.is_some() => {
+                        heartbeat_call = None;
+                        if let Err(error) = result {
                             break format!("worker heartbeat failed: {error}");
                         }
-                        slowest_heartbeat = slowest_heartbeat.max(started.elapsed());
+                        slowest_heartbeat = slowest_heartbeat.max(heartbeat_started.elapsed());
                         heartbeats_sent += 1;
                         if heartbeats_sent == HEARTBEATS_PER_STATUS_LINE {
                             diag::log(format!(
@@ -831,6 +872,8 @@ impl Transport for GrpcTransport {
                 }
             };
 
+            drop(heartbeat_call);
+            drop(stream);
             if let Ok(mut guard) = self.durable_listener.write() {
                 *guard = None;
             }
@@ -974,8 +1017,7 @@ impl Transport for GrpcTransport {
                 let mut client = admin.clone();
                 let authed = self.authed_request(req);
                 async move {
-                    client
-                        .put_workflow(authed)
+                    control_rpc(client.put_workflow(authed))
                         .await
                         .map(|_| ())
                         .map_err(grpc_error)
@@ -1006,7 +1048,9 @@ impl Transport for GrpcTransport {
             event_index: None,
         });
 
-        events.put_stream_event(request).await.map_err(grpc_error)?;
+        control_rpc(events.put_stream_event(request))
+            .await
+            .map_err(grpc_error)?;
         Ok(())
     }
 
@@ -1016,7 +1060,7 @@ impl Transport for GrpcTransport {
 
     async fn subscribe_run_stream(&self, run_id: &WorkflowRunId) -> Result<crate::RunEventStream> {
         let mut dispatcher = self.dispatcher.clone();
-        let request = self.authed_request(proto::dispatcher::SubscribeToWorkflowEventsRequest {
+        let request = self.streaming_request(proto::dispatcher::SubscribeToWorkflowEventsRequest {
             workflow_run_id: Some(run_id.0.clone()),
             additional_meta_key: None,
             additional_meta_value: None,
@@ -1063,7 +1107,7 @@ impl Transport for GrpcTransport {
             task_retry_count: None,
         });
 
-        let _ = events.put_log(request).await;
+        let _ = control_rpc(events.put_log(request)).await;
     }
 
     async fn refresh_timeout(&self, task_run_id: &str, increment: &str) -> Result<()> {
@@ -1145,7 +1189,12 @@ impl Transport for GrpcTransport {
             || {
                 let mut client = events.clone();
                 let request = self.authed_request(request.clone());
-                async move { client.push(request).await.map(|_| ()).map_err(grpc_error) }
+                async move {
+                    control_rpc(client.push(request))
+                        .await
+                        .map(|_| ())
+                        .map_err(grpc_error)
+                }
             },
             &self.retry_config,
         )
@@ -1188,8 +1237,7 @@ impl Transport for GrpcTransport {
                 let mut client = events.clone();
                 let request = self.authed_request(request.clone());
                 async move {
-                    client
-                        .bulk_push(request)
+                    control_rpc(client.bulk_push(request))
                         .await
                         .map(|_| ())
                         .map_err(grpc_error)
@@ -1214,18 +1262,15 @@ impl Transport for GrpcTransport {
         self.engine_version()
             .await?
             .require(crate::EngineFeature::RateLimitPause)?;
-        let response = self
-            .legacy_workflows
-            .clone()
-            .pause_rate_limit(
-                self.authed_request(proto::workflows::PauseRateLimitRequest {
-                    key: key.to_owned(),
-                    paused_until: Some(paused_until),
-                }),
-            )
-            .await
-            .map_err(grpc_error)?
-            .into_inner();
+        let response = control_rpc(self.legacy_workflows.clone().pause_rate_limit(
+            self.authed_request(proto::workflows::PauseRateLimitRequest {
+                key: key.to_owned(),
+                paused_until: Some(paused_until),
+            }),
+        ))
+        .await
+        .map_err(grpc_error)?
+        .into_inner();
         let until = response
             .paused_until
             .ok_or_else(|| Error::Transport("engine omitted the pause timestamp".to_owned()))?;
@@ -1258,8 +1303,7 @@ impl Transport for GrpcTransport {
                 let mut client = workflows.clone();
                 let authed = self.authed_request(req);
                 async move {
-                    client
-                        .put_rate_limit(authed)
+                    control_rpc(client.put_rate_limit(authed))
                         .await
                         .map(|_| returned_key)
                         .map_err(grpc_error)
@@ -1488,19 +1532,23 @@ impl GrpcTransport {
                 }
             }
         }
-        self.dispatcher
-            .clone()
-            .send_batch_action_event(self.authed_request(proto::dispatcher::BatchActionEvent {
-                worker_id: worker_id.to_owned(),
-                job_id: action.job_id.clone(),
-                action_id: action.action_id.clone(),
-                batch_id: action.batch_id.clone(),
-                event_timestamp: Some(prost_now()),
-                event_type: event as i32,
-                items,
-            }))
-            .await
-            .map_err(grpc_error)?;
+        control_rpc(
+            self.dispatcher
+                .clone()
+                .send_batch_action_event(self.authed_request(
+                    proto::dispatcher::BatchActionEvent {
+                        worker_id: worker_id.to_owned(),
+                        job_id: action.job_id.clone(),
+                        action_id: action.action_id.clone(),
+                        batch_id: action.batch_id.clone(),
+                        event_timestamp: Some(prost_now()),
+                        event_type: event as i32,
+                        items,
+                    },
+                )),
+        )
+        .await
+        .map_err(grpc_error)?;
         Ok(())
     }
 
