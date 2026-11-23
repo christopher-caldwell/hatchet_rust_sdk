@@ -9,7 +9,7 @@ use another_hatchet_core::RunOpts;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{RwLock, Semaphore, mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::client::{DurableTaskHandle, TaskHandle};
@@ -27,14 +27,14 @@ const DEFAULT_CANCELLATION_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 trait ErasedTaskFn<T: Transport>: Send + Sync {
     fn validate_config(&self) -> Result<()>;
-    fn concurrency_limit(&self) -> Option<Arc<Semaphore>>;
+    fn concurrency_limit(&self) -> Option<Arc<KeyedConcurrencyLimit>>;
     fn matches_worker_labels(&self, worker_labels: &BTreeMap<String, String>) -> bool;
     fn call(&self, input: Value, ctx: InMemoryContext<T>) -> BoxFutureResult;
 }
 
 trait ErasedDurableTaskFn<T: Transport>: Send + Sync {
     fn validate_config(&self) -> Result<()>;
-    fn concurrency_limit(&self) -> Option<Arc<Semaphore>>;
+    fn concurrency_limit(&self) -> Option<Arc<KeyedConcurrencyLimit>>;
     fn matches_worker_labels(&self, worker_labels: &BTreeMap<String, String>) -> bool;
     fn call(&self, input: Value, ctx: InMemoryDurableContext<T>) -> BoxFutureResult;
 }
@@ -43,7 +43,7 @@ struct TypedTaskHandler<T: Transport, I, O, F> {
     func: Arc<F>,
     config: TaskConfig,
     validator: Result<Option<crate::schema::InputValidator>>,
-    concurrency: Option<Arc<Semaphore>>,
+    concurrency: Option<Arc<KeyedConcurrencyLimit>>,
     io: std::marker::PhantomData<fn(I) -> O>,
     transport: std::marker::PhantomData<fn() -> T>,
 }
@@ -52,7 +52,7 @@ struct TypedDurableTaskHandler<T: Transport, I, O, F> {
     func: Arc<F>,
     config: TaskConfig,
     validator: Result<Option<crate::schema::InputValidator>>,
-    concurrency: Option<Arc<Semaphore>>,
+    concurrency: Option<Arc<KeyedConcurrencyLimit>>,
     io: std::marker::PhantomData<fn(I) -> O>,
     transport: std::marker::PhantomData<fn() -> T>,
 }
@@ -72,7 +72,7 @@ where
         }
         Ok(())
     }
-    fn concurrency_limit(&self) -> Option<Arc<Semaphore>> {
+    fn concurrency_limit(&self) -> Option<Arc<KeyedConcurrencyLimit>> {
         self.concurrency.as_ref().map(Arc::clone)
     }
 
@@ -151,7 +151,7 @@ where
         }
         Ok(())
     }
-    fn concurrency_limit(&self) -> Option<Arc<Semaphore>> {
+    fn concurrency_limit(&self) -> Option<Arc<KeyedConcurrencyLimit>> {
         self.concurrency.as_ref().map(Arc::clone)
     }
 
@@ -186,9 +186,129 @@ where
     }
 }
 
-async fn acquire_task_permit(limit: Option<Arc<Semaphore>>) -> Option<OwnedSemaphorePermit> {
+/// Live semaphores by concurrency key; an entry exists only while it is in use.
+type KeySemaphores = std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>;
+
+/// Local per-key emulation of a handle's `ConcurrencyConfig`.
+///
+/// Each distinct concurrency key gets its own `max_runs` semaphore, so runs
+/// for one key never wait behind runs for another. A key's semaphore exists
+/// only while some run holds or awaits it. Only `input` and `input.<field>...`
+/// expressions are evaluated locally. Any other CEL expression keeps the
+/// worker-wide limit it always had: every run of the task shares one key, so
+/// the worker never runs more than `max_runs` of them at once.
+struct KeyedConcurrencyLimit {
+    /// Input path the key is read from; `None` puts every run under one shared key.
+    path: Option<Vec<String>>,
+    max_runs: usize,
+    semaphores: Arc<KeySemaphores>,
+}
+
+/// Holds one run's place under its concurrency key and releases it on drop.
+struct KeyedConcurrencyPermit {
+    key: String,
+    semaphore: Arc<Semaphore>,
+    acquired: bool,
+    semaphores: Arc<KeySemaphores>,
+}
+
+impl KeyedConcurrencyLimit {
+    fn from_config(config: &TaskConfig) -> Option<Arc<Self>> {
+        let concurrency = config.concurrency.as_ref()?;
+        let max_runs = concurrency.max_runs?;
+        let path = parse_input_key_path(&concurrency.expression);
+        Some(Arc::new(Self {
+            path,
+            max_runs: max_runs as usize,
+            semaphores: Arc::default(),
+        }))
+    }
+
+    /// A missing field maps to the empty string, which no JSON value encodes to.
+    /// Without an input path every run gets that same empty-string key.
+    fn key(&self, input: &Value) -> String {
+        let Some(path) = &self.path else {
+            return String::new();
+        };
+        path.iter()
+            .try_fold(input, |value, segment| value.get(segment.as_str()))
+            .map_or_else(String::new, Value::to_string)
+    }
+
+    async fn acquire(&self, input: &Value) -> Option<KeyedConcurrencyPermit> {
+        let key = self.key(input);
+        let semaphore = {
+            let mut semaphores = self
+                .semaphores
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match semaphores.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(semaphore) => semaphore,
+                None => {
+                    let semaphore = Arc::new(Semaphore::new(self.max_runs));
+                    semaphores.insert(key.clone(), Arc::downgrade(&semaphore));
+                    semaphore
+                }
+            }
+        };
+        // Build the guard before waiting so a cancelled wait still cleans up.
+        let mut permit = KeyedConcurrencyPermit {
+            key,
+            semaphore,
+            acquired: false,
+            semaphores: Arc::clone(&self.semaphores),
+        };
+        permit.semaphore.acquire().await.ok()?.forget();
+        permit.acquired = true;
+        Some(permit)
+    }
+}
+
+impl Drop for KeyedConcurrencyPermit {
+    fn drop(&mut self) {
+        if self.acquired {
+            self.semaphore.add_permits(1);
+        }
+        let mut semaphores = self
+            .semaphores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // New holders are only created under this lock, so a count of one
+        // means no other run holds or awaits this key.
+        if Arc::strong_count(&self.semaphore) == 1 {
+            let is_ours = semaphores
+                .get(&self.key)
+                .is_some_and(|weak| std::ptr::eq(weak.as_ptr(), Arc::as_ptr(&self.semaphore)));
+            if is_ours {
+                semaphores.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Accepts `input` or `input.a.b` with identifier segments only.
+fn parse_input_key_path(expression: &str) -> Option<Vec<String>> {
+    let mut segments = expression.trim().split('.');
+    if segments.next()? != "input" {
+        return None;
+    }
+    segments
+        .map(|segment| {
+            let valid = !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            valid.then(|| segment.to_owned())
+        })
+        .collect()
+}
+
+async fn acquire_task_permit(
+    limit: Option<Arc<KeyedConcurrencyLimit>>,
+    input: &Value,
+) -> Option<KeyedConcurrencyPermit> {
     match limit {
-        Some(semaphore) => semaphore.acquire_owned().await.ok(),
+        Some(limit) => limit.acquire(input).await,
         None => None,
     }
 }
@@ -493,11 +613,7 @@ impl<T: Transport + 'static> WorkerBuilder<T> {
             Arc::new(TypedTaskHandler::<T, I, O, F> {
                 func: Arc::new(handler),
                 validator: crate::schema::InputValidator::compile(config.input_schema.as_ref()),
-                concurrency: config
-                    .concurrency
-                    .as_ref()
-                    .and_then(|concurrency| concurrency.max_runs)
-                    .map(|max_runs| Arc::new(Semaphore::new(max_runs as usize))),
+                concurrency: KeyedConcurrencyLimit::from_config(&config),
                 config,
                 io: std::marker::PhantomData,
                 transport: std::marker::PhantomData,
@@ -524,11 +640,7 @@ impl<T: Transport + 'static> WorkerBuilder<T> {
             Arc::new(TypedDurableTaskHandler::<T, I, O, F> {
                 func: Arc::new(handler),
                 validator: crate::schema::InputValidator::compile(config.input_schema.as_ref()),
-                concurrency: config
-                    .concurrency
-                    .as_ref()
-                    .and_then(|concurrency| concurrency.max_runs)
-                    .map(|max_runs| Arc::new(Semaphore::new(max_runs as usize))),
+                concurrency: KeyedConcurrencyLimit::from_config(&config),
                 config,
                 io: std::marker::PhantomData,
                 transport: std::marker::PhantomData,
@@ -1247,7 +1359,8 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                             self.name, task_name
                         )))
                     } else {
-                        let _task_permit = acquire_task_permit(handler.concurrency_limit()).await;
+                        let _task_permit =
+                            acquire_task_permit(handler.concurrency_limit(), &input).await;
                         let invocation = crate::TaskInvocation::new(
                             task_name.clone(),
                             ids.clone(),
@@ -1391,7 +1504,8 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                             self.name, task_name
                         )))
                     } else {
-                        let _task_permit = acquire_task_permit(handler.concurrency_limit()).await;
+                        let _task_permit =
+                            acquire_task_permit(handler.concurrency_limit(), &input).await;
                         let invocation = crate::TaskInvocation::new(
                             task_name.clone(),
                             ids.clone(),
@@ -1660,6 +1774,199 @@ mod tests {
         );
 
         worker.shutdown().await.expect("worker should shut down");
+    }
+
+    /// Starts a 4-slot worker whose `keyed` task allows one run per value of `expression`.
+    fn start_keyed_worker<F, Fut>(expression: &str, handler: F) -> WorkerHandle
+    where
+        F: Fn(Value, InMemoryContext<InMemoryTransport>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let client = Client::new(Arc::new(InMemoryTransport::new()));
+        let task = client.task::<Value, ()>("keyed").with_config(
+            TaskConfig::builder()
+                .concurrency(crate::ConcurrencyConfig::new(expression).max_runs(1))
+                .build(),
+        );
+        client
+            .worker("keyed-concurrency-worker")
+            .slots(4)
+            .register_task(&task, handler)
+            .build()
+            .start()
+            .expect("worker should start")
+    }
+
+    #[tokio::test]
+    async fn handle_concurrency_limit_does_not_serialize_different_keys() {
+        // Each run can finish only while the other run is inside the handler too.
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let worker = start_keyed_worker("input.tenant", move |_input, _ctx| {
+            let barrier = Arc::clone(&barrier);
+            async move {
+                if tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+                    .await
+                    .is_err()
+                {
+                    return Err(Error::Worker(
+                        "runs for different keys did not run together".to_owned(),
+                    ));
+                }
+                Ok(())
+            }
+        });
+
+        let (first, second) = tokio::join!(
+            worker.run_task_json("keyed", json!({ "tenant": "a" }), test_ids("keyed")),
+            worker.run_task_json("keyed", json!({ "tenant": "b" }), test_ids("keyed")),
+        );
+        first.expect("tenant a should run alongside tenant b");
+        second.expect("tenant b should run alongside tenant a");
+        worker.shutdown().await.expect("worker should shut down");
+    }
+
+    /// Runs two `keyed` tasks with the given inputs while holding the first one
+    /// inside the handler, and checks that the second never enters alongside it.
+    async fn assert_runs_are_capped_at_one(
+        expression: &str,
+        first_input: Value,
+        second_input: Value,
+    ) {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(Semaphore::new(0));
+        let worker = {
+            let (active, peak) = (Arc::clone(&active), Arc::clone(&peak));
+            let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+            start_keyed_worker(expression, move |_input, _ctx| {
+                let (active, peak) = (Arc::clone(&active), Arc::clone(&peak));
+                let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+                async move {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    entered.notify_one();
+                    // Held until the test releases it; the timeout only bounds a failing test.
+                    let _ = tokio::time::timeout(Duration::from_secs(5), release.acquire()).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+        };
+
+        let control = async {
+            tokio::time::timeout(Duration::from_secs(5), entered.notified())
+                .await
+                .expect("one run should enter the handler");
+            // Both runs are dispatched; let a wrongly admitted second run get in.
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(active.load(Ordering::SeqCst), 1);
+            release.add_permits(1);
+        };
+        let (first, second, ()) = tokio::join!(
+            worker.run_task_json("keyed", first_input, test_ids("keyed")),
+            worker.run_task_json("keyed", second_input, test_ids("keyed")),
+            control,
+        );
+        first.expect("first run should succeed");
+        second.expect("second run should succeed");
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        worker.shutdown().await.expect("worker should shut down");
+    }
+
+    #[tokio::test]
+    async fn handle_concurrency_limit_still_caps_runs_sharing_a_key() {
+        assert_runs_are_capped_at_one(
+            "input.tenant",
+            json!({ "tenant": "a" }),
+            json!({ "tenant": "a" }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unevaluable_handle_concurrency_expression_keeps_the_worker_wide_limit() {
+        // The worker cannot evaluate this expression, so different inputs
+        // still share one `max_runs` limit, as before keyed limits existed.
+        assert_runs_are_capped_at_one(
+            "additional_metadata.tenant",
+            json!({ "tenant": "a" }),
+            json!({ "tenant": "b" }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn keyed_concurrency_limit_removes_idle_keys() {
+        let limit = KeyedConcurrencyLimit::from_config(
+            &TaskConfig::builder()
+                .concurrency(crate::ConcurrencyConfig::new("input.tenant").max_runs(1))
+                .build(),
+        )
+        .expect("input path expression should build a local limit");
+        let held = limit.acquire(&json!({ "tenant": "a" })).await.unwrap();
+        let other = limit.acquire(&json!({ "tenant": "b" })).await.unwrap();
+        assert_eq!(limit.semaphores.lock().unwrap().len(), 2);
+
+        // A cancelled waiter must not leave its key behind or leak a permit.
+        let waiting = tokio::time::timeout(
+            Duration::from_millis(10),
+            limit.acquire(&json!({ "tenant": "a" })),
+        )
+        .await;
+        assert!(waiting.is_err(), "same key should wait while held");
+
+        drop(held);
+        drop(other);
+        assert!(limit.semaphores.lock().unwrap().is_empty());
+        let again = limit.acquire(&json!({ "tenant": "a" })).await.unwrap();
+        drop(again);
+        assert!(limit.semaphores.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unevaluable_expression_shares_one_key_that_is_removed_when_idle() {
+        let limit = KeyedConcurrencyLimit::from_config(
+            &TaskConfig::builder()
+                .concurrency(
+                    crate::ConcurrencyConfig::new("additional_metadata.tenant").max_runs(1),
+                )
+                .build(),
+        )
+        .expect("an unevaluable expression should keep a local limit");
+        let held = limit.acquire(&json!({ "tenant": "a" })).await.unwrap();
+        assert_eq!(limit.semaphores.lock().unwrap().len(), 1);
+
+        // A different input still waits on the shared key; cancelling the wait
+        // must not leak a permit or an entry.
+        let waiting = tokio::time::timeout(
+            Duration::from_millis(10),
+            limit.acquire(&json!({ "tenant": "b" })),
+        )
+        .await;
+        assert!(waiting.is_err(), "different inputs should share one limit");
+        assert_eq!(limit.semaphores.lock().unwrap().len(), 1);
+
+        drop(held);
+        assert!(limit.semaphores.lock().unwrap().is_empty());
+        let again = limit.acquire(&json!({ "tenant": "b" })).await.unwrap();
+        drop(again);
+        assert!(limit.semaphores.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_input_path_expressions_are_evaluated_locally() {
+        assert_eq!(
+            parse_input_key_path(" input.user.id "),
+            Some(vec!["user".to_owned(), "id".to_owned()])
+        );
+        assert_eq!(parse_input_key_path("input"), Some(Vec::new()));
+        assert_eq!(parse_input_key_path("input."), None);
+        assert_eq!(parse_input_key_path("additional_metadata.tenant"), None);
+        assert_eq!(parse_input_key_path("input.a + input.b"), None);
+        assert_eq!(parse_input_key_path("inputs.a"), None);
     }
 
     #[tokio::test]
