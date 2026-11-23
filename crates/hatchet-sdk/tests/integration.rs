@@ -760,7 +760,13 @@ async fn integration_failed_run_status() {
     let result = tokio::time::timeout(TEST_TIMEOUT, run.output())
         .await
         .unwrap();
-    assert!(result.is_err());
+    assert!(
+        matches!(
+            result,
+            Err(Error::NonRetryable(ref message)) if message == "intentional status regression test"
+        ),
+        "a run that failed with NonRetryable must keep that error, got {result:?}"
+    );
     wait_for_status(&client, run.run_id(), RunStatus::Failed).await;
     let failed = client
         .runs()

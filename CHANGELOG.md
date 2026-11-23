@@ -47,6 +47,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Return `Error::NonRetryable` instead of a retryable `Error::Transport` when
+  waiting on a gRPC run whose task failed with `Error::NonRetryable`.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Preserve explicit desired worker identity on normal single and bulk submissions.

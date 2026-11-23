@@ -1650,7 +1650,7 @@ impl GrpcTransport {
                             .values()
                             .find_map(|task| task.error.clone())
                             .unwrap_or_else(|| "workflow run failed".to_owned());
-                        return Err(Error::Transport(message));
+                        return Err(failed_run_error(message));
                     }
                     Ok(proto::v1::RunStatus::Cancelled) => {
                         return Err(Error::Transport("workflow run was cancelled".to_owned()));
@@ -1885,6 +1885,26 @@ fn parse_task_output(task_detail: &proto::v1::TaskRunDetail) -> Option<Value> {
         .output
         .as_deref()
         .and_then(|output| serde_json::from_slice(output).ok())
+}
+
+/// Rebuilds the error of a run the engine reports as failed.
+///
+/// The worker reports a task failure as `error.to_string()` (batch members wrap
+/// it as `{"message": ...}`) together with `should_not_retry`, but
+/// `GetRunDetails` returns only the text. A failure whose text is the
+/// `Error::NonRetryable` rendering is returned as that variant, as
+/// `InMemoryTransport` returns the handler's own error, so callers do not
+/// resubmit it. Any other failure is returned unchanged, as before.
+fn failed_run_error(message: String) -> Error {
+    let batch_message = serde_json::from_str::<Value>(&message)
+        .ok()
+        .and_then(|payload| payload.get("message")?.as_str().map(str::to_owned));
+    let text = batch_message.as_deref().unwrap_or(&message);
+    let non_retryable_prefix = Error::NonRetryable(String::new()).to_string();
+    match text.strip_prefix(&non_retryable_prefix) {
+        Some(original) => Error::NonRetryable(original.to_owned()),
+        None => Error::Transport(message),
+    }
 }
 
 fn completion_event_from_result(
@@ -2428,7 +2448,7 @@ mod tests {
 
     use super::{
         V1LogLineList, WorkflowRegistration, completion_event_from_result,
-        decode_step_action_payload, infer_trigger_data_from_metadata,
+        decode_step_action_payload, failed_run_error, infer_trigger_data_from_metadata,
         rate_limit_duration_to_legacy_proto, rate_limit_duration_to_v1_proto,
         rendered_to_proto_task, resolve_action_task_name, run_opt_label_to_proto,
         run_output_from_details, serialize_input_schema, worker_action_id,
@@ -2789,6 +2809,43 @@ mod tests {
                 .unwrap();
         assert_eq!(should_not_retry, Some(true));
         assert_eq!(retry_after_ms, None);
+    }
+
+    #[test]
+    fn failed_run_preserves_a_non_retryable_task_error() {
+        let (_, payload, should_not_retry, _) =
+            completion_event_from_result(Err(crate::Error::non_retryable("invalid input")), false)
+                .unwrap();
+        assert_eq!(should_not_retry, Some(true));
+        let error = failed_run_error(payload);
+        assert!(
+            matches!(error, crate::Error::NonRetryable(ref message) if message == "invalid input"),
+            "a run that failed with NonRetryable surfaced as {error:?}"
+        );
+        assert!(!error.is_retryable());
+
+        let batch = serde_json::json!({"message": "non-retryable error: bad member"}).to_string();
+        assert!(matches!(
+            failed_run_error(batch),
+            crate::Error::NonRetryable(ref message) if message == "bad member"
+        ));
+    }
+
+    #[test]
+    fn failed_run_keeps_other_task_errors_retryable() {
+        for message in [
+            "engine failure".to_owned(),
+            serde_json::json!({"message": "busy"}).to_string(),
+            serde_json::json!({"message": "transport error: non-retryable error: x"}).to_string(),
+            serde_json::json!({"message": 7, "detail": "non-retryable error: x"}).to_string(),
+        ] {
+            let error = failed_run_error(message.clone());
+            assert!(
+                matches!(error, crate::Error::Transport(ref text) if *text == message),
+                "unexpected {error:?}"
+            );
+            assert!(error.is_retryable());
+        }
     }
 
     #[test]
