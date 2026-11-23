@@ -496,7 +496,11 @@ async fn send_worker_status(
     worker_id: &str,
 ) -> Result<()> {
     let waiting_entries = {
-        let callbacks = callbacks.lock().await;
+        let mut callbacks = callbacks.lock().await;
+        // A waiter whose future was dropped before its entry completed (a timed-out
+        // `wait_for_event`, a user `select!`, a cancelled invocation) is no longer awaiting
+        // anything. Forget it so it is not reported for the rest of the listener's lifetime.
+        callbacks.pending.retain(|_, sender| !sender.is_closed());
         callbacks
             .pending
             .keys()
@@ -1115,5 +1119,77 @@ mod tests {
         assert_eq!(waiting.invocation_count, key.invocation_count);
         assert_eq!(waiting.branch_id, key.branch_id);
         assert_eq!(waiting.node_id, key.node_id);
+    }
+
+    #[tokio::test]
+    async fn timed_out_event_wait_is_not_reported_as_awaited() {
+        use crate::DurableContext;
+        let (listener, mut requests) = test_listener();
+        let ctx = crate::InMemoryDurableContext::new(
+            crate::ContextIds {
+                workflow_name: "wf".to_owned(),
+                task_name: "approval".to_owned(),
+                workflow_run_id: crate::WorkflowRunId("run-1".to_owned()),
+                task_run_id: "task-1".to_owned(),
+                workflow_id: None,
+                workflow_version_id: None,
+            },
+            Arc::new(crate::InMemoryTransport::new()),
+            1,
+        )
+        .with_durable_listener(Arc::clone(&listener));
+        let waiting = tokio::spawn(async move {
+            ctx.wait_for_event("order.approved", Duration::from_millis(200))
+                .await
+        });
+
+        let request = requests.recv().await.unwrap();
+        let Some(v1::durable_task_request::Message::WaitFor(wait)) = request.message else {
+            panic!("expected a WaitFor request");
+        };
+        dispatch_response(
+            v1::DurableTaskResponse {
+                message: Some(v1::durable_task_response::Message::WaitForAck(
+                    v1::DurableTaskEventWaitForAckResponse {
+                        r#ref: Some(v1::DurableEventLogEntryRef {
+                            durable_task_external_id: wait.durable_task_external_id,
+                            invocation_count: wait.invocation_count,
+                            branch_id: 0,
+                            node_id: 1,
+                        }),
+                    },
+                )),
+            },
+            &listener.pending_acks,
+            &listener.callbacks,
+            &listener.inflight_requests,
+            &listener.evict_tx,
+        )
+        .await;
+        // While the wait is live, its entry is reported as awaited.
+        let request = requests.recv().await.unwrap();
+        let Some(v1::durable_task_request::Message::WorkerStatus(status)) = request.message else {
+            panic!("expected worker status request");
+        };
+        assert_eq!(status.waiting_entries.len(), 1);
+
+        assert!(
+            waiting.await.unwrap().unwrap().is_none(),
+            "wait_for_event should time out"
+        );
+
+        // The next status tick must neither report nor keep the abandoned entry.
+        send_worker_status(
+            &listener.request_tx,
+            &listener.callbacks,
+            &listener.worker_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            requests.try_recv().is_err(),
+            "a timed-out wait is still reported to the engine as awaited"
+        );
+        assert!(listener.callbacks.lock().await.pending.is_empty());
     }
 }
