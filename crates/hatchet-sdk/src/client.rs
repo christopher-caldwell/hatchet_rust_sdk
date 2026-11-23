@@ -462,14 +462,18 @@ where
             .transport
             .run_workflow_traced(&self.workflow_name, input_value.clone(), opts.clone())
             .await?;
-        record_run(
-            &self.state,
-            run_id.clone(),
-            self.workflow_name.clone(),
-            input_value,
-            opts,
-        )
-        .await;
+        // Only clients without a REST API read the local run map; engine-backed
+        // clients query the engine, so recording there would retain every input.
+        if self.transport.rest_api().is_none() {
+            record_run(
+                &self.state,
+                run_id.clone(),
+                self.workflow_name.clone(),
+                input_value,
+                opts,
+            )
+            .await;
+        }
         self.transport.register_result_channel(&run_id).await?;
         Ok(WorkflowRunRef::new(run_id, Arc::clone(&self.run_control)))
     }
@@ -499,15 +503,19 @@ where
             .run_workflows_traced(&self.workflow_name, values.clone(), opts.clone())
             .await?;
 
+        // See `run_no_wait`: the local run map is only read without a REST API.
+        let record_locally = self.transport.rest_api().is_none();
         for (run_id, input_value) in run_ids.iter().cloned().zip(values.into_iter()) {
-            record_run(
-                &self.state,
-                run_id.clone(),
-                self.workflow_name.clone(),
-                input_value,
-                opts.clone(),
-            )
-            .await;
+            if record_locally {
+                record_run(
+                    &self.state,
+                    run_id.clone(),
+                    self.workflow_name.clone(),
+                    input_value,
+                    opts.clone(),
+                )
+                .await;
+            }
             self.transport.register_result_channel(&run_id).await?;
         }
 

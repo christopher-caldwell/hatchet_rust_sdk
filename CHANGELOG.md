@@ -50,6 +50,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Preserve explicit desired worker identity on normal single and bulk submissions.
+- Stop engine-backed clients from keeping every submitted run and its input in
+  an unread client-side map for the client's lifetime.
 - Use official gRPC submission paths so idempotency details are not lost through
   the REST proxy, and classify collisions as non-retryable.
 

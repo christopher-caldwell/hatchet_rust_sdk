@@ -210,6 +210,83 @@ async fn normal_and_bulk_dispatch_preserve_explicit_sticky_worker_routing() {
             .all(|(path, _)| path.contains("WorkflowService"))
     );
 }
+/// Returns the Debug text of every client-side run map (`FeatureState.runs`)
+/// in a client's Debug output. Panics if none is found, so a change to the
+/// Debug format cannot make the callers' assertions pass vacuously.
+fn local_run_maps(debug: &str) -> Vec<&str> {
+    let maps: Vec<&str> = debug
+        .split("FeatureState { runs: ")
+        .skip(1)
+        .map(|rest| match rest.split_once(", workflows: ") {
+            Some((map, _)) => map,
+            None => panic!("unterminated run map in {debug}"),
+        })
+        .collect();
+    assert!(!maps.is_empty(), "no FeatureState run map in {debug}");
+    maps
+}
+#[tokio::test]
+async fn engine_backed_submissions_are_not_retained_client_side() {
+    const MARKER: &str = "retained-input-marker";
+    // Control: a client without a REST API keeps its local run records, and
+    // the probe sees the marker inside that map.
+    let local = Client::new(std::sync::Arc::new(InMemoryTransport::new()));
+    let workflow = local.workflow::<Value, Value>("retention");
+    workflow
+        .run_no_wait(json!({ "marker": MARKER }), RunOpts::default())
+        .await
+        .unwrap();
+    workflow
+        .run_many_no_wait([json!({ "marker": MARKER })], RunOpts::default())
+        .await
+        .unwrap();
+    let debug = format!("{local:?}");
+    for map in local_run_maps(&debug) {
+        assert!(
+            map.contains("\"run-1\"") && map.contains("\"run-2\"") && map.contains(MARKER),
+            "{map}"
+        );
+    }
+
+    let h = harness(
+        "v0.94.14",
+        vec![
+            Reply::ok(proto::workflows::TriggerWorkflowResponse {
+                workflow_run_id: FIRST.into(),
+            }),
+            Reply::ok(proto::workflows::BulkTriggerWorkflowResponse {
+                workflow_run_ids: vec![SECOND.into()],
+            }),
+        ],
+    )
+    .await;
+    let workflow = h.client.workflow::<Value, Value>("retention");
+    workflow
+        .run_no_wait(json!({ "marker": MARKER }), RunOpts::default())
+        .await
+        .unwrap();
+    workflow
+        .run_many_no_wait([json!({ "marker": MARKER })], RunOpts::default())
+        .await
+        .unwrap();
+    let debug = format!("{:?}", h.client);
+    for map in local_run_maps(&debug) {
+        assert_eq!(map, "{}");
+    }
+    assert!(
+        !debug.contains(FIRST) && !debug.contains(SECOND) && !debug.contains(MARKER),
+        "{debug}"
+    );
+    // Exactly the two scripted submissions; version discovery is answered
+    // outside the reply queue and is not expected here.
+    let requests = h.requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|(path, _)| path.contains("WorkflowService"))
+    );
+}
 #[tokio::test]
 async fn rate_pause_preserves_the_engine_time_and_never_shortens_or_fakes_the_ack() {
     let requested = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
