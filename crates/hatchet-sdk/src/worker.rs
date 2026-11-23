@@ -1218,7 +1218,8 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         } else {
             cancel_token.clone()
         };
-        let cancel_token = combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
+        let (cancel_token, cancel_watcher) =
+            combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
         let workflow_run_id = ids.workflow_run_id.clone();
         let resolve_run = ids.workflow_name == ids.task_name;
         let completed = Arc::new(AtomicBool::new(false));
@@ -1231,6 +1232,9 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         let result = match self.non_durable_semaphore.clone().acquire_owned().await {
             Ok(_permit) => {
                 let Some(handler) = self.non_durable_registry.get(&task_name).cloned() else {
+                    if let Some(handle) = monitor {
+                        handle.abort();
+                    }
                     let _ = reply.send(Err(Error::Worker(format!(
                         "worker '{}' missing non-durable task '{}'",
                         self.name, task_name
@@ -1285,6 +1289,7 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         };
 
         completed.store(true, Ordering::Relaxed);
+        drop(cancel_watcher);
         if let Some(handle) = monitor {
             handle.abort();
         }
@@ -1339,13 +1344,14 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
             batch_member_ids: _,
         } = context;
         let transport_cancel_token = cancel_token.clone();
-        let mut cancel_token =
+        let (mut cancel_token, shutdown_cancel_watcher) =
             combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
         let workflow_run_id = ids.workflow_run_id.clone();
         let resolve_run = ids.workflow_name == ids.task_name;
         let completed = Arc::new(AtomicBool::new(false));
 
         let mut eviction_watch = None;
+        let mut evict_cancel_watcher = None;
         // Merge eviction with the transport token too, so a late handler return
         // cannot overwrite an engine-owned EVICTED outcome with FAILED.
         if let Some(listener) = self.transport.durable_listener() {
@@ -1357,7 +1363,9 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                 transport_cancel_token,
                 evict_token.clone(),
             ));
-            cancel_token = combine_cancellation_tokens(Some(cancel_token), evict_token);
+            let (combined, watcher) = combine_cancellation_tokens(Some(cancel_token), evict_token);
+            cancel_token = combined;
+            evict_cancel_watcher = watcher;
         }
 
         let (monitor, warned) = self.spawn_cancellation_monitor(
@@ -1438,6 +1446,8 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         if let Some(watch) = eviction_watch {
             watch.abort();
         }
+        drop(evict_cancel_watcher);
+        drop(shutdown_cancel_watcher);
         if let Some(handle) = monitor {
             handle.abort();
         }
@@ -1512,22 +1522,35 @@ pub(crate) fn spawn_durable_eviction_watch(
     })
 }
 
+/// Aborts the wrapped task when dropped, so a per-execution watcher cannot
+/// outlive the execution that spawned it (including early returns and aborts).
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+// The returned guard owns the forwarding watcher. Transport tokens are not
+// cancelled when a task finishes normally, so callers must drop the guard once
+// the execution ends or the watcher stays parked until worker shutdown.
 fn combine_cancellation_tokens(
     existing: Option<CancellationToken>,
     shutdown: CancellationToken,
-) -> CancellationToken {
+) -> (CancellationToken, Option<AbortOnDrop>) {
     let Some(existing) = existing else {
-        return shutdown;
+        return (shutdown, None);
     };
     let combined = CancellationToken::new();
     let combined_for_task = combined.clone();
-    tokio::spawn(async move {
+    let watcher = tokio::spawn(async move {
         tokio::select! {
             _ = existing.cancelled() => combined_for_task.cancel(),
             _ = shutdown.cancelled() => combined_for_task.cancel(),
         }
     });
-    combined
+    (combined, Some(AbortOnDrop(watcher)))
 }
 
 #[cfg(test)]
@@ -1710,5 +1733,158 @@ mod tests {
             reply_rx.await.is_err(),
             "aborted task should drop its reply"
         );
+    }
+
+    const WATCHER_LEAK_RUNS: usize = 50;
+    // Only reached when watchers leak; a passing run stops polling as soon as the
+    // runtime has reaped the aborted watchers.
+    const WATCHER_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
+
+    type TokenStash = Arc<std::sync::Mutex<Vec<CancellationToken>>>;
+
+    // GrpcTransport gives every assignment a fresh token and never cancels it when
+    // the task finishes normally. Dispatch that shape without cancelling, then check
+    // that no per-task watcher is still alive and still forwarding cancellation.
+    async fn assert_finished_runs_leave_no_cancellation_watcher(
+        worker: &WorkerHandle,
+        stash: &TokenStash,
+        make_item: impl Fn(CancellationToken, oneshot::Sender<Result<Value>>) -> WorkItem,
+    ) {
+        // Startup tasks spawned after this point only raise the count by a few,
+        // which the WATCHER_LEAK_RUNS / 2 slack below absorbs.
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let baseline = metrics.num_alive_tasks();
+        let leak_threshold = baseline + WATCHER_LEAK_RUNS / 2;
+
+        let mut transport_tokens = Vec::with_capacity(WATCHER_LEAK_RUNS);
+        for _ in 0..WATCHER_LEAK_RUNS {
+            let token = CancellationToken::new();
+            transport_tokens.push(token.clone());
+            let (reply_tx, reply_rx) = oneshot::channel();
+            worker
+                .tx
+                .send(make_item(token, reply_tx))
+                .await
+                .expect("dispatch should succeed");
+            reply_rx
+                .await
+                .expect("task reply should arrive")
+                .expect("task should succeed");
+        }
+        // Aborted watchers and monitors leave the runtime once it next polls them.
+        // Leaked watchers stay parked on tokens nobody cancels, so the count never
+        // falls below the threshold and only that failure waits for the deadline.
+        let deadline = tokio::time::Instant::now() + WATCHER_SETTLE_DEADLINE;
+        let mut alive = metrics.num_alive_tasks();
+        while alive >= leak_threshold && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            alive = metrics.num_alive_tasks();
+        }
+        assert!(
+            alive < leak_threshold,
+            "{alive} live tasks after {WATCHER_LEAK_RUNS} finished runs (baseline \
+             {baseline}); per-run cancellation watchers are still parked"
+        );
+
+        // Only a still-running watcher can carry a late transport cancel into the
+        // token a finished handler saw. An aborted task is never polled again, so
+        // this does not depend on timing when the guards were dropped.
+        let handler_tokens = stash.lock().unwrap().clone();
+        assert_eq!(handler_tokens.len(), WATCHER_LEAK_RUNS);
+        assert!(
+            handler_tokens.iter().all(|token| !token.is_cancelled()),
+            "precondition: no handler token is cancelled at completion"
+        );
+        for token in &transport_tokens {
+            token.cancel();
+        }
+        // On the old code the first watcher forwards this immediately; the timeout
+        // only bounds how long a passing run waits to see nothing arrive.
+        let _ =
+            tokio::time::timeout(Duration::from_millis(100), handler_tokens[0].cancelled()).await;
+        let propagated = handler_tokens
+            .iter()
+            .filter(|token| token.is_cancelled())
+            .count();
+        assert_eq!(
+            propagated, 0,
+            "a late transport cancel reached {propagated} finished runs' tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn finished_tasks_leave_no_cancellation_watcher_running() {
+        let transport = Arc::new(InMemoryTransport::new());
+        let client = Client::new(Arc::clone(&transport));
+        let stash = TokenStash::default();
+        let stash_for_handler = Arc::clone(&stash);
+        let worker = client
+            .worker("watcher-leak-worker")
+            .register_task(&client.task::<(), ()>("noop"), move |_input, ctx| {
+                let stash = Arc::clone(&stash_for_handler);
+                async move {
+                    stash.lock().unwrap().push(ctx.cancel_token());
+                    Ok(())
+                }
+            })
+            .build()
+            .start()
+            .expect("worker should start");
+
+        assert_finished_runs_leave_no_cancellation_watcher(&worker, &stash, |token, reply| {
+            WorkItem::RunTask {
+                task_name: "noop".to_owned(),
+                input: json!(null),
+                ids: test_ids("noop"),
+                context: TaskContextData {
+                    cancel_token: Some(token),
+                    ..TaskContextData::default()
+                },
+                reply,
+            }
+        })
+        .await;
+
+        worker.shutdown().await.expect("worker should shut down");
+    }
+
+    #[tokio::test]
+    async fn finished_durable_tasks_leave_no_cancellation_watcher_running() {
+        let transport = Arc::new(InMemoryTransport::new());
+        let client = Client::new(Arc::clone(&transport));
+        let stash = TokenStash::default();
+        let stash_for_handler = Arc::clone(&stash);
+        let worker = client
+            .worker("durable-watcher-leak-worker")
+            .register_durable_task(
+                &client.durable_task::<(), ()>("durable-noop"),
+                move |_input, ctx| {
+                    let stash = Arc::clone(&stash_for_handler);
+                    async move {
+                        stash.lock().unwrap().push(ctx.cancel_token());
+                        Ok(())
+                    }
+                },
+            )
+            .build()
+            .start()
+            .expect("worker should start");
+
+        assert_finished_runs_leave_no_cancellation_watcher(&worker, &stash, |token, reply| {
+            WorkItem::RunDurableTask {
+                task_name: "durable-noop".to_owned(),
+                input: json!(null),
+                ids: test_ids("durable-noop"),
+                invocation_count: 1,
+                context: TaskContextData {
+                    cancel_token: Some(token),
+                    ..TaskContextData::default()
+                },
+                reply,
+            }
+        })
+        .await;
+
+        worker.shutdown().await.expect("worker should shut down");
     }
 }
