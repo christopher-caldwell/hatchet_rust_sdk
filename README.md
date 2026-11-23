@@ -222,6 +222,9 @@ health checks, a trigger utility, and local/Railway smoke scripts.
 - Namespaces configured in `HatchetConfig` are applied consistently to
   registration and run handles.
 - `Error::NonRetryable` sets Hatchet's no-retry completion flag.
+- On engine-backed workers, `WorkerHandle::pause`, `unpause`, `upsert_labels` and
+  `ctx.upsert_worker_labels` update the engine first and return its errors; the
+  engine, not a local check, then decides which work the worker receives.
 - Engine-backed management operations that are not implemented return
   `Error::UnsupportedOperation`; they never silently mutate process-local
   shadow state.

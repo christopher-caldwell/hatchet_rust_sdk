@@ -11,7 +11,7 @@ use crate::client::WorkflowHandle;
 use crate::error::{Error, Result};
 use crate::run_ref::WorkflowRunRef;
 use crate::task::LabelValue;
-use crate::transport::Transport;
+use crate::transport::{Transport, WorkerControl};
 
 #[derive(Debug, Clone)]
 pub struct ContextIds {
@@ -99,6 +99,9 @@ pub trait Context {
 
     async fn put_stream(&self, payload: Value) -> Result<()>;
 
+    /// Adds or replaces labels on the worker running this task. On an
+    /// engine-backed worker the engine is told first and its error is
+    /// returned; the labels are re-applied after the worker reconnects.
     async fn upsert_worker_labels(
         &self,
         labels: std::collections::BTreeMap<String, LabelValue>,
@@ -128,6 +131,7 @@ pub struct InMemoryContext<T: Transport> {
     parent_outputs: std::collections::HashMap<String, Value>,
     worker_labels: std::sync::RwLock<std::collections::BTreeMap<String, LabelValue>>,
     worker_id: Option<String>,
+    worker_control: Option<WorkerControl>,
     trigger_data: TriggerData,
     errors: std::collections::HashMap<String, String>,
     cancel_token: CancellationToken,
@@ -154,6 +158,7 @@ impl<T: Transport> InMemoryContext<T> {
             parent_outputs: std::collections::HashMap::new(),
             worker_labels: std::sync::RwLock::new(std::collections::BTreeMap::new()),
             worker_id: None,
+            worker_control: None,
             trigger_data: TriggerData::default(),
             errors: std::collections::HashMap::new(),
             cancel_token: CancellationToken::new(),
@@ -223,6 +228,14 @@ impl<T: Transport> InMemoryContext<T> {
     #[must_use]
     pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
         self.worker_id = Some(worker_id.into());
+        self
+    }
+
+    /// Lets label upserts reach the worker's shared state, so they survive
+    /// re-registration.
+    #[must_use]
+    pub(crate) fn with_worker_control(mut self, control: WorkerControl) -> Self {
+        self.worker_control = Some(control);
         self
     }
 
@@ -623,6 +636,26 @@ impl<T: Transport> Context for InMemoryContext<T> {
         &self,
         labels: std::collections::BTreeMap<String, LabelValue>,
     ) -> Result<()> {
+        // The engine routes by its own copy of the labels; change it first.
+        if self.transport.rest_api().is_some() {
+            let worker_id = self.worker_id.as_deref().ok_or_else(|| {
+                Error::UnsupportedOperation(
+                    "worker label upserts need the engine-assigned worker ID".to_owned(),
+                )
+            })?;
+            match &self.worker_control {
+                Some(control) => {
+                    control
+                        .upsert_context_labels(self.transport.as_ref(), worker_id, &labels)
+                        .await?;
+                }
+                None => {
+                    self.transport
+                        .upsert_worker_labels(worker_id, &labels)
+                        .await?;
+                }
+            }
+        }
         let mut current = self
             .worker_labels
             .write()

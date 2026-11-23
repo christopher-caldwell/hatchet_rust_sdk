@@ -44,9 +44,22 @@ and this project uses [Semantic Versioning](https://semver.org/).
   ID, node ID and branch ID and returns `DurableBranchResult`; `restore_task`
   accepts a task external ID and returns `RestoreTaskResult`. The previous
   workflow replay aliases were removed. In-memory recovery is explicitly unsupported.
+- Breaking for code that builds `WorkerStartOpts` with a struct literal:
+  `WorkerStartOpts` has a new `control: WorkerControl` field (use
+  `WorkerControl::default()` outside a `Worker`). Engine-backed transports
+  should call `WorkerControl::registered` after each registration. `Transport`
+  gains `set_worker_paused` and `upsert_worker_labels`, which default to
+  `Error::UnsupportedOperation`.
+- Engine-backed workers no longer fail engine-assigned work through the local
+  pause and worker-label checks; the engine decides which work the worker
+  receives. In-memory workers keep both checks.
 
 ### Fixed
 
+- `WorkerHandle::pause`/`unpause`/`upsert_labels` and `ctx.upsert_worker_labels`
+  now update the engine on engine-backed workers (REST worker pause,
+  `UpsertWorkerLabels`) before changing local state, and return its errors. A
+  pause and upserted labels are re-applied after every (re)registration.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Preserve explicit desired worker identity on normal single and bulk submissions.
