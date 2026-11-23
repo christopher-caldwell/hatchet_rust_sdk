@@ -163,10 +163,17 @@ fn parse_workflow_name(attr: TokenStream) -> Option<syn::LitStr> {
     None
 }
 
+/// Matches on the attribute path's last segment, so `#[task]`,
+/// `#[another_hatchet_sdk::task]` and `#[::another_hatchet_sdk::task]` are all
+/// recognized.
 fn has_attr(attrs: &[syn::Attribute], ident: &str) -> bool {
-    attrs
-        .iter()
-        .any(|attribute| attribute.path().is_ident(ident))
+    attrs.iter().any(|attribute| {
+        attribute
+            .path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == ident)
+    })
 }
 
 fn function_signature_types(function: &ItemFn) -> syn::Result<(Type, Type)> {
