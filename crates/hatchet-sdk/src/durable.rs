@@ -1040,6 +1040,24 @@ impl<T: Transport> InMemoryDurableContext<T> {
         })
     }
 
+    /// Ends an engine-backed durable wait once this invocation is cancelled or evicted.
+    ///
+    /// The worker cancels the context token on engine cancellation, eviction and
+    /// shutdown. A wait that ignored it would keep the handler and its durable slot
+    /// parked, or resume user code inside a stale invocation.
+    async fn until_cancelled<R>(
+        &self,
+        wait: impl std::future::Future<Output = Result<R>>,
+    ) -> Result<R> {
+        tokio::select! {
+            biased;
+            () = self.base.cancelled() => Err(Error::Durable(
+                "durable invocation was cancelled or evicted".to_owned(),
+            )),
+            result = wait => result,
+        }
+    }
+
     async fn wait_for_engine(
         &self,
         listener: &DurableListenerClient,
@@ -1134,11 +1152,11 @@ impl<T: Transport> InMemoryDurableContext<T> {
 
         let task_id = self.base.task_run_id();
         let inv = self.invocation_count as i32;
-        let ack = listener
-            .send_wait_for(task_id, inv, proto_conditions)
+        let ack = self
+            .until_cancelled(listener.send_wait_for(task_id, inv, proto_conditions))
             .await?;
-        let result = listener
-            .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
+        let result = self
+            .until_cancelled(listener.wait_for_callback(task_id, inv, ack.branch_id, ack.node_id))
             .await?;
 
         condition_output_from_engine(&raw_conditions, &result.payload)
@@ -1353,10 +1371,16 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
                 }),
                 self.base.transport_namespace(),
             );
-            let ack = listener.send_wait_for(task_id, inv, conditions).await?;
-            listener
-                .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
+            let ack = self
+                .until_cancelled(listener.send_wait_for(task_id, inv, conditions))
                 .await?;
+            self.until_cancelled(listener.wait_for_callback(
+                task_id,
+                inv,
+                ack.branch_id,
+                ack.node_id,
+            ))
+            .await?;
             return Ok(());
         }
         sleep(duration).await;
@@ -1374,10 +1398,16 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
                 }),
                 self.base.transport_namespace(),
             );
-            let ack = listener.send_wait_for(task_id, inv, conditions).await?;
-            listener
-                .wait_for_callback(task_id, inv, ack.branch_id, ack.node_id)
+            let ack = self
+                .until_cancelled(listener.send_wait_for(task_id, inv, conditions))
                 .await?;
+            self.until_cancelled(listener.wait_for_callback(
+                task_id,
+                inv,
+                ack.branch_id,
+                ack.node_id,
+            ))
+            .await?;
             return Ok(());
         }
         if let Ok(duration) = at.duration_since(SystemTime::now()) {
@@ -1404,10 +1434,17 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
                 }),
                 self.base.transport_namespace(),
             );
-            let ack = listener.send_wait_for(task_id, inv, conditions).await?;
+            let ack = self
+                .until_cancelled(listener.send_wait_for(task_id, inv, conditions))
+                .await?;
             match tokio::time::timeout(
                 timeout_after,
-                listener.wait_for_callback(task_id, inv, ack.branch_id, ack.node_id),
+                self.until_cancelled(listener.wait_for_callback(
+                    task_id,
+                    inv,
+                    ack.branch_id,
+                    ack.node_id,
+                )),
             )
             .await
             {
@@ -1527,12 +1564,12 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
     ) -> Result<WorkflowRunId> {
         if let Some(listener) = &self.durable_listener {
             let opts = self.base.child_run_opts(opts);
-            let ack = listener
-                .send_trigger_runs(
+            let ack = self
+                .until_cancelled(listener.send_trigger_runs(
                     self.base.task_run_id(),
                     self.invocation_count as i32,
                     vec![durable_child_trigger(workflow_name, input, &opts)?],
-                )
+                ))
                 .await?;
             let mut entries = ack.run_entries;
             if entries.len() != 1 {
@@ -1542,13 +1579,13 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
                 )));
             }
             let entry = entries.remove(0);
-            let completion = listener
-                .wait_for_callback(
+            let completion = self
+                .until_cancelled(listener.wait_for_callback(
                     self.base.task_run_id(),
                     self.invocation_count as i32,
                     entry.branch_id,
                     entry.node_id,
-                )
+                ))
                 .await?;
             let output = durable_callback_payload(&completion.payload)?;
             let run_id = WorkflowRunId(entry.workflow_run_external_id);
@@ -1580,22 +1617,22 @@ impl<T: Transport> DurableContext for InMemoryDurableContext<T> {
                     durable_child_trigger(workflow_name, input, &child_opts)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let ack = listener
-                .send_trigger_runs(
+            let ack = self
+                .until_cancelled(listener.send_trigger_runs(
                     self.base.task_run_id(),
                     self.invocation_count as i32,
                     triggers,
-                )
+                ))
                 .await?;
             let mut run_ids = Vec::with_capacity(ack.run_entries.len());
             for entry in ack.run_entries {
-                let completion = listener
-                    .wait_for_callback(
+                let completion = self
+                    .until_cancelled(listener.wait_for_callback(
                         self.base.task_run_id(),
                         self.invocation_count as i32,
                         entry.branch_id,
                         entry.node_id,
-                    )
+                    ))
                     .await?;
                 let output = durable_callback_payload(&completion.payload)?;
                 let run_id = WorkflowRunId(entry.workflow_run_external_id);

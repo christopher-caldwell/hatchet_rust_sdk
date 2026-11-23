@@ -1116,4 +1116,173 @@ mod tests {
         assert_eq!(waiting.branch_id, key.branch_id);
         assert_eq!(waiting.node_id, key.node_id);
     }
+
+    fn durable_ctx(
+        listener: &Arc<DurableListenerClient>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> crate::InMemoryDurableContext<crate::InMemoryTransport> {
+        crate::InMemoryDurableContext::new(
+            crate::context::ContextIds {
+                workflow_name: "wf".to_owned(),
+                task_name: "durable".to_owned(),
+                workflow_run_id: another_hatchet_core::WorkflowRunId("run-1".to_owned()),
+                task_run_id: "task-1".to_owned(),
+                workflow_id: None,
+                workflow_version_id: None,
+            },
+            Arc::new(crate::InMemoryTransport::new()),
+            1,
+        )
+        .with_cancel_token(cancel)
+        .with_durable_listener(Arc::clone(listener))
+    }
+
+    async fn next_request(
+        requests: &mut mpsc::Receiver<v1::DurableTaskRequest>,
+    ) -> v1::DurableTaskRequest {
+        tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .expect("timed out waiting for a durable request")
+            .expect("durable request channel closed")
+    }
+
+    /// Plays the engine's ack for the next durable request, then waits until the
+    /// caller has registered its completion callback. `wait_for_callback` reports a
+    /// WorkerStatus right after registering, so this does not wait for the status tick
+    /// (which `test_listener` never runs).
+    async fn ack_and_await_callback_registration(
+        listener: &DurableListenerClient,
+        requests: &mut mpsc::Receiver<v1::DurableTaskRequest>,
+    ) {
+        let request = next_request(requests).await;
+        let message = match request.message {
+            Some(v1::durable_task_request::Message::WaitFor(wait)) => {
+                v1::durable_task_response::Message::WaitForAck(
+                    v1::DurableTaskEventWaitForAckResponse {
+                        r#ref: Some(v1::DurableEventLogEntryRef {
+                            durable_task_external_id: wait.durable_task_external_id,
+                            invocation_count: wait.invocation_count,
+                            branch_id: 1,
+                            node_id: 7,
+                        }),
+                    },
+                )
+            }
+            Some(v1::durable_task_request::Message::TriggerRuns(trigger)) => {
+                v1::durable_task_response::Message::TriggerRunsAck(
+                    v1::DurableTaskEventTriggerRunsAckResponse {
+                        durable_task_external_id: trigger.durable_task_external_id,
+                        invocation_count: trigger.invocation_count,
+                        run_entries: vec![v1::DurableTaskRunAckEntry {
+                            node_id: 7,
+                            branch_id: 1,
+                            workflow_run_external_id: "child-1".to_owned(),
+                        }],
+                    },
+                )
+            }
+            other => panic!("unexpected durable request {other:?}"),
+        };
+        dispatch_response(
+            v1::DurableTaskResponse {
+                message: Some(message),
+            },
+            &listener.pending_acks,
+            &listener.callbacks,
+            &listener.inflight_requests,
+            &listener.evict_tx,
+        )
+        .await;
+        let status = next_request(requests).await;
+        assert!(matches!(
+            status.message,
+            Some(v1::durable_task_request::Message::WorkerStatus(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_sleep_returns_once_its_invocation_is_evicted() {
+        let (listener, mut requests) = test_listener();
+        let evict = tokio_util::sync::CancellationToken::new();
+        let ctx = durable_ctx(&listener, evict.clone());
+        let sleeping = tokio::spawn(async move {
+            crate::DurableContext::sleep_for(&ctx, Duration::from_secs(3600)).await
+        });
+        ack_and_await_callback_registration(&listener, &mut requests).await;
+
+        // The production watcher cancels the invocation token on a matching notice.
+        let watch = crate::worker::spawn_durable_eviction_watch(
+            Arc::clone(&listener),
+            "task-1".to_owned(),
+            1,
+            None,
+            evict.clone(),
+        );
+        listener
+            .evict_tx
+            .send(EvictionNotice {
+                task_external_id: "task-1".to_owned(),
+                invocation_count: 1,
+                reason: "server evicted invocation".to_owned(),
+                requires_acknowledgment: false,
+            })
+            .unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), sleeping)
+            .await
+            .expect("sleep_for must stop waiting once its invocation is evicted")
+            .unwrap();
+        watch.abort();
+        assert!(
+            matches!(outcome, Err(Error::Durable(_))),
+            "an evicted durable sleep must not succeed: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_child_wait_returns_once_its_invocation_is_cancelled() {
+        let (listener, mut requests) = test_listener();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = durable_ctx(&listener, cancel.clone());
+        let spawning = tokio::spawn(async move {
+            crate::DurableContext::spawn_child_json(
+                &ctx,
+                "child",
+                serde_json::json!({}),
+                another_hatchet_core::RunOpts::default(),
+            )
+            .await
+        });
+        ack_and_await_callback_registration(&listener, &mut requests).await;
+
+        cancel.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), spawning)
+            .await
+            .expect("spawn_child must stop waiting once its invocation is cancelled")
+            .unwrap();
+        assert!(
+            matches!(outcome, Err(Error::Durable(_))),
+            "a cancelled durable child wait must not succeed: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_invocation_does_not_start_a_durable_wait() {
+        let (listener, mut requests) = test_listener();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let ctx = durable_ctx(&listener, cancel);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::DurableContext::wait_for_event(&ctx, "approval", Duration::from_secs(3600)),
+        )
+        .await
+        .expect("a cancelled invocation must not wait");
+        assert!(matches!(outcome, Err(Error::Durable(_))), "{outcome:?}");
+        assert!(
+            requests.try_recv().is_err(),
+            "no WaitFor may be sent for an already cancelled invocation"
+        );
+    }
 }
