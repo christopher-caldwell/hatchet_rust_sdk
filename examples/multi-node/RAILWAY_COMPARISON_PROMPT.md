@@ -64,7 +64,7 @@ Verify these against the current checkout rather than assuming they remain true:
 - `crates/hatchet-sdk/src/worker.rs` supports `.health_port(...)`; `crates/hatchet-sdk/src/health.rs` binds `0.0.0.0` and serves `GET /health` with worker name, health, slots, actions, and labels.
 - Existing live integration tests in `crates/hatchet-sdk/tests/integration.rs` return successfully with a printed `SKIP` when no usable token/engine exists. A green exit code alone is therefore not live proof.
 - `docs/todo/4/TODO.md` says P0-P5 and P6.1 were complete, but also says P6.2 remained. Current files include a parity matrix, so verify the executable state and update stale status documents only if the evidence justifies it.
-- The documented logs integration has a known `403` fallback to an SDK-local buffer. Do not represent that fallback as proof of engine-backed logs.
+- The engine can reject log lines with `403`. The SDK does not keep a rejected `PutLog` line anywhere, and `logs().list()` reads only from the engine REST API. Only logs read back from the engine are proof of engine-backed logs.
 - `protoc` is required by the current build.
 - `examples/features/.env` is ignored and may contain a local secret. Never read it into logs, commit it, or reuse its token against a new server without confirming that it belongs to that exact Hatchet instance.
 

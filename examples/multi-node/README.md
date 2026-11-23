@@ -208,8 +208,9 @@ railway delete --project <PROJECT_ID> --yes
 - Official Hatchet retains hard-coded roughly one-second queue/replenishment
   loops and a five-second lease loop. No fictitious settings are used to hide
   that idle floor.
-- Engine log ingestion can return 403 and fall back to an SDK-local buffer; that
-  fallback is not accepted as workflow-execution evidence here.
+- Engine log ingestion can return 403. The SDK keeps no local copy of a rejected
+  log line, so only logs read back from the engine count as workflow-execution
+  evidence here.
 
 See [AUDIT.md](AUDIT.md) for the checkout audit and final workspace verification.
 [railway-evidence.json](railway-evidence.json) contains the sanitized

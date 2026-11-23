@@ -50,7 +50,6 @@ pub struct GrpcTransport {
     /// Worker ID assigned after registration (set by the worker startup flow).
     worker_id: Arc<RwLock<Option<String>>>,
     completed: Arc<Mutex<HashMap<WorkflowRunId, Result<Value>>>>,
-    log_records: Arc<Mutex<Vec<LogRecord>>>,
     running_cancellations: Arc<Mutex<HashMap<String, Arc<tokio_util::sync::CancellationToken>>>>,
     durable_listener:
         Arc<std::sync::RwLock<Option<Arc<crate::durable_listener::DurableListenerClient>>>>,
@@ -104,7 +103,6 @@ impl GrpcTransport {
             retry_config: RetryConfig::default(),
             worker_id: Arc::new(RwLock::new(None)),
             completed: Arc::new(Mutex::new(HashMap::new())),
-            log_records: Arc::new(Mutex::new(Vec::new())),
             running_cancellations: Arc::new(Mutex::new(HashMap::new())),
             durable_listener: Arc::new(std::sync::RwLock::new(None)),
             rest_api_client,
@@ -1026,11 +1024,6 @@ impl Transport for GrpcTransport {
             LogLevel::Warn => "WARN",
             LogLevel::Error => "ERROR",
         };
-
-        self.log_records.lock().await.push(LogRecord {
-            level: level_str.to_owned(),
-            message: message.clone(),
-        });
 
         let mut events = self.events.clone();
         let request = self.authed_request(proto::events::PutLogRequest {
