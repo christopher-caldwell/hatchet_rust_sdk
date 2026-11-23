@@ -1018,8 +1018,13 @@ impl Transport for GrpcTransport {
         }))
     }
 
-    async fn append_run_log(&self, run_id: &WorkflowRunId, level: LogLevel, message: String) {
-        let task_run_id = run_id.0.clone();
+    async fn append_run_log(
+        &self,
+        _run_id: &WorkflowRunId,
+        task_run_id: &str,
+        level: LogLevel,
+        message: String,
+    ) -> Result<()> {
         let level_str = match level {
             LogLevel::Debug => "DEBUG",
             LogLevel::Info => "INFO",
@@ -1034,7 +1039,7 @@ impl Transport for GrpcTransport {
 
         let mut events = self.events.clone();
         let request = self.authed_request(proto::events::PutLogRequest {
-            task_run_external_id: task_run_id,
+            task_run_external_id: task_run_id.to_owned(),
             created_at: Some(prost_now()),
             message,
             level: Some(level_str.to_owned()),
@@ -1042,7 +1047,8 @@ impl Transport for GrpcTransport {
             task_retry_count: None,
         });
 
-        let _ = events.put_log(request).await;
+        events.put_log(request).await.map_err(grpc_error)?;
+        Ok(())
     }
 
     async fn refresh_timeout(&self, task_run_id: &str, increment: &str) -> Result<()> {

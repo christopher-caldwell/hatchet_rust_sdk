@@ -1179,16 +1179,20 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
             }
 
             warned_flag.store(true, Ordering::Relaxed);
-            transport
+            if let Err(error) = transport
                 .append_run_log(
                     &workflow_run_id,
+                    &task_run_id,
                     crate::context::LogLevel::Warn,
                     format!(
                         "worker '{worker_name}' task '{task_name}' (task_run_id '{task_run_id}') is still running {}ms after cancellation",
                         grace_period.as_millis()
                     ),
                 )
-                .await;
+                .await
+            {
+                eprintln!("failed to send log line for task run '{task_run_id}': {error}");
+            }
         });
 
         (Some(handle), warned)
@@ -1220,6 +1224,7 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         };
         let cancel_token = combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
         let workflow_run_id = ids.workflow_run_id.clone();
+        let task_run_id = ids.task_run_id.clone();
         let resolve_run = ids.workflow_name == ids.task_name;
         let completed = Arc::new(AtomicBool::new(false));
         let (monitor, warned) = self.spawn_cancellation_monitor(
@@ -1299,13 +1304,18 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
             } else {
                 "finished only after extended cancellation delay"
             };
-            self.transport
+            if let Err(error) = self
+                .transport
                 .append_run_log(
                     &workflow_run_id,
+                    &task_run_id,
                     level,
                     format!("worker '{}' task '{}' {}", self.name, task_name, outcome),
                 )
-                .await;
+                .await
+            {
+                eprintln!("failed to send log line for task run '{task_run_id}': {error}");
+            }
         }
 
         // Engine-backed runs are resolved by Hatchet after completion reporting;
@@ -1342,6 +1352,7 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
         let mut cancel_token =
             combine_cancellation_tokens(cancel_token, self.shutdown_token.clone());
         let workflow_run_id = ids.workflow_run_id.clone();
+        let task_run_id = ids.task_run_id.clone();
         let resolve_run = ids.workflow_name == ids.task_name;
         let completed = Arc::new(AtomicBool::new(false));
 
@@ -1452,16 +1463,21 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
             } else {
                 "finished only after extended cancellation delay"
             };
-            self.transport
+            if let Err(error) = self
+                .transport
                 .append_run_log(
                     &workflow_run_id,
+                    &task_run_id,
                     level,
                     format!(
                         "worker '{}' durable task '{}' {}",
                         self.name, task_name, outcome
                     ),
                 )
-                .await;
+                .await
+            {
+                eprintln!("failed to send log line for task run '{task_run_id}': {error}");
+            }
         }
 
         if resolve_run && self.transport.rest_api().is_none() {

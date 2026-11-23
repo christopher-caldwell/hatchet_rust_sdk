@@ -234,7 +234,15 @@ pub trait Transport: Send + Sync {
         Ok(RunEventStream::from_values(self.stream_run(run_id).await?))
     }
 
-    async fn append_run_log(&self, run_id: &WorkflowRunId, level: LogLevel, message: String);
+    /// Sends one log line for the task run `task_run_id`, the task's external
+    /// run ID (not the workflow run ID), and reports whether it was delivered.
+    async fn append_run_log(
+        &self,
+        run_id: &WorkflowRunId,
+        task_run_id: &str,
+        level: LogLevel,
+        message: String,
+    ) -> Result<()>;
 
     async fn refresh_timeout(&self, task_run_id: &str, increment: &str) -> Result<()>;
 
@@ -896,7 +904,13 @@ impl Transport for InMemoryTransport {
         }))
     }
 
-    async fn append_run_log(&self, run_id: &WorkflowRunId, level: LogLevel, message: String) {
+    async fn append_run_log(
+        &self,
+        run_id: &WorkflowRunId,
+        _task_run_id: &str,
+        level: LogLevel,
+        message: String,
+    ) -> Result<()> {
         self.logs
             .lock()
             .await
@@ -906,6 +920,7 @@ impl Transport for InMemoryTransport {
                 level: format!("{level:?}"),
                 message,
             });
+        Ok(())
     }
 
     async fn refresh_timeout(&self, _task_run_id: &str, _increment: &str) -> Result<()> {
