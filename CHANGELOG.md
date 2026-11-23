@@ -47,6 +47,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Round durable and step-condition sleeps sent to the engine up to whole seconds
+  instead of truncating them, so sub-second sleeps become `1s` rather than `0s`.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Preserve explicit desired worker identity on normal single and bulk submissions.
