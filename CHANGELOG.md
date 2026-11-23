@@ -47,6 +47,9 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Send each task's STARTED acknowledgment from its own spawned task, so the
+  worker reads the next assignment, cancellation or heartbeat without waiting
+  for the previous STARTED round trip.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Preserve explicit desired worker identity on normal single and bulk submissions.
