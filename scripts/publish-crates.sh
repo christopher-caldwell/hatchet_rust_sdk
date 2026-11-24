@@ -219,7 +219,7 @@ PATCHES
 name = "another-hatchet-sdk-package-consumer"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.86"
 publish = false
 
 [dependencies]

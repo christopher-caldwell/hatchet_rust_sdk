@@ -33,7 +33,7 @@ The task, workflow, and durable-task procedural macros are re-exported by
 definitions and `protoc` are vendored, so consumers do not need a system
 Protocol Buffers installation.
 
-The minimum supported Rust version is 1.85.
+The minimum supported Rust version is 1.86.
 
 ## Offline quickstart
 
@@ -337,7 +337,7 @@ The guarded release command prepares versions and the changelog with
 consumer, commits and pushes the release metadata, publishes all three crates,
 and finally pushes the version tag. Use `just package-check` for a dirty-tree
 safe preflight without publishing. The release machine must have the declared
-Rust 1.85 toolchain installed through `rustup`; the preflight compiles both the
+Rust 1.86 toolchain installed through `rustup`; the preflight compiles both the
 workspace and standalone Railway consumer with that exact compiler before it
 creates any package archive.
 

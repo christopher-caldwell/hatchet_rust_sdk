@@ -41,10 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust 1.85
+      - name: Install Rust 1.86
         run: |
-          rustup toolchain install 1.85 --profile minimal
-          rustup default 1.85
+          rustup toolchain install 1.86 --profile minimal
+          rustup default 1.86
       - uses: Swatinem/rust-cache@v2
       - name: Check minimum Rust version
         run: |

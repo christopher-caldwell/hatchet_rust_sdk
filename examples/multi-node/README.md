@@ -17,7 +17,7 @@ All effects are deterministic; no email is sent.
 
 ## Local proof
 
-Requirements are Docker, Rust 1.85 or newer, `curl`, and `psql` in the
+Requirements are Docker, Rust 1.86 or newer, `curl`, and `psql` in the
 PostgreSQL container. The SDK vendors both its protocol definitions and
 `protoc`. Run the complete isolated proof from the repository root:
 

@@ -56,6 +56,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - Engine-backed workers no longer fail engine-assigned work through the local
   pause and worker-label checks; the engine decides which work the worker
   receives. In-memory workers keep both checks.
+- Raise the minimum supported Rust version to 1.86. The locked dependency
+  graph (the `icu_*` crates behind URL parsing) no longer builds on 1.85.
 
 ### Fixed
 
