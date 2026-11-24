@@ -931,6 +931,11 @@ async fn integration_durable_recovery_restore_preserves_task_and_memo() {
     let config = HatchetConfig::from_env().unwrap();
     let transport = Arc::new(GrpcTransport::from_config(config).await.unwrap());
     let owner = Client::new(Arc::clone(&transport));
+    let engine = owner.engine_version().await.unwrap();
+    if !engine.supports(EngineFeature::TaskRestore) {
+        println!("skipped: engine {engine} has no task restore endpoint");
+        return;
+    }
     let task = owner.durable_task::<serde_json::Value, serde_json::Value>("recovery-restore-task");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (stopped_tx, mut stopped_rx) = tokio::sync::mpsc::unbounded_channel();

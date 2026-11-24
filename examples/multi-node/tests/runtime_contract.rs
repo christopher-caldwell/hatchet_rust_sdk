@@ -8,30 +8,43 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn health_response_identifies_only_the_orders_action() {
-    let probe = std::net::TcpListener::bind("0.0.0.0:0")
-        .or_else(|error| {
-            (20_000..49_152)
-                .find_map(|port| std::net::TcpListener::bind(("0.0.0.0", port)).ok())
-                .ok_or(error)
-        })
-        .expect("reserve probe port");
-    let port = probe.local_addr().expect("probe address").port();
-    drop(probe);
-
     let client = Client::new(Arc::new(InMemoryTransport::new()));
     let task = client.task::<OrderInput, ProcessedOrder>(PROCESS_ORDER);
-    let handle = client
-        .worker(ORDERS_WORKER)
-        .slots(2)
-        .durable_slots(2)
-        .labels(labels("orders"))
-        .health_port(port)
-        .register_task(&task, |input, _ctx: InMemoryContext<_>| async move {
-            Ok(hatchet_multi_node::process_order(input))
-        })
-        .build()
-        .start()
-        .expect("worker starts");
+    // The probe port is released before the worker binds it, so another
+    // process can take it in between. Reserve a new port and try again.
+    let mut started = None;
+    for _ in 0..10 {
+        let probe = std::net::TcpListener::bind("0.0.0.0:0")
+            .or_else(|error| {
+                (20_000..49_152)
+                    .find_map(|port| std::net::TcpListener::bind(("0.0.0.0", port)).ok())
+                    .ok_or(error)
+            })
+            .expect("reserve probe port");
+        let port = probe.local_addr().expect("probe address").port();
+        drop(probe);
+
+        let attempt = client
+            .worker(ORDERS_WORKER)
+            .slots(2)
+            .durable_slots(2)
+            .labels(labels("orders"))
+            .health_port(port)
+            .register_task(&task, |input, _ctx: InMemoryContext<_>| async move {
+                Ok(hatchet_multi_node::process_order(input))
+            })
+            .build()
+            .start();
+        match attempt {
+            Ok(handle) => {
+                started = Some((handle, port));
+                break;
+            }
+            Err(error) if error.to_string().contains("Address already in use") => {}
+            Err(error) => panic!("worker starts: {error:?}"),
+        }
+    }
+    let (handle, port) = started.expect("worker starts on a free health port");
     handle
         .wait_until_ready(Duration::from_secs(2))
         .await

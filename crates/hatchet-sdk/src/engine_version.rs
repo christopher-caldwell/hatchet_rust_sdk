@@ -20,6 +20,9 @@ pub enum EngineFeature {
     RateLimitPause,
     /// Conservative preview support floor, verified against v0.114.0.
     BatchTasks,
+    /// Requires the task restore endpoint. v0.94.14 answers it with 404; the
+    /// floor is the release it was verified against, v0.114.0.
+    TaskRestore,
 }
 
 impl EngineFeature {
@@ -30,7 +33,7 @@ impl EngineFeature {
             Self::DurableEviction => "0.80.0",
             Self::Observability => "0.82.0",
             Self::RetryAfter | Self::WorkflowPause | Self::Idempotency => "0.111.0",
-            Self::RateLimitPause | Self::BatchTasks => "0.114.0",
+            Self::RateLimitPause | Self::BatchTasks | Self::TaskRestore => "0.114.0",
         }
     }
 }

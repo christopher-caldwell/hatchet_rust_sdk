@@ -526,21 +526,25 @@
         "status": "supported",
         "sources": [
           "crates/hatchet-sdk/src/clients.rs",
-          "crates/hatchet-sdk/src/rest_client.rs"
+          "crates/hatchet-sdk/src/rest_client.rs",
+          "crates/hatchet-sdk/src/engine_version.rs"
         ],
         "tests": [
           {
             "file": "crates/hatchet-sdk/tests/integration.rs",
             "name": "integration_durable_recovery_restore_preserves_task_and_memo",
             "engines": [
-              "v0.94.14",
               "v0.114.0"
             ]
           }
         ]
       },
-      "engine": "Baseline v0.94.14",
-      "notes": ""
+      "engine": "SDK floor v0.114.0",
+      "notes": "The v0.94.14 baseline answers the restore endpoint with 404; the live test skips on engines below the floor.",
+      "engine_requirement": {
+        "feature": "TaskRestore",
+        "version": "0.114.0"
+      }
     },
     {
       "id": "R3",

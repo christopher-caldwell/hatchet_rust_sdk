@@ -58,6 +58,9 @@ and this project uses [Semantic Versioning](https://semver.org/).
   receives. In-memory workers keep both checks.
 - Raise the minimum supported Rust version to 1.86. The locked dependency
   graph (the `icu_*` crates behind URL parsing) no longer builds on 1.85.
+- Add `EngineFeature::TaskRestore` (floor v0.114.0). The v0.94.14 baseline has no
+  task restore endpoint, so the live restore test now skips on older engines and
+  the support matrix records the floor.
 
 ### Fixed
 
