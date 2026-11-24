@@ -49,6 +49,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 - Stop the per-task cancellation watcher when a task finishes, so long-running
   workers no longer keep one parked task (two for durable tasks) per execution.
+- Stop `GrpcTransport` from keeping every task log line in memory for the life
+  of the process; lines are still sent to the engine with `PutLog`.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Preserve explicit desired worker identity on normal single and bulk submissions.
