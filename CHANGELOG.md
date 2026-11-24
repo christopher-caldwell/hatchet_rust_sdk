@@ -63,6 +63,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
   per task run for `ctx.log`) instead of discarding them.
 - Return `Error::NonRetryable` instead of a retryable `Error::Transport` when
   waiting on a gRPC run whose task failed with `Error::NonRetryable`.
+- Enforce a task handle's `ConcurrencyConfig` `max_runs` per concurrency key on
+  the worker instead of as one limit shared by every run. Only `input` and
+  `input.<field>` expressions are evaluated locally; any other expression keeps
+  the previous worker-wide `max_runs` limit.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Stop reporting abandoned durable waits (such as a timed-out `wait_for_event`)
