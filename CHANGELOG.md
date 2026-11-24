@@ -100,6 +100,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - Avoid health-test port conflicts on hosts with exhausted source-port ranges.
 - Track the actual smoke-worker processes and bound their shutdown so failed
   local proofs cannot leave workers running against a later test engine.
+- Register tasks in `#[workflow]` modules whose attribute is path-qualified, such
+  as `#[another_hatchet_sdk::task]`; `register_all` previously skipped them.
 
 ## [0.1.0] - 2026-07-16
 
