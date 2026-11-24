@@ -1982,24 +1982,7 @@ fn condition_base_to_proto(base: &BaseMatchCondition) -> v1::BaseMatchCondition 
 }
 
 fn duration_to_engine_string(d: Duration) -> String {
-    let total_secs = d.as_secs();
-    if total_secs == 0 {
-        return "0s".to_owned();
-    }
-    let hours = total_secs / 3600;
-    let mins = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    let mut result = String::new();
-    if hours > 0 {
-        result.push_str(&format!("{hours}h"));
-    }
-    if mins > 0 {
-        result.push_str(&format!("{mins}m"));
-    }
-    if secs > 0 || result.is_empty() {
-        result.push_str(&format!("{secs}s"));
-    }
-    result
+    crate::grpc_transport::duration_to_string(d)
 }
 
 fn system_time_to_iso_string(time: &SystemTime) -> String {
@@ -2168,6 +2151,24 @@ mod tests {
             .into();
         assert!(condition_validation_errors(&valid).is_empty());
         assert_eq!(condition_validation_errors(&or([])).len(), 1);
+    }
+
+    #[test]
+    fn durable_sleep_conditions_round_sub_second_sleeps_up_for_the_engine() {
+        for (duration, expected) in [
+            (Duration::from_millis(100), "1s"),
+            (Duration::from_millis(999), "1s"),
+            (Duration::from_millis(1_001), "2s"),
+            (Duration::from_millis(1_500), "2s"),
+            (Duration::from_secs(30), "30s"),
+        ] {
+            let proto = condition_to_durable_listener_proto(&Condition::sleep_for(duration), None);
+            assert_eq!(proto.sleep_conditions.len(), 1);
+            assert_eq!(
+                proto.sleep_conditions[0].sleep_for, expected,
+                "{duration:?}"
+            );
+        }
     }
 
     #[test]

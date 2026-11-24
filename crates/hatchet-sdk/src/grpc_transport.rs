@@ -2351,9 +2351,15 @@ fn base_to_proto(base: &crate::durable::BaseMatchCondition) -> proto::v1::BaseMa
     }
 }
 
-/// Converts a `Duration` to the engine's expected string format (e.g. `10s`, `5m`, `1h30m`).
+/// Converts a `Duration` to the engine's duration string format, built from `h`, `m` and `s`
+/// components with zero components omitted (e.g. `10s`, `5m`, `1h30m`).
+///
+/// Sub-second values round up to the next whole second because the engine's duration format has
+/// no sub-second unit, so the engine is never asked for a shorter duration than the one
+/// requested: 100 ms and 1 ns become `1s`, and 1.5 s becomes `2s`. Whole-second durations are
+/// unchanged, and `Duration::ZERO` produces `0s`.
 pub fn duration_to_string(d: std::time::Duration) -> String {
-    let total_secs = d.as_secs();
+    let total_secs = d.as_nanos().div_ceil(1_000_000_000);
     if total_secs == 0 {
         return "0s".to_owned();
     }
@@ -2369,7 +2375,7 @@ pub fn duration_to_string(d: std::time::Duration) -> String {
     if mins > 0 {
         result.push_str(&format!("{mins}m"));
     }
-    if secs > 0 || result.is_empty() {
+    if secs > 0 {
         result.push_str(&format!("{secs}s"));
     }
     result
@@ -2421,7 +2427,7 @@ mod tests {
 
     use super::{
         V1LogLineList, WorkflowRegistration, completion_event_from_result,
-        decode_step_action_payload, infer_trigger_data_from_metadata,
+        decode_step_action_payload, duration_to_string, infer_trigger_data_from_metadata,
         rate_limit_duration_to_legacy_proto, rate_limit_duration_to_v1_proto,
         rendered_to_proto_task, resolve_action_task_name, run_opt_label_to_proto,
         run_output_from_details, serialize_input_schema, worker_action_id,
@@ -2442,6 +2448,28 @@ mod tests {
             output: Some(serde_json::to_vec(&output).expect("test output should serialize")),
             readable_id: readable_id.to_owned(),
             is_evicted: false,
+        }
+    }
+
+    #[test]
+    fn duration_to_string_rounds_up_to_whole_seconds_and_never_shortens() {
+        let cases = [
+            (std::time::Duration::ZERO, "0s"),
+            (std::time::Duration::from_nanos(1), "1s"),
+            (std::time::Duration::from_micros(1_500), "1s"),
+            (std::time::Duration::from_millis(100), "1s"),
+            (std::time::Duration::from_millis(999), "1s"),
+            (std::time::Duration::from_secs(1), "1s"),
+            (std::time::Duration::from_millis(1_001), "2s"),
+            (std::time::Duration::from_millis(1_500), "2s"),
+            (std::time::Duration::from_millis(90_500), "1m31s"),
+            (std::time::Duration::from_millis(3_600_999), "1h1s"),
+            (std::time::Duration::from_secs(5), "5s"),
+            (std::time::Duration::from_secs(5_400), "1h30m"),
+            (std::time::Duration::from_secs(3_661), "1h1m1s"),
+        ];
+        for (duration, expected) in cases {
+            assert_eq!(duration_to_string(duration), expected, "{duration:?}");
         }
     }
 
