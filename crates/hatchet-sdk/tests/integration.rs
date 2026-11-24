@@ -40,21 +40,24 @@ async fn wait_for_status(
     run_id: &WorkflowRunId,
     expected: RunStatus,
 ) {
-    tokio::time::timeout(TEST_TIMEOUT, async {
+    // A run can be missing from the REST API for a moment after it is
+    // triggered, so a failed read is retried like any other status mismatch.
+    let mut last = None;
+    let reached = tokio::time::timeout(TEST_TIMEOUT, async {
         loop {
-            let status = client
-                .runs()
-                .get_status(run_id)
-                .await
-                .expect("read engine status");
-            if status == expected {
+            let observed = client.runs().get_status(run_id).await;
+            if matches!(&observed, Ok(status) if *status == expected) {
                 break;
             }
+            last = Some(observed);
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
-    .await
-    .expect("engine should report the expected run status");
+    .await;
+    assert!(
+        reached.is_ok(),
+        "engine should report run status {expected:?}; last read: {last:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
