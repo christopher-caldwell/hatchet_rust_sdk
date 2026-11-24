@@ -47,6 +47,15 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - Breaking: `Transport::append_run_log` now takes the task run ID after the
   workflow run ID and returns `Result<()>`. Custom transports must send the line
   under the task run ID and return delivery errors.
+- Breaking for code that builds `WorkerStartOpts` with a struct literal:
+  `WorkerStartOpts` has a new `control: WorkerControl` field (use
+  `WorkerControl::default()` outside a `Worker`). Engine-backed transports
+  should call `WorkerControl::registered` after each registration. `Transport`
+  gains `set_worker_paused` and `upsert_worker_labels`, which default to
+  `Error::UnsupportedOperation`.
+- Engine-backed workers no longer fail engine-assigned work through the local
+  pause and worker-label checks; the engine decides which work the worker
+  receives. In-memory workers keep both checks.
 
 ### Fixed
 
@@ -70,18 +79,6 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - Send each task's STARTED acknowledgment from its own spawned task, so the
   worker reads the next assignment, cancellation or heartbeat without waiting
   for the previous STARTED round trip.
-- Breaking for code that builds `WorkerStartOpts` with a struct literal:
-  `WorkerStartOpts` has a new `control: WorkerControl` field (use
-  `WorkerControl::default()` outside a `Worker`). Engine-backed transports
-  should call `WorkerControl::registered` after each registration. `Transport`
-  gains `set_worker_paused` and `upsert_worker_labels`, which default to
-  `Error::UnsupportedOperation`.
-- Engine-backed workers no longer fail engine-assigned work through the local
-  pause and worker-label checks; the engine decides which work the worker
-  receives. In-memory workers keep both checks.
-
-### Fixed
-
 - `WorkerHandle::pause`/`unpause`/`upsert_labels` and `ctx.upsert_worker_labels`
   now update the engine on engine-backed workers (REST worker pause,
   `UpsertWorkerLabels`) before changing local state, and return its errors. A
