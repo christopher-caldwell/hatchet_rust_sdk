@@ -643,15 +643,31 @@ impl Transport for GrpcTransport {
                 return Ok(());
             }
 
-            let response = match self
+            // Register with the current labels, then re-apply a requested pause
+            // and the labels upserted since start (with their engine types):
+            // re-registration must not undo either. `registered` calls the
+            // engine only for changes that were requested.
+            let mut labels = opts.labels.clone();
+            labels.extend(opts.control.labels().await);
+            let registered = match self
                 .register_worker(
                     &opts.worker_name,
                     actions.clone(),
-                    opts.labels.clone(),
+                    labels,
                     opts.slot_config.clone(),
                 )
                 .await
             {
+                Ok(response) => {
+                    let worker_id = response.worker_id.clone();
+                    opts.control
+                        .registered(self, &worker_id)
+                        .await
+                        .map(|()| response)
+                }
+                Err(error) => Err(error),
+            };
+            let response = match registered {
                 Ok(response) => response,
                 Err(error) if !connected_once => return Err(error),
                 Err(error) => {
@@ -1257,6 +1273,68 @@ impl Transport for GrpcTransport {
 
     fn rest_api(&self) -> Option<Arc<RestApiClient>> {
         Some(Arc::clone(&self.rest_api_client))
+    }
+
+    async fn set_worker_paused(&self, worker_id: &str, paused: bool) -> Result<()> {
+        if paused {
+            self.rest_api_client.pause_worker(worker_id).await
+        } else {
+            self.rest_api_client.unpause_worker(worker_id).await
+        }
+    }
+
+    async fn upsert_worker_labels(
+        &self,
+        worker_id: &str,
+        labels: &std::collections::BTreeMap<String, crate::task::LabelValue>,
+    ) -> Result<()> {
+        let labels = labels
+            .iter()
+            .map(|(key, value)| worker_label_to_pb(key, value).map(|label| (key.clone(), label)))
+            .collect::<Result<HashMap<String, proto::dispatcher::WorkerLabels>>>()?;
+        let dispatcher = self.dispatcher.clone();
+        retry(
+            || {
+                let mut client = dispatcher.clone();
+                let authed = self.authed_request(proto::dispatcher::UpsertWorkerLabelsRequest {
+                    worker_id: worker_id.to_owned(),
+                    labels: labels.clone(),
+                });
+                async move {
+                    client
+                        .upsert_worker_labels(authed)
+                        .await
+                        .map(|_| ())
+                        .map_err(grpc_error)
+                }
+            },
+            &self.retry_config,
+        )
+        .await
+    }
+}
+
+/// The dispatcher carries worker label values as a string or a 32-bit integer.
+fn worker_label_to_pb(
+    key: &str,
+    value: &crate::task::LabelValue,
+) -> Result<proto::dispatcher::WorkerLabels> {
+    match value {
+        crate::task::LabelValue::Int(int) => {
+            let int_value = i32::try_from(*int).map_err(|_| {
+                Error::InputValidation(vec![format!(
+                    "worker label '{key}' value {int} does not fit the engine's 32-bit integer"
+                )])
+            })?;
+            Ok(proto::dispatcher::WorkerLabels {
+                str_value: None,
+                int_value: Some(int_value),
+            })
+        }
+        other => Ok(proto::dispatcher::WorkerLabels {
+            str_value: Some(other.as_string()),
+            int_value: None,
+        }),
     }
 }
 
@@ -2930,6 +3008,7 @@ mod tests {
                 crate::transport::WorkerConnectionState::Starting,
             )
             .0,
+            control: crate::transport::WorkerControl::default(),
         };
         opts.task_dispatchers
             .insert("wf:step".to_owned(), dispatcher.clone());

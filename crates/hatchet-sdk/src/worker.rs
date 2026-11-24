@@ -18,8 +18,8 @@ use crate::context::{ContextIds, InMemoryContext, TriggerData};
 use crate::durable::InMemoryDurableContext;
 use crate::error::{Error, Result};
 use crate::health::{HealthServer, HealthState};
-use crate::task::{DesiredLabelConfig, TaskConfig, WorkerLabelComparator};
-use crate::transport::{Transport, WorkerConnectionState, WorkerStartOpts};
+use crate::task::{DesiredLabelConfig, LabelValue, TaskConfig, WorkerLabelComparator};
+use crate::transport::{Transport, WorkerConnectionState, WorkerControl, WorkerStartOpts};
 use tokio_util::sync::CancellationToken;
 
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'static>>;
@@ -310,6 +310,34 @@ async fn acquire_task_permit(
     match limit {
         Some(limit) => limit.acquire(input).await,
         None => None,
+    }
+}
+
+/// Engine operations a non-generic [`WorkerHandle`] needs from its transport.
+#[async_trait::async_trait]
+trait WorkerEngine: Send + Sync {
+    async fn set_paused(&self, worker_id: &str, paused: bool) -> Result<()>;
+    async fn upsert_labels(
+        &self,
+        worker_id: &str,
+        labels: &BTreeMap<String, LabelValue>,
+    ) -> Result<()>;
+}
+
+struct TransportWorkerEngine<T>(Arc<T>);
+
+#[async_trait::async_trait]
+impl<T: Transport + 'static> WorkerEngine for TransportWorkerEngine<T> {
+    async fn set_paused(&self, worker_id: &str, paused: bool) -> Result<()> {
+        self.0.set_worker_paused(worker_id, paused).await
+    }
+
+    async fn upsert_labels(
+        &self,
+        worker_id: &str,
+        labels: &BTreeMap<String, LabelValue>,
+    ) -> Result<()> {
+        self.0.upsert_worker_labels(worker_id, labels).await
     }
 }
 
@@ -699,6 +727,12 @@ impl<T: Transport + 'static> Worker<T> {
         let paused = Arc::new(RwLock::new(false));
         let initial_labels = self.labels.clone();
         let labels = Arc::new(RwLock::new(initial_labels.clone()));
+        let control = WorkerControl::new(Arc::clone(&paused), Arc::clone(&labels));
+        // The engine owns routing for engine-backed workers, so pause and label
+        // changes must reach it; in-memory workers keep them process-local.
+        let engine = self.transport.rest_api().map(|_| {
+            Arc::new(TransportWorkerEngine(Arc::clone(&self.transport))) as Arc<dyn WorkerEngine>
+        });
         let transport = Arc::clone(&self.transport);
         let state = Arc::clone(&self.state);
         let worker_name = self.name.clone();
@@ -730,12 +764,14 @@ impl<T: Transport + 'static> Worker<T> {
             durable_task_dispatchers,
             cancel_token: cancel_token.clone(),
             connection_tx,
+            control: control.clone(),
         };
 
         let runtime = Arc::new(WorkerRuntime {
             name: self.name,
             paused: Arc::clone(&paused),
             labels: Arc::clone(&labels),
+            control: control.clone(),
             transport: self.transport,
             non_durable_registry: self.non_durable_registry,
             durable_registry: self.durable_registry,
@@ -857,6 +893,8 @@ impl<T: Transport + 'static> Worker<T> {
             transport_join: Some(transport_join),
             paused,
             labels,
+            control,
+            engine,
             cancel_token,
             ready_rx: tokio::sync::Mutex::new(ready_rx),
             state: self.state,
@@ -881,6 +919,8 @@ pub struct WorkerHandle {
     transport_join: Option<JoinHandle<Result<()>>>,
     paused: Arc<tokio::sync::RwLock<bool>>,
     labels: Arc<tokio::sync::RwLock<BTreeMap<String, String>>>,
+    control: WorkerControl,
+    engine: Option<Arc<dyn WorkerEngine>>,
     cancel_token: CancellationToken,
     ready_rx: tokio::sync::Mutex<watch::Receiver<WorkerLifecycleState>>,
     state: SharedFeatureState,
@@ -1054,14 +1094,38 @@ impl WorkerHandle {
         this.wait().await
     }
 
+    /// Pauses the worker. On an engine-backed worker the engine is told first,
+    /// so it stops assigning work; a worker that has not registered yet is
+    /// paused as soon as it registers, and the pause is re-applied after a
+    /// reconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine error; local state is then left unchanged.
     pub async fn pause(&self) -> Result<()> {
-        *self.paused.write().await = true;
-        self.sync_worker_state().await;
-        Ok(())
+        self.set_paused(true).await
     }
 
+    /// Unpauses the worker, telling the engine first on an engine-backed worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine error; local state is then left unchanged.
     pub async fn unpause(&self) -> Result<()> {
-        *self.paused.write().await = false;
+        self.set_paused(false).await
+    }
+
+    async fn set_paused(&self, paused: bool) -> Result<()> {
+        {
+            // Held until the local change is made; see `WorkerControl`.
+            let engine_state = self.control.engine.lock().await;
+            if let (Some(engine), Some(worker_id)) =
+                (&self.engine, engine_state.worker_id.as_deref())
+            {
+                engine.set_paused(worker_id, paused).await?;
+            }
+            *self.paused.write().await = paused;
+        }
         self.sync_worker_state().await;
         Ok(())
     }
@@ -1070,8 +1134,31 @@ impl WorkerHandle {
         Ok(*self.paused.read().await)
     }
 
+    /// Adds or replaces worker labels. On an engine-backed worker the engine is
+    /// told first, so routing uses the new labels; a worker that has not
+    /// registered yet gets them when it registers, and they are re-applied
+    /// after a reconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine error; local state is then left unchanged.
     pub async fn upsert_labels(&self, labels: BTreeMap<String, String>) -> Result<()> {
-        self.labels.write().await.extend(labels);
+        {
+            // Held until the local change is made; see `WorkerControl`.
+            let mut engine_state = self.control.engine.lock().await;
+            if let Some(engine) = &self.engine {
+                let engine_labels: BTreeMap<String, LabelValue> = labels
+                    .iter()
+                    .map(|(key, value)| (key.clone(), LabelValue::String(value.clone())))
+                    .collect();
+                if let Some(worker_id) = engine_state.worker_id.as_deref() {
+                    engine.upsert_labels(worker_id, &engine_labels).await?;
+                }
+                // Re-sent after every (re)registration.
+                engine_state.upserted_labels.extend(engine_labels);
+            }
+            self.labels.write().await.extend(labels);
+        }
         self.sync_worker_state().await;
         Ok(())
     }
@@ -1195,6 +1282,7 @@ struct WorkerRuntime<T: Transport> {
     name: String,
     paused: Arc<RwLock<bool>>,
     labels: Arc<RwLock<BTreeMap<String, String>>>,
+    control: WorkerControl,
     transport: Arc<T>,
     non_durable_registry: Arc<BTreeMap<String, Arc<dyn ErasedTaskFn<T>>>>,
     durable_registry: Arc<BTreeMap<String, Arc<dyn ErasedDurableTaskFn<T>>>>,
@@ -1358,11 +1446,15 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                     ))));
                     return;
                 };
-                if *self.paused.read().await {
+                // The engine routes work to engine-backed workers by their
+                // engine-side pause state and labels; failing its assignments
+                // here would only burn retries.
+                let local_gates = self.transport.rest_api().is_none();
+                if local_gates && *self.paused.read().await {
                     Err(Error::Worker(format!("worker '{}' is paused", self.name)))
                 } else {
                     let worker_labels = self.labels.read().await.clone();
-                    if !handler.matches_worker_labels(&worker_labels) {
+                    if local_gates && !handler.matches_worker_labels(&worker_labels) {
                         Err(Error::Worker(format!(
                             "worker '{}' does not satisfy labels for task '{}'",
                             self.name, task_name
@@ -1382,6 +1474,7 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                             .with_run_opts(&run_opts)
                             .with_retry_count(retry_count)
                             .with_worker_labels(worker_labels)
+                            .with_worker_control(self.control.clone())
                             .with_cancel_token(cancel_token)
                             .with_parent_outputs(parent_outputs)
                             .with_trigger_data(trigger_data)
@@ -1513,11 +1606,15 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                     ))));
                     return;
                 };
-                if *self.paused.read().await {
+                // The engine routes work to engine-backed workers by their
+                // engine-side pause state and labels; failing its assignments
+                // here would only burn retries.
+                let local_gates = self.transport.rest_api().is_none();
+                if local_gates && *self.paused.read().await {
                     Err(Error::Worker(format!("worker '{}' is paused", self.name)))
                 } else {
                     let worker_labels = self.labels.read().await.clone();
-                    if !handler.matches_worker_labels(&worker_labels) {
+                    if local_gates && !handler.matches_worker_labels(&worker_labels) {
                         Err(Error::Worker(format!(
                             "worker '{}' does not satisfy labels for task '{}'",
                             self.name, task_name
@@ -1541,6 +1638,7 @@ impl<T: Transport + 'static> WorkerRuntime<T> {
                         .with_run_opts(&run_opts)
                         .with_retry_count(retry_count)
                         .with_worker_labels(worker_labels)
+                        .with_worker_control(self.control.clone())
                         .with_cancel_token(cancel_token)
                         .with_parent_outputs(parent_outputs)
                         .with_trigger_data(trigger_data)

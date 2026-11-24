@@ -90,7 +90,7 @@ pub use task::{
 };
 pub use transport::{
     InMemoryTransport, SubmittedRun, TaskRegistration, Transport, WorkerConnectionState,
-    WorkerStartOpts, WorkflowRegistration,
+    WorkerControl, WorkerStartOpts, WorkflowRegistration,
 };
 pub use worker::{Worker, WorkerBuilder, WorkerHandle};
 pub use workflow::{

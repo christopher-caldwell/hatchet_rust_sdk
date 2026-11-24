@@ -698,6 +698,12 @@ impl<T: Transport> InMemoryDurableContext<T> {
     }
 
     #[must_use]
+    pub(crate) fn with_worker_control(mut self, control: crate::transport::WorkerControl) -> Self {
+        self.base = self.base.with_worker_control(control);
+        self
+    }
+
+    #[must_use]
     pub fn with_run_opts(mut self, opts: &RunOpts) -> Self {
         self.base = self.base.with_run_opts(opts);
         self

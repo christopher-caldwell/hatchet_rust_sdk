@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,7 +15,9 @@ use crate::durable::{RenderedConditions, task_conditions_to_pb};
 use crate::durable_listener::DurableListenerClient;
 use crate::error::{Error, Result};
 use crate::rest_client::RestApiClient;
-use crate::task::{ConcurrencyConfig, DesiredLabelConfig, RateLimit, RateLimitDuration, SlotType};
+use crate::task::{
+    ConcurrencyConfig, DesiredLabelConfig, LabelValue, RateLimit, RateLimitDuration, SlotType,
+};
 use crate::worker::{TaskContextData, WorkerDispatcher};
 use crate::workflow::{WorkflowDeclaration, WorkflowStep};
 use tokio_util::sync::CancellationToken;
@@ -112,6 +114,101 @@ pub struct WorkerStartOpts {
     pub durable_task_dispatchers: std::collections::HashMap<String, WorkerDispatcher>,
     pub cancel_token: CancellationToken,
     pub connection_tx: tokio::sync::watch::Sender<WorkerConnectionState>,
+    /// Pause and label state the worker handle can change after start.
+    pub control: WorkerControl,
+}
+
+/// Worker state that a [`crate::WorkerHandle`] or a task context can change
+/// after the worker starts.
+///
+/// Engine-backed transports register with [`WorkerControl::labels`] and call
+/// [`WorkerControl::registered`] after every successful registration. The
+/// handle then knows the engine-assigned worker ID, and a pause or label
+/// change made before registration or across a reconnect is applied to the
+/// newly registered worker.
+#[derive(Debug, Clone, Default)]
+pub struct WorkerControl {
+    // Locked across every engine update, so a pause or label change and a
+    // (re)registration cannot interleave and leave the engine stale. Code that
+    // holds this lock calls only the transport, never back into this type.
+    pub(crate) engine: Arc<Mutex<EngineWorkerState>>,
+    pub(crate) paused: Arc<RwLock<bool>>,
+    pub(crate) labels: Arc<RwLock<BTreeMap<String, String>>>,
+}
+
+/// Engine-side worker state, guarded by the [`WorkerControl`] lock.
+#[derive(Debug, Default)]
+pub(crate) struct EngineWorkerState {
+    /// Worker ID from the latest successful registration.
+    pub(crate) worker_id: Option<String>,
+    /// Labels upserted after start, with their engine types; re-sent after
+    /// every registration.
+    pub(crate) upserted_labels: BTreeMap<String, LabelValue>,
+}
+
+impl WorkerControl {
+    pub(crate) fn new(
+        paused: Arc<RwLock<bool>>,
+        labels: Arc<RwLock<BTreeMap<String, String>>>,
+    ) -> Self {
+        Self {
+            engine: Arc::default(),
+            paused,
+            labels,
+        }
+    }
+
+    /// Current worker labels: the start-time labels plus later handle upserts.
+    pub async fn labels(&self) -> BTreeMap<String, String> {
+        self.labels.read().await.clone()
+    }
+
+    /// Records the engine-assigned worker ID, then re-applies a requested
+    /// pause and any labels upserted since start.
+    ///
+    /// The engine is called only for changes that were requested: a worker
+    /// that was never paused or relabelled makes no extra calls here.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error if the pause or labels cannot be re-applied.
+    pub async fn registered<T: Transport + ?Sized>(
+        &self,
+        transport: &T,
+        worker_id: &str,
+    ) -> Result<()> {
+        let mut engine = self.engine.lock().await;
+        engine.worker_id = Some(worker_id.to_owned());
+        let paused = *self.paused.read().await;
+        if paused {
+            transport.set_worker_paused(worker_id, true).await?;
+        }
+        if !engine.upserted_labels.is_empty() {
+            transport
+                .upsert_worker_labels(worker_id, &engine.upserted_labels)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Sends labels upserted from a task context to the engine and records
+    /// them for re-registration. Uses the latest registered worker ID, or the
+    /// context's worker ID before the first registration is recorded.
+    pub(crate) async fn upsert_context_labels<T: Transport + ?Sized>(
+        &self,
+        transport: &T,
+        context_worker_id: &str,
+        labels: &BTreeMap<String, LabelValue>,
+    ) -> Result<()> {
+        let mut engine = self.engine.lock().await;
+        let worker_id = engine
+            .worker_id
+            .clone()
+            .unwrap_or_else(|| context_worker_id.to_owned());
+        transport.upsert_worker_labels(&worker_id, labels).await?;
+        engine.upserted_labels.extend(labels.clone());
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +435,35 @@ pub trait Transport: Send + Sync {
     async fn delete_rate_limit(&self, _key: &str) -> Result<()> {
         Err(Error::Transport(
             "rate-limit delete is not supported by this transport".to_owned(),
+        ))
+    }
+
+    /// Pauses or unpauses a registered worker in the engine.
+    ///
+    /// # Errors
+    ///
+    /// The default returns [`Error::UnsupportedOperation`]; engine-backed
+    /// transports return the engine's error.
+    async fn set_worker_paused(&self, _worker_id: &str, _paused: bool) -> Result<()> {
+        Err(Error::UnsupportedOperation(
+            "worker pause requires an engine-backed transport".to_owned(),
+        ))
+    }
+
+    /// Upserts labels on a registered worker in the engine.
+    ///
+    /// # Errors
+    ///
+    /// The default returns [`Error::UnsupportedOperation`]; engine-backed
+    /// transports return the engine's error, or [`Error::InputValidation`] for
+    /// a value the engine cannot carry.
+    async fn upsert_worker_labels(
+        &self,
+        _worker_id: &str,
+        _labels: &BTreeMap<String, LabelValue>,
+    ) -> Result<()> {
+        Err(Error::UnsupportedOperation(
+            "worker label upserts require an engine-backed transport".to_owned(),
         ))
     }
 
