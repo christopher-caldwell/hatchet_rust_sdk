@@ -67,6 +67,9 @@ and this project uses [Semantic Versioning](https://semver.org/).
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Stop reporting abandoned durable waits (such as a timed-out `wait_for_event`)
   to the engine as awaited on every worker status tick.
+- Stop engine-backed durable sleeps, waits, event waits and child spawns with an
+  error when their invocation is cancelled or evicted, instead of keeping the
+  handler and its durable slot parked.
 - Preserve explicit desired worker identity on normal single and bulk submissions.
 - Stop engine-backed clients from keeping every submitted run and its input in
   an unread client-side map for the client's lifetime.
