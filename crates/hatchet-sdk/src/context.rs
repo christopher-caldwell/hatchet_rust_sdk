@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use another_hatchet_core::{Priority, RunOpts, WorkflowRunId};
 use async_trait::async_trait;
@@ -135,6 +135,7 @@ pub struct InMemoryContext<T: Transport> {
     batch_cancel_token: Option<CancellationToken>,
     logs: tokio::sync::Mutex<Vec<(LogLevel, String)>>,
     stream: tokio::sync::Mutex<Vec<Value>>,
+    log_send_failure_reported: AtomicBool,
 }
 
 impl<T: Transport> InMemoryContext<T> {
@@ -161,6 +162,7 @@ impl<T: Transport> InMemoryContext<T> {
             batch_cancel_token: None,
             logs: tokio::sync::Mutex::new(Vec::new()),
             stream: tokio::sync::Mutex::new(Vec::new()),
+            log_send_failure_reported: AtomicBool::new(false),
         }
     }
 
@@ -590,9 +592,28 @@ impl<T: Transport> Context for InMemoryContext<T> {
 
     async fn log(&self, level: LogLevel, message: impl Into<String> + Send) -> Result<()> {
         let message = message.into();
-        self.transport
-            .append_run_log(&self.ids.workflow_run_id, level, message.clone())
+        // PutLog is keyed by the task's external run ID. A line that cannot be
+        // delivered does not fail the task. The first failure for this task run
+        // is reported; later ones are not, so a rejecting engine cannot flood
+        // stderr with one line per log call.
+        let sent = self
+            .transport
+            .append_run_log(
+                &self.ids.workflow_run_id,
+                &self.ids.task_run_id,
+                level,
+                message.clone(),
+            )
             .await;
+        if let Some(error) = sent
+            .err()
+            .filter(|_| !self.log_send_failure_reported.swap(true, Ordering::Relaxed))
+        {
+            eprintln!(
+                "failed to send log line for task run '{}': {error}; further log send failures for this task run are not reported",
+                self.ids.task_run_id
+            );
+        }
         self.logs.lock().await.push((level, message));
         Ok(())
     }
@@ -811,7 +832,13 @@ mod batch_cancellation_tests {
         async fn stream_run(&self, _: &WorkflowRunId) -> Result<Vec<Value>> {
             unreachable!()
         }
-        async fn append_run_log(&self, _: &WorkflowRunId, _: LogLevel, _: String) {
+        async fn append_run_log(
+            &self,
+            _: &WorkflowRunId,
+            _: &str,
+            _: LogLevel,
+            _: String,
+        ) -> Result<()> {
             unreachable!()
         }
         async fn refresh_timeout(&self, _: &str, _: &str) -> Result<()> {

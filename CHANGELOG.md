@@ -44,6 +44,9 @@ and this project uses [Semantic Versioning](https://semver.org/).
   ID, node ID and branch ID and returns `DurableBranchResult`; `restore_task`
   accepts a task external ID and returns `RestoreTaskResult`. The previous
   workflow replay aliases were removed. In-memory recovery is explicitly unsupported.
+- Breaking: `Transport::append_run_log` now takes the task run ID after the
+  workflow run ID and returns `Result<()>`. Custom transports must send the line
+  under the task run ID and return delivery errors.
 
 ### Fixed
 
@@ -55,6 +58,9 @@ and this project uses [Semantic Versioning](https://semver.org/).
   `on_success_durable` as durable tasks instead of silently dropping the flag.
 - Round durable and step-condition sleeps sent to the engine up to whole seconds
   instead of truncating them, so sub-second sleeps become `1s` rather than `0s`.
+- Send `ctx.log` lines and worker cancellation-delay warnings under the task run
+  ID instead of the workflow run ID, and report failed log sends on stderr (once
+  per task run for `ctx.log`) instead of discarding them.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Preserve explicit desired worker identity on normal single and bulk submissions.
