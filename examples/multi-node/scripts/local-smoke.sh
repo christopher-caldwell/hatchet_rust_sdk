@@ -40,8 +40,24 @@ perform_cleanup() {
   CLEANED_UP=1
 }
 
+# Prints the tail of each worker log and the engine log when the run failed, so a
+# failed CI job can be diagnosed from its own output.
+report_failure_logs() {
+  local log
+  for log in "$EXAMPLE/target/smoke/orders.log" "$EXAMPLE/target/smoke/notifications.log"; do
+    [[ -f "$log" ]] || continue
+    echo "smoke_failure_log=$(basename "$log")"
+    tail -n 60 "$log" || true
+  done
+  if docker inspect "$HATCHET" >/dev/null 2>&1; then
+    echo "smoke_failure_log=hatchet-engine"
+    docker logs --tail 60 "$HATCHET" 2>&1 | sed -E 's#postgres(ql)?://[^ ]+#postgres://[REDACTED]#g' || true
+  fi
+}
+
 cleanup() {
   status=$?
+  if [[ "$status" != "0" && -z "${SMOKE_TEST_CLEANUP_ONLY:-}" ]]; then report_failure_logs; fi
   perform_cleanup
   echo "cleanup_status=complete"
   exit "$status"
