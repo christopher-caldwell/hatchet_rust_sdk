@@ -543,6 +543,54 @@ async fn on_success_hook_is_materialized_as_terminal_step() {
 }
 
 #[tokio::test]
+async fn durable_on_success_hook_runs_on_the_durable_worker() {
+    let transport = Arc::new(InMemoryTransport::new());
+    let client = Client::new(Arc::clone(&transport));
+    let leaf = client.task::<u32, u32>("leaf");
+    let on_success = client.durable_task::<u32, u32>("hook.durable-success");
+
+    client
+        .worker("durable-hook-worker")
+        .register_task(&leaf, |input, _ctx| async move { Ok(input + 1) })
+        .register_durable_task(&on_success, |input, _ctx| async move { Ok(input * 2) })
+        .build()
+        .start()
+        .unwrap()
+        .wait_until_ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let declaration =
+        WorkflowDeclaration::<serde_json::Value, serde_json::Value>::new("durable-hook-wf")
+            .step(&leaf, TaskConfig::default())
+            .on_success_durable(&on_success);
+    client
+        .register_workflow(declaration)
+        .await
+        .expect("workflow registration succeeds");
+
+    let registrations = transport.workflow_registrations().await;
+    assert_eq!(registrations[0].tasks.len(), 2);
+    assert_eq!(
+        registrations[0].tasks[1].readable_id,
+        "hook.durable-success"
+    );
+    assert!(
+        registrations[0].tasks[1].is_durable,
+        "on_success_durable materialized as a non-durable step"
+    );
+
+    // The hook is registered only as a durable handler, so the run completes
+    // only if the step is looked up in the durable dispatcher map.
+    let output = client
+        .workflow::<u32, u32>("durable-hook-wf")
+        .run(3, RunOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(output, 6);
+}
+
+#[tokio::test]
 async fn workers_client_pause_lifecycle_helpers() {
     let transport = Arc::new(InMemoryTransport::new());
     let client = Client::new(transport);

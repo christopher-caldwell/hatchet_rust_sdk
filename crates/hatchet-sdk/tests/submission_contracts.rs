@@ -356,3 +356,53 @@ async fn rate_pause_rejects_unsupported_engines_and_invalid_time_before_mutation
             .all(|(path, _)| path.ends_with("/GetVersion"))
     );
 }
+
+#[tokio::test]
+async fn durable_failure_and_success_hooks_register_as_durable_tasks() {
+    let h = harness(
+        "v0.114.0",
+        vec![Reply::ok(
+            proto::v1::CreateWorkflowVersionResponse::default(),
+        )],
+    )
+    .await;
+    let step = h.client.task::<Value, Value>("step");
+    let failure = h.client.durable_task::<Value, Value>("failure-hook");
+    let success = h.client.durable_task::<Value, Value>("success-hook");
+    h.client
+        .register_workflow(
+            WorkflowDeclaration::<Value, Value>::new("hooks")
+                .step(&step, TaskConfig::default())
+                .on_failure_durable(&failure)
+                .on_success_durable(&success),
+        )
+        .await
+        .unwrap();
+    let requests = h.requests.lock().await;
+    let (_, body) = requests
+        .iter()
+        .find(|(path, _)| path.ends_with("/PutWorkflow"))
+        .unwrap();
+    let request = proto::v1::CreateWorkflowVersionRequest::decode(body.as_slice()).unwrap();
+    let failure_task = request.on_failure_task.as_ref().expect("on-failure task");
+    assert_eq!(failure_task.readable_id, "failure-hook");
+    assert!(
+        failure_task.is_durable,
+        "on_failure_durable registered with is_durable = false"
+    );
+    let success_task = request
+        .tasks
+        .iter()
+        .find(|task| task.readable_id == "success-hook")
+        .expect("materialized success step");
+    assert!(
+        success_task.is_durable,
+        "on_success_durable registered with is_durable = false"
+    );
+    let plain_step = request
+        .tasks
+        .iter()
+        .find(|task| task.readable_id == "step")
+        .expect("regular step");
+    assert!(!plain_step.is_durable);
+}

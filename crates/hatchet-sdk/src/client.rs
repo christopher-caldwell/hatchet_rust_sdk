@@ -277,8 +277,14 @@ impl<T: Transport + 'static> Client<T> {
                 declaration.name
             ))
         })?;
+        // The hook durability flags are `serde(skip)`, so the type-erasing round
+        // trip resets them; carry them over before materializing the success step.
         let materialized = serde_json::from_value::<WorkflowDeclaration<Value, Value>>(serialized)
-            .map(WorkflowDeclaration::materialized)
+            .map(|mut erased| {
+                erased.on_failure_is_durable = declaration.on_failure_is_durable;
+                erased.on_success_is_durable = declaration.on_success_is_durable;
+                erased.materialized()
+            })
             .map_err(|error| {
                 Error::InputSerialization(format!(
                     "workflow declaration '{}': {error}",

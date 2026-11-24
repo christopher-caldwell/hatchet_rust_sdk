@@ -51,6 +51,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
   workers no longer keep one parked task (two for durable tasks) per execution.
 - Stop `GrpcTransport` from keeping every task log line in memory for the life
   of the process; lines are still sent to the engine with `PutLog`.
+- Register failure and success hooks declared with `on_failure_durable` /
+  `on_success_durable` as durable tasks instead of silently dropping the flag.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Preserve explicit desired worker identity on normal single and bulk submissions.
