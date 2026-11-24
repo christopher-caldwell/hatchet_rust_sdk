@@ -511,7 +511,7 @@ where
 
         // See `run_no_wait`: the local run map is only read without a REST API.
         let record_locally = self.transport.rest_api().is_none();
-        for (run_id, input_value) in run_ids.iter().cloned().zip(values.into_iter()) {
+        for (run_id, input_value) in run_ids.iter().cloned().zip(values) {
             if record_locally {
                 record_run(
                     &self.state,
