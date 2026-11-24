@@ -24,8 +24,15 @@ async fn every_run_log_line_is_sent_to_put_log_without_a_local_buffer() {
         } else {
             LogLevel::Warn
         };
-        Transport::append_run_log(h.transport.as_ref(), &run_id, level, format!("line {line}"))
-            .await;
+        Transport::append_run_log(
+            h.transport.as_ref(),
+            &run_id,
+            "task-run-1",
+            level,
+            format!("line {line}"),
+        )
+        .await
+        .expect("the scripted PutLog reply is OK");
     }
 
     let reqs = h.requests.lock().await;
@@ -37,6 +44,7 @@ async fn every_run_log_line_is_sent_to_put_log_without_a_local_buffer() {
     assert_eq!(sent.len(), LINES, "each log line is one PutLog call");
     for (line, request) in sent.iter().enumerate() {
         assert_eq!(request.message, format!("line {line}"));
+        assert_eq!(request.task_run_external_id, "task-run-1");
         let level = if line % 2 == 0 { "INFO" } else { "WARN" };
         assert_eq!(request.level.as_deref(), Some(level));
     }
