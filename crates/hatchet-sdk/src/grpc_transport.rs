@@ -1312,24 +1312,6 @@ impl GrpcTransport {
                 .await
                 .insert(task_run_id.clone(), cancel_token.clone());
 
-            // Send STARTED
-            transport
-                .send_step_action_event(proto::dispatcher::StepActionEvent {
-                    worker_id: worker_id_clone.clone(),
-                    job_id: action.job_id.clone(),
-                    job_run_id: action.job_run_id.clone(),
-                    task_id: action.task_id.clone(),
-                    task_run_external_id: task_run_id.clone(),
-                    action_id: action.action_id.clone(),
-                    event_timestamp: Some(prost_now()),
-                    event_type: proto::dispatcher::StepActionEventType::StepEventTypeStarted as i32,
-                    event_payload: String::new(),
-                    retry_count: None,
-                    should_not_retry: None,
-                    retry_after_ms: None,
-                })
-                .await?;
-
             let ids = crate::context::ContextIds {
                 workflow_name: action.job_name.clone(),
                 task_name: task_name.clone(),
@@ -1371,8 +1353,48 @@ impl GrpcTransport {
                 batch_member_ids: Vec::new(),
             };
 
-            // Spawn execution
+            // Spawn execution. STARTED is sent here, not in the listen loop, so
+            // one acknowledgement round trip does not hold back the next
+            // assignment, heartbeat or cancellation. Awaiting it before the
+            // handler runs keeps STARTED ahead of this task's completion event.
             tokio::spawn(async move {
+                if let Err(error) = transport
+                    .send_step_action_event(proto::dispatcher::StepActionEvent {
+                        worker_id: worker_id_clone.clone(),
+                        job_id: action.job_id.clone(),
+                        job_run_id: action.job_run_id.clone(),
+                        task_id: action.task_id.clone(),
+                        task_run_external_id: task_run_id.clone(),
+                        action_id: action.action_id.clone(),
+                        event_timestamp: Some(prost_now()),
+                        event_type: proto::dispatcher::StepActionEventType::StepEventTypeStarted
+                            as i32,
+                        event_payload: String::new(),
+                        retry_count: None,
+                        should_not_retry: None,
+                        retry_after_ms: None,
+                    })
+                    .await
+                {
+                    {
+                        let mut running = transport.running_cancellations.lock().await;
+                        if running
+                            .get(&task_run_id)
+                            .is_some_and(|token| Arc::ptr_eq(token, &cancel_token))
+                        {
+                            running.remove(&task_run_id);
+                        }
+                    }
+                    let _ = lifecycle_failure_tx.send(format!(
+                        "failed to report start for task run '{task_run_id}': {error}"
+                    ));
+                    return;
+                }
+
+                // A cancellation read while STARTED was in flight has already
+                // cancelled cancel_token. The handler still runs, exactly as for
+                // a cancellation that arrives just after STARTED: it gets the
+                // cancelled context and no completion event is reported.
                 let result = if is_durable {
                     dispatcher
                         .run_durable_task_json_with_context(
@@ -1503,19 +1525,6 @@ impl GrpcTransport {
             .clone()
             .filter(|id| !id.is_empty())
             .ok_or_else(|| Error::Worker("batch assignment omitted batch ID".into()))?;
-        self.batch_event(
-            &action,
-            worker_id,
-            Event::StepEventTypeStarted,
-            member_ids
-                .iter()
-                .map(|id| Item {
-                    task_run_external_id: id.clone(),
-                    ..Default::default()
-                })
-                .collect(),
-        )
-        .await?;
         let group = Arc::new(tokio_util::sync::CancellationToken::new());
         let tokens = member_ids
             .iter()
@@ -1535,7 +1544,38 @@ impl GrpcTransport {
         }
         let transport = self.clone();
         let worker_id = worker_id.to_owned();
+        // STARTED is sent from the spawned task, ahead of the handler, so the
+        // listen loop is not held for its round trip (see handle_assigned_action).
         tokio::spawn(async move {
+            if let Err(error) = transport
+                .batch_event(
+                    &action,
+                    &worker_id,
+                    Event::StepEventTypeStarted,
+                    member_ids
+                        .iter()
+                        .map(|id| Item {
+                            task_run_external_id: id.clone(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                )
+                .await
+            {
+                {
+                    let mut running = transport.running_cancellations.lock().await;
+                    for (id, token) in tokens.iter().chain(std::iter::once(&(batch_id, group))) {
+                        if running
+                            .get(id)
+                            .is_some_and(|current| Arc::ptr_eq(current, token))
+                        {
+                            running.remove(id);
+                        }
+                    }
+                }
+                let _ = failure_tx.send(format!("failed reporting batch start: {error}"));
+                return;
+            }
             let watcher = {
                 let tokens = tokens.clone();
                 let group = Arc::clone(&group);

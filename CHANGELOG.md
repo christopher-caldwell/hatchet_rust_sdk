@@ -67,6 +67,9 @@ and this project uses [Semantic Versioning](https://semver.org/).
   the worker instead of as one limit shared by every run. Only `input` and
   `input.<field>` expressions are evaluated locally; any other expression keeps
   the previous worker-wide `max_runs` limit.
+- Send each task's STARTED acknowledgment from its own spawned task, so the
+  worker reads the next assignment, cancellation or heartbeat without waiting
+  for the previous STARTED round trip.
 - Cancel server-evicted durable invocations before waiting for outbound queue
   capacity, preserving cancellation when handler cleanup aborts the acknowledgment.
 - Stop reporting abandoned durable waits (such as a timed-out `wait_for_event`)
